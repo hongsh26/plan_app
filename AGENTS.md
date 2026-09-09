@@ -8,9 +8,7 @@ project-root/
 ├── docs/               #프로젝트 문서
 │   └── rec/            #작업 기록(Handoff)
 ├── runs/               #실행 결과
-├── src/
-│   ├── base/                   #기존 mcp
-│   └── new/                    #새로운 mcp
+├── src/                #실행 코드
 └── .env                        #환경 변수
 
 # Architecture rules

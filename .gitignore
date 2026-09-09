@@ -2,4 +2,11 @@
 DerivedData/
 *.xcuserstate
 xcuserdata/
-src/new/PlanTogether.xcodeproj/
+
+# OMC 도구 상태 (세션 기록·체크포인트·로그). 설계 산출물인 .omc/plans/만 추적한다.
+.omc/*
+!.omc/plans/
+.omx/
+
+# XcodeGen이 project.yml에서 생성하는 산출물
+src/PlanTogether.xcodeproj/
