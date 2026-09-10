@@ -23,7 +23,7 @@
 - `parties`: `member_limit`, `created_by_user_id`, `disbanded_at` 추가
 - `party_memberships`: `joined_at`, `ended_at`, `end_reason`, `invite_id` 추가
 - `party_invites`: `created_by_membership_id`, `revoked_at`, `last_used_at` 추가, `token_hash`를 NULL 허용으로 변경
-- `party_visibility_settings`와 `party_schedule_projections` 최소 스키마 생성. 설계 5 확정 전이므로 P2·P3의 insert와 P5의 delete에 필요한 컬럼만 만든다
+- `party_visibility_settings`와 `party_schedule_projections` 스키마 생성. `docs/party_visibility_design.md` §6의 `share_location`, projection ID, generation·setting version, ciphertext 제약을 적용한다
 - partial unique index 3종
   - `(party_id, user_id) WHERE status='active'`
   - `(party_id) WHERE role='owner' AND status='active'`

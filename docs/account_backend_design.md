@@ -294,7 +294,7 @@ pending → running → succeeded
 - worker는 `FOR UPDATE SKIP LOCKED`와 lease를 사용한다.
 - 재시도는 지수 backoff와 jitter를 적용하며 작업 종류별 최대 횟수를 둔다.
 - 동일 외부 작업은 `dedupe_key`로 하나만 활성화한다.
-- 캘린더 명령 dedupe key는 `confirmed_event_id:user_id:operation:revision`이다.
+- 캘린더 명령 관련 outbox의 dedupe key는 `calendar_write_design.md` §9.3이 확정한다.
 - 명령은 EventKit 권한과 활성 상태가 확인된 `executor_device_id` 하나에 lease된다.
 - iOS는 앱이 만든 URL/metadata의 안정적인 event key와 로컬 mapping을 먼저 조회해 create 중복을 방지한 뒤 EventKit 작업 결과를 서버에 보고한다.
 - lease 만료는 같은 지정 기기의 재시도를 우선하고, 다른 기기로의 재할당은 사용자가 calendar writer device를 전환했을 때만 허용한다.

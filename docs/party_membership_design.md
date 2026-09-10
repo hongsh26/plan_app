@@ -381,10 +381,10 @@ T5의 4~10단계를 재사용하되 **대상 멤버십을 요청자가 아닌 `{
 4. 해당 Party의 모든 `party_schedule_projections` 삭제
 5. 모든 `party_visibility_settings` 삭제
 6. 모든 `active` 초대 `revoked`
-7. `sync_changes`: 마지막 활성 멤버 전원에게 `party` 상태 변경과 하위 entity tombstone (`party_membership`, `party_schedule_projection`, `party_visibility_setting`, `proposal`; 초대 tombstone은 방장에게만)
+7. `sync_changes`: 마지막 활성 멤버 전원에게 `party` 상태 변경과 하위 entity tombstone (`party_membership`, `party_schedule_projection`, `party_visibility_setting`, `proposal`, `confirmed_event`; 초대 tombstone은 방장에게만). 같은 트랜잭션에서 `calendar_write_design.md` §6.7의 본인 전용 `calendar_cleanup_suggestions` row를 만들어 각자 기기가 캘린더에 남은 확정 일정을 정리할 수 있게 한다
 8. `outbox_jobs`: `notify_party_disbanded`. 단, **단독 방장의 탈퇴 경로에서는 발행하지 않는다** (수신자가 방금 실행한 본인 1명뿐이라 무의미하다)
 9. 진행 중 제안에 `party_disbanded` 신호 발행 (§5.6)
-10. 해당 Party의 미완료 `calendar_write_commands` 처리는 이 설계가 정하지 않는다. `calendar_privacy_sync_design.md` §10.1의 `pending_device` 명령이 해산 후에도 남아 지정 기기가 계속 claim하는 문제가 있으므로, `cancelled` 전이 여부와 시점을 설계 8에서 반드시 확정한다
+10. 해당 Party의 미완료 `calendar_write_commands`를 이 트랜잭션 안에서 `cancelled`로 종료하고, 모든 `active` confirmed event를 `cancelled`(`party_disbanded`)로, 참여자 reservation을 `released`로 만든다. 이미 외부 캘린더에 반영된 일정은 step 7의 `calendar_cleanup_suggestions`로 각자 기기에서 정리한다. 상세는 `calendar_write_design.md` §6.7이 소유한다
 
 #### 5.5.1 가입 시 projection 생성
 

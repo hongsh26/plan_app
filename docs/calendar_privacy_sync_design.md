@@ -106,7 +106,7 @@ disconnected → permission_required → selecting → syncing → ready
                       └─ restricted
 ready → stale → syncing → ready
 ready → revoked
-ready → needs_reselection
+ready → needs_source_reselection
 ready → error → syncing
 ```
 
@@ -121,8 +121,10 @@ ready → error → syncing
 | `denied` | 사용자가 권한 거부 | 설정 이동 안내 |
 | `restricted` | OS 정책으로 접근 불가 | 원인 설명, 재요청 금지 |
 | `revoked` | 기존 권한 철회 | fresh 해제, 재연결 안내 |
-| `needs_reselection` | 선택 캘린더 삭제/접근 불가 | source/destination 재선택 |
+| `needs_source_reselection` | 선택한 읽기 캘린더 삭제/접근 불가 | source 재선택 |
 | `error` | 일시적 읽기·업로드 오류 | 자동/수동 재시도 |
+
+위 표는 읽기 축(`source_status`)이다. 쓰기 대상 캘린더 상태는 `calendar_write_design.md` §4.3이 정한 별도 축 `destination_status`(`selected`/`needs_reselection`/`write_denied`)가 소유하며, §9의 freshness gate는 `source_status`만 본다. destination 상실은 쓰기 전용 실패이므로 Party 전원의 공통 시간 검색을 막지 않는다.
 
 권한이 없거나 선택 캘린더가 없는 상태를 “일정 없음”으로 해석하지 않는다.
 
@@ -171,6 +173,9 @@ ready → error → syncing
 
 - snapshot은 connection, window, revision과 page count를 가진다.
 - page에는 EventKit identifier 없이 무작위 `source_event_key`와 allowlist 필드만 포함한다.
+- 앱이 만든 확정 일정에는 allowlist 필드로 `app_confirmed_event_id`를 함께 올린다. `calendar_write_design.md` §6.6.1의 재일정 자기 충돌 제외가 이 값을 쓴다.
+- 기기는 **앱 자신의 scheme과 일치하는 marker만** 로컬에서 파싱해 confirmed event ID만 올린다. 그 외 모든 이벤트는 `app_confirmed_event_id = NULL`로 올리며 URL 원문은 어떤 경우에도 업로드하지 않는다. §3.1의 URL 업로드 금지는 그대로 유지된다.
+- `app_confirmed_event_id`는 private busy fact 전용이다. Party projection, sync payload, 로그, 지표에 포함하지 않는다. 이 값은 그 사용자의 외부 캘린더 반영 여부를 드러내므로 `calendar_write_design.md` §1의 본인 전용 원칙 대상이다.
 - complete transaction에서 기존 active generation을 새 generation으로 교체하고 Party projection, sync change를 함께 갱신한다.
 - 실패·중단된 snapshot은 기존 ready generation에 영향을 주지 않는다.
 - 같은 revision의 complete 재호출은 동일 결과를 반환한다.
@@ -202,7 +207,7 @@ ready → error → syncing
 ### 검색
 
 - 모든 활성 멤버의 calendar connection이 `ready`이고 마지막 정상 sync가 6시간 이내일 때만 “모두 가능” 슬롯을 확정 결과로 반환한다.
-- 한 명이라도 stale/denied/revoked/error/needs_reselection이면 `calendar_sync_pending`을 반환한다.
+- 한 명이라도 `source_status`가 stale/denied/revoked/error/needs_source_reselection이면 `calendar_sync_pending`을 반환한다. `destination_status`는 이 판정에 쓰지 않는다.
 - 응답은 문제가 있는 멤버 수나 ID를 일반 멤버에게 제공하지 않는다. 본인 문제는 본인에게만 상세 CTA로 제공한다.
 
 ### 제안·확정
@@ -289,6 +294,7 @@ pending_device → claimed → succeeded
 ### 금지 데이터
 
 - EventKit/calendar identifier
+- Party projection·sync·로그·지표에 실린 `app_confirmed_event_id`
 - title, location, notes, URL
 - 참석자, 주최자, calendar name
 - source event key 원문
