@@ -39,7 +39,7 @@
 | 7 | 약속 제안 | 제목·시간·장소·참여자, 응답 기한, 수정, 취소, 재제안 | Internal Alpha | 생성 데모만 구현 |
 | 8 | 응답과 확정 | 수락·거절·미정, 응답 변경, 확정 조건, 충돌 재검사, 상태 전이 | Internal Alpha | 모델 계산만 부분 구현 |
 | 9 | 외부 캘린더 반영 | 확정 일정 생성, 사용자별 반영 상태, 중복 방지, 변경·삭제·재시도 | Launch MVP | 미구현 |
-| 10 | 알림 | 초대, 제안, 응답, 확정, 변경, 취소, 알림 설정과 중복 방지 | Launch MVP | 미구현 |
+| 10 | 알림 | 제안, 응답, 확정, 변경, 취소, 알림 설정과 중복 방지 (초대 푸시는 없음) | Launch MVP | 미구현, 설계 9 확정 |
 | 11 | 요금제와 결제 | 무료 제한, Premium 권한, 구매, 복원, 만료·환불 반영 | Post-MVP | 미구현 |
 | 12 | 운영과 품질 | 접근성, 개인정보 삭제, 분석 지표, 오류 관측, 지원/복구 안내 | Launch MVP | 미구현 |
 | 13 | 확장 기능 | Google/이메일 로그인, Google Calendar, 부분 가능 시간, 반복 약속, 고급 알림, Widget, 장소/AI 추천 | Post-MVP | 미구현 |
@@ -82,9 +82,9 @@
 ### 현재 실행 컷라인
 
 - 이 절의 번호는 위 `전체 기능 목록`의 기능 번호가 아니라 `상세 설계 진행 순서` 번호를 뜻한다.
-- 상세 설계 8을 완료했으며, 이어서 상세 설계 9를 확정한다.
-- 상세 설계 9(알림)가 확정되기 전에는 새 기능 구현에 착수하지 않는다.
-- 상세 설계 9까지 확정한 뒤 상세 설계 1~9에서 확정한 기능을 의존성 순서에 따라 단계별로 구현한다.
+- **상세 설계 1~9를 모두 완료했다. 설계 단계가 끝났고 다음은 구현 착수다.**
+- 상세 설계 1~9에서 확정한 기능을 의존성 순서에 따라 기능별 브랜치에서 단계별로 구현한다.
+- 첫 구현은 Party 계획의 선행 조건인 `.omc/plans/party-membership-implementation.md`의 P0(서버 골격)부터 시작한다.
 - 상세 설계 10(무료 제한·Premium·결제)과 11(계정 삭제·분석·오류 관측·출시 검증)은 상세 설계 1~9의 기능 구현 진행 후 다시 우선순위를 정한다.
 
 ## 확정 설계 1: 출시 범위 컷라인
@@ -354,7 +354,7 @@
 - 취소는 참여자 reservation을 해제해 같은 시간의 재확정을 가능하게 하고, 직전 create 세대 상태에 따라 delete 발급 여부를 결정한다.
 - claim은 90초 lease와 `SKIP LOCKED`, 결과 보고는 `lease_token` 기반 멱등 처리로 다기기 경쟁을 막는다.
 - membership 종료·해산·계정 삭제 handler는 관계 종료와 command 종료를 같은 transaction에서 끝낸다.
-- domain outbox type 4종만 확정하고 문구·수신자·urgency는 상세 설계 9가 소유한다.
+- domain outbox type을 확정하고 문구·수신자·urgency는 상세 설계 9가 소유한다. 설계 9가 `calendar_cleanup_suggested` 1종을 추가해 현재 5종이다.
 
 ### 완료 조건
 
@@ -366,3 +366,53 @@
 - [x] 상세 설계 형식 12개 항목을 모두 채웠다.
 
 상세 설계는 `docs/calendar_write_design.md`, 구현 계획은 `.omc/plans/calendar-write-implementation.md`를 기준으로 한다.
+
+---
+
+## 확정 설계 9: 알림 종류와 전송 규칙
+
+### 확정된 제품 정책
+
+- 채널을 silent push(sync 재촉)와 alert push(사용자에게 보이는 알림)로 나누고 서로 다른 규칙을 적용한다.
+- 알림 문구는 서버가 만들지 않는다. payload는 localization key와 opaque 참조만 담고 Notification Service Extension이 로컬 데이터로 Party 이름을 채운다. 로컬 데이터가 없으면 일반 문구로 낮춘다.
+- 초대 발송 푸시는 없다. 재사용 링크는 앱 밖에서 전달되므로 서버가 아는 수신자가 없다. 가입 후 기존 멤버에게 `notify_member_joined`만 간다.
+- 제안 수락은 alert를 만들지 않고 거절만 생성자에게 간다. 10명 Party에서 9번 울리는 것을 막는다.
+- 확정 알림은 1건이다. `proposal_confirmed`가 alert를 소유하고 `confirmed_event_created`는 silent만 만든다.
+- quiet hours는 기본 비활성이며 켜면 기본 구간이 22:00–08:00이다. 시간대는 설계 6의 활동 시간 `time_zone`을 재사용하고 별도 시간대 소스를 만들지 않는다.
+- 사용자 토글은 카테고리 4종(`party`, `proposal`, `confirmation`, `calendar_action`)이며 전부 끌 수 있다. Party별 mute는 Post-MVP다.
+
+### 확정된 구조
+
+- domain outbox 20종을 단일 dispatch mapper가 소비한다. 설계 4의 `notify_*`와 설계 7·8의 domain event를 이름 통일 없이 함께 받는다.
+- 설계 4 §9.3이 확정한 수신자 집합은 바꾸지 않는다. 그 안에서 행위자에게 alert 대신 silent만 보내는 채널 조정만 한다.
+- quiet hours의 결과는 bypass / defer / drop_if_stale 세 가지다. 2분 기한의 refresh 요청만 bypass하고, `calendar_write_command_pending`만 drop_if_stale이다.
+- 중복 억제는 outbox index에 의존하지 않는다. `outbox_jobs`의 partial unique index는 활성 상태에만 걸려 성공 후 재삽입을 허용하므로, `(notification_key, user_id)` 영속 전달 기록을 별도로 둔다.
+- fan-out 3단계(domain event → 수신자별 job → 기기별 전송)마다 멱등성 수단을 따로 갖는다.
+- payload에 UUID를 담지 않는다. 사용자별 `notification_ref_key`로 파생한 `party_ref`/`entity_ref`만 담아 사용자 간 연결을 막는다.
+- 만료·해소 판정은 서버가 발송 직전에 끝낸다. NSE는 알림을 억제할 수 없으므로 억제 수단으로 쓰지 않는다.
+- 알림 이력 entity를 만들지 않는다. 앱 상태는 sync가 기준이며 알림은 가속 수단이다.
+- `notification_jobs`와 전달 기록은 alert 전용이다. silent는 job row 없이 사용자별 이동 창 발송 기록으로만 존재한다. `notification_key`에 채널이 없어 둘을 같은 테이블에 두면 서로를 막는다.
+- 전송은 claim-then-send이며 **at-most-once**를 택한다. precondition → 통과 집합 내 합산 → 전달 기록 선점 → APNs 순서이고, `owner_job_id`로 자기 재시도와 타 worker claim을 구별한다.
+- `apns-expiration`은 `valid_until`에서 파생하지 않는 상수다. 파생하면 36시간 안의 약속에서 헤더가 약속 시작 시각과 같아진다.
+
+### 선행 설계 개정
+
+- 설계 8 §9.3에 `calendar_cleanup_suggested` outbox type을 추가했다. 이것이 없으면 떠난 사용자와 해산 Party 멤버가 앱을 열기 전까지 외부 캘린더에 남은 일정을 알 경로가 없었다.
+- 설계 2 §8 `devices`에 `push_authorization`, `push_environment`, `time_sensitive_setting` 열을 추가했다.
+- 설계 2 §7.2 bootstrap과 `GET /v1/me` 응답에 본인 전용 `notification_ref_key`를 추가했다.
+- 설계 2 §7.3의 iOS SwiftData 저장소를 App Group 공유 컨테이너로, 키를 공유 keychain access group으로 옮긴다. Notification Service Extension이 별도 샌드박스라 앱 본체 저장소를 읽을 수 없다.
+- 설계 5·7·8의 "APNs payload는 opaque marker만" 문장은 개정하지 않았다. 기기 측 문구 완성이 그 제약을 그대로 만족한다.
+- 네 개정 모두 해당 설계 문서와 각 구현 계획 파일에 직접 반영했다.
+
+### 완료 조건
+
+- [x] 채널 분리와 이벤트 20종의 수신자·채널·urgency 매핑을 확정했다.
+- [x] 문구 생성 위치와 payload 개인정보 계약을 확정했다.
+- [x] quiet hours 3종 결과와 기한 있는 알림의 폐기 규칙을 확정했다.
+- [x] fan-out 3단계 멱등성과 outbox index의 한계 대응을 정의했다.
+- [x] 푸시 권한 거부 사용자의 대체 경로를 정의했다.
+- [x] API·권한·오프라인·privacy와 테스트 기준을 작성했다.
+- [x] 상세 설계 형식 12개 항목을 모두 채웠다.
+- [x] 검토 에이전트가 2회 검토했다. 1차 21건, 2차 20건을 지적했고 전부 반영했다.
+
+상세 설계는 `docs/notification_design.md`, 구현 계획은 `.omc/plans/notification-implementation.md`를 기준으로 한다.

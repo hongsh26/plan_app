@@ -19,11 +19,11 @@
 ## Implementation Steps
 
 1. Add the `server/` Go module, command entry points, configuration validation and health endpoints described in `docs/account_backend_design.md` section 13.
-2. Add SQL migrations for users, identities, devices, sessions, idempotency, sync changes, outbox jobs and audit events, including required partial unique and cursor/range indexes, before Party-domain tables.
+2. Add SQL migrations for users, identities, devices, sessions, idempotency, sync changes, outbox jobs and audit events, including required partial unique and cursor/range indexes, before Party-domain tables. The `devices` table must include the notification columns required by design 9 (`docs/notification_design.md` section 17.2): `push_authorization` (`unknown`/`authorized`/`provisional`/`denied`), `push_environment` (`sandbox`/`production`) and `time_sensitive_setting` (`enabled`/`disabled`/`not_supported`). Adding them here avoids a second migration once notifications land.
 3. Implement Apple credential verification/code exchange/provider-token encryption and revocation behind an `IdentityVerifier` interface, plus session rotation/reuse detection.
 4. Implement authenticated `/v1/me`, device management and account deletion state transitions.
 5. Implement the mutation transaction helper that records idempotency results, sync changes and outbox jobs atomically.
-6. Implement cursor sync, bootstrap snapshot/watermark and the iOS SwiftData projection/offline mutation boundary.
+6. Implement cursor sync, bootstrap snapshot/watermark and the iOS SwiftData projection/offline mutation boundary. Two design-9 amendments belong here (`docs/notification_design.md` section 17.2): the bootstrap and `/v1/me` responses carry `notification_ref_key`, and the iOS SwiftData store lives in an App Group shared container with the key in a shared keychain access group, so the notification service extension can read both.
 7. Implement worker leasing, retry, dead-job handling and APNs adapter boundaries; model EventKit writes as device-executed server commands.
 8. Add unit, PostgreSQL integration, API contract and E2E tests from `docs/account_backend_design.md` section 15.
 9. Add container and managed-environment deployment assets only after local and CI verification pass.

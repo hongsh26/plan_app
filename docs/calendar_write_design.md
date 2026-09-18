@@ -514,8 +514,9 @@ pending_device → claimed → succeeded
 | `confirmed_event_cancelled` | W4, W6 | `confirmed_event_id` |
 | `calendar_write_command_pending` | 확정 후 2시간이 지나도 create가 `pending_device`인 경우. 이후 24시간 간격으로 최대 3회까지 재발행 | `command_id:notice_seq` |
 | `calendar_write_action_required` | W3 step 5 | `command_id` |
+| `calendar_cleanup_suggested` | W6에서 `calendar_cleanup_suggestions` row 생성 | `confirmed_event_id:user_id` |
 
-문구, 수신자 세부, urgency, quiet hours, 묶음 처리는 설계 9가 정한다. 이 설계는 type과 dedupe key만 확정한다. APNs payload는 opaque sync marker만 담고 제목·장소·시각을 담지 않는다.
+문구, 수신자 세부, urgency, quiet hours, 묶음 처리는 설계 9가 정한다. 이 설계는 type과 dedupe key만 확정한다. `calendar_cleanup_suggested`는 설계 9가 추가한 type이며 수신자는 본인 1명으로 고정된다. 이것이 없으면 떠난 사용자와 해산 Party의 멤버가 앱을 열기 전까지 외부 캘린더에 남은 일정을 알 경로가 없다. APNs payload는 opaque sync marker만 담고 제목·장소·시각을 담지 않는다.
 
 ---
 
@@ -698,7 +699,7 @@ pending_device → claimed → succeeded
 
 ### 15.2 후속 설계 제약
 
-- 설계 9는 이 문서의 domain outbox type 4종에 대한 수신자·문구·urgency·quiet hours·중복 억제를 정한다.
+- 설계 9는 이 문서의 domain outbox type 5종에 대한 수신자·문구·urgency·quiet hours·중복 억제를 정한다. 확정 내용은 `docs/notification_design.md` §5.1에 있다.
 - 설계 9의 APNs payload는 opaque sync marker만 사용하고 확정 일정 제목·장소·시각을 담지 않는다.
 - 설계 9는 `calendar_write_action_required`가 본인에게만 가는 알림임을 유지한다.
 - 외부 → 앱 역방향 반영, 참석자 초대, 알람 설정, Google Calendar 쓰기는 Post-MVP 검토 전 현재 schema와 UI에 추가하지 않는다.

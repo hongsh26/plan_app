@@ -29,7 +29,7 @@
 - `app_confirmed_event_id`는 nullable 추가만 하고 backfill·강제 re-snapshot 없음(구세대는 reservation 제외로 커버)
 - `proposals.supersedes_confirmed_event_id`(불변)와 열린 대체 제안 partial unique
 - reservation partial exclusion constraint 전환과 취소 후 재확정 가능성
-- sync entity type과 domain outbox type 확장
+- sync entity type과 domain outbox type 확장. 설계 9가 추가한 `calendar_cleanup_suggested`(dedupe `confirmed_event_id:user_id`)를 포함한다
 - 완료 기준: 중복 활성 command, 중복 세대, 겹치는 reserved 구간이 DB에서 거부된다
 
 ### W2. 확정 시 command 발급

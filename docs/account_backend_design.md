@@ -236,7 +236,7 @@ Party, 공개 설정, 제안 API는 후속 설계에서 추가하되 공통 멱�
 |---|---|
 | `users` | `id`, `display_name`, `status`, `version`, `deleted_at` |
 | `auth_identities` | `user_id`, `provider`, `provider_subject`, `provider_refresh_token_ciphertext`; unique `(provider, provider_subject)` |
-| `devices` | `id`, `user_id`, `platform`, `push_token_ciphertext`, `last_seen_at`, `revoked_at` |
+| `devices` | `id`, `user_id`, `platform`, `push_token_ciphertext`, `push_authorization`, `push_environment`, `time_sensitive_setting`, `last_seen_at`, `revoked_at` |
 | `sessions` | `id`, `user_id`, `device_id`, `token_family_id`, `refresh_token_hash`, `expires_at`, `used_at`, `revoked_at` |
 | `parties` | `id`, `name`, `status`, `version`, `owner_membership_id` |
 | `party_memberships` | `party_id`, `user_id`, `role`, `status`, `version`; 활성 membership unique |
@@ -478,7 +478,10 @@ project-root/
 - 가능 시간: sync freshness, 검색 기간, 활동 시간, 슬롯 단위.
 - 제안: 참여자 snapshot, 응답 변경, 확정 조건과 취소 상태.
 - 캘린더 쓰기: 사용자별 상태와 영구 실패 UX.
-- 알림: 알림별 urgency, quiet hours, 중복 억제.
+- 알림: 알림별 urgency, quiet hours, 중복 억제. → 설계 9 `docs/notification_design.md`에서 확정했다. 설계 9가 이 문서에 요구하는 개정은 3건이다.
+  - §8 `devices`에 `push_authorization`, `push_environment`, `time_sensitive_setting` 열 추가
+  - §7.2 `/v1/sync/bootstrap`과 `GET /v1/me` 응답에 본인 전용 `notification_ref_key` 추가
+  - §7.3 iOS SwiftData 저장소를 App Group 공유 컨테이너로, `notification_ref_key`를 공유 keychain access group으로. Notification Service Extension이 별도 샌드박스에서 실행되어 앱 본체의 저장소를 직접 읽을 수 없다.
 
 ## 18. 참고 공식 문서
 
