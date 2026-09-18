@@ -11,6 +11,7 @@
 개정 이력:
 
 - 설계 9(알림)가 요구한 3건을 §7.2, §7.3, §8에 반영했다(§17).
+- P0 검토에서 §8의 "외부 identity 하나는 **활성** 사용자 하나에만 연결된다"의 `활성`이 구현으로 옮겨지지 않은 것을 발견했다. 삭제된 사용자가 identity row를 계속 보유하면 같은 Apple 계정의 재가입이 영구히 막혀 §10 7단계의 "재로그인을 새 계정 생성 흐름으로 처리한다"와 충돌한다. §10 7단계에 identity row 물리 삭제를 명시하고 §8 불변식과 §14 인수 조건을 보강했다.
 - 구현 착수 시 §7.1의 sync 변경 피드 순서 키를 `BIGSERIAL`에서 `(txid, ordinal)`로 바꿨다. `BIGSERIAL`은 번호 순서와 커밋 순서를 일치시키지 않아 먼저 번호를 받고 나중에 커밋한 트랜잭션의 변경이 영구 유실되는 경로가 있었다. §7.1, §7.2, §8, §12, §14, §15와 `party_membership_design.md` §9.2를 함께 갱신했다.
 
 이 설계는 계정, 세션, 기기, 서버 데이터 소유권, 동기화, 비동기 작업과 배포 경계를 확정한다. Party의 초대·역할·탈퇴 정책은 후속 설계에서 확정하며, 캘린더 공개·동기화 세부 계약은 `docs/calendar_privacy_sync_design.md`를 따른다.
@@ -273,7 +274,7 @@ Party, 공개 설정, 제안 API는 후속 설계에서 추가하되 공통 멱�
 
 ### 필수 DB 불변식
 
-- 외부 identity 하나는 활성 사용자 하나에만 연결된다.
+- 외부 identity 하나는 **활성** 사용자 하나에만 연결된다. index는 조건 없는 unique `(provider, provider_subject)`이며, 이것으로 충분한 이유는 §10 7단계가 `deleted` 전환과 함께 identity row를 물리 삭제해 삭제된 사용자가 identity를 보유하지 않기 때문이다. **partial unique로 바꾸지 말 것.** `detached_at` 같은 열을 두고 조건부 index로 가면 삭제된 계정에 대해 Apple subject를 계속 보존하게 되어 §4 데이터 최소화와 충돌한다.
 - Party의 활성 멤버는 `(party_id, user_id)`당 하나다.
 - 제안 참여자는 제안 생성 시 고정된 snapshot이며 중복되지 않는다.
 - 제안 하나에는 활성 확정 이벤트가 최대 하나다.
@@ -326,7 +327,9 @@ pending → running → succeeded
 4. worker가 캘린더 연결, 푸시 token, 일정 사실과 Party별 상세 투영을 삭제한다.
 5. 멤버십, 제안, 확정 기록의 사용자 표시 정보는 `탈퇴한 사용자`로 익명화한다.
 6. 보안 audit는 사용자 ID를 비가역 내부 tombstone으로 치환하고 기본 90일 뒤 삭제한다.
-7. 24시간 안에 `deleted` 상태로 전환하고 재로그인을 새 계정 생성 흐름으로 처리한다.
+7. 24시간 안에 `deleted` 상태로 전환하고 재로그인을 새 계정 생성 흐름으로 처리한다. **`deleted` 전환과 해당 사용자의 `auth_identities` row 물리 삭제는 같은 트랜잭션에서 커밋한다.** identity row가 남아 있으면 `(provider, provider_subject)` unique가 같은 Apple 계정의 재가입을 영구히 막는다. 또한 Apple의 안정적 subject는 개인 식별자이므로 삭제된 계정에 대해 보존하지 않는다(§4 데이터 최소화).
+   - 삭제 시점을 3단계가 아니라 7단계로 두는 이유는 두 가지다. 3단계는 revoke 호출에 refresh token ciphertext가 필요하고, 3→7단계는 재시도를 포함해 최대 24시간에 걸칠 수 있다. 3단계에서 지우면 그 사이에 같은 Apple 계정으로 로그인한 사용자가 새 계정을 만들어, 삭제 진행 중인 기존 `users` row와 함께 한 subject에 두 계정이 생기고 어떤 제약도 이를 막지 못한다.
+   - 7단계로 두면 경계가 §5.3의 상태 정의와 정확히 일치한다. `deletion_requested`·`deleting` 동안에는 identity row가 있어 로그인이 차단된 기존 계정으로 해석되고, `deleted` 이후에는 row가 없어 새 계정 생성이 된다.
 
 삭제 실패는 재시도하며 24시간 목표를 넘기면 운영 경보를 발생시킨다. 정확한 법적 보존 요건이 생기면 별도 데이터 보존 정책을 우선 적용한다.
 
@@ -406,6 +409,7 @@ project-root/
 ### 인증·세션
 
 - 같은 Apple subject로 다시 로그인하면 기존 `user_id`를 반환하고 중복 사용자를 만들지 않는다.
+- 계정 삭제가 `deleted`까지 완료된 뒤 같은 Apple subject로 로그인하면 가입이 성공하고 **새 `user_id`가 발급된다**(§10 7단계). `deletion_requested`와 `deleting` 동안에는 같은 subject의 로그인이 차단된 기존 계정으로 해석되어 새 계정을 만들지 않는다.
 - device A 로그아웃 후 A의 refresh는 실패하지만 device B 세션은 유지된다.
 - 사용된 refresh token 재사용 시 해당 device token family가 전부 폐기된다.
 - `disabled`, `deletion_requested`, `deleting`, `deleted` 계정은 보호 API를 사용할 수 없다.

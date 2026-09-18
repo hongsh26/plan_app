@@ -6,7 +6,28 @@ xcuserdata/
 # OMC 도구 상태 (세션 기록·체크포인트·로그). 설계 산출물인 .omc/plans/만 추적한다.
 .omc/*
 !.omc/plans/
+# 에이전트가 하위 디렉터리를 cwd로 실행하면 거기에도 .omc/가 생긴다.
+# 루트의 .omc/plans/ 추적을 깨지 않으려면 **/.omc/ 대신 한 단계씩 적어야 한다.
+# **/.omc/는 루트 .omc/ 디렉터리 자체를 제외해 위의 부정 패턴을 무력화한다.
+*/.omc/
+*/*/.omc/
 .omx/
 
 # XcodeGen이 project.yml에서 생성하는 산출물
 src/PlanTogether.xcodeproj/
+
+# 서버 로컬 자격 증명. .env.example만 추적한다 (account_backend_design.md §11).
+.env
+.env.*
+!.env.example
+
+# Go 빌드 산출물.
+# README는 server/에서 작업하라고 하므로 `go build -o api ./cmd/api`의 산출물은
+# server/api다. 루트에 고정한 /api는 그걸 잡지 못한다.
+server/bin/
+server/api
+server/worker
+server/scheduler
+/api
+/worker
+/scheduler

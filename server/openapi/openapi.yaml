@@ -1,0 +1,87 @@
+openapi: 3.1.0
+
+# P0 서버 골격 범위의 계약만 담는다.
+#
+# /v1 도메인 endpoint 전체(auth, me, devices, sync, calendar-write-commands)는
+# account_backend_design.md §6이 정의하지만 P1 이후에 구현과 함께 추가한다.
+# 계약만 먼저 적어 두면 handler와 어긋난 채로 남기 쉽다.
+#
+# health endpoint는 /v1 아래에 두지 않는다. API 버전 계약의 일부가 아니라
+# 인프라(load balancer, 오케스트레이터)가 보는 운영 endpoint이기 때문이다.
+
+info:
+  title: PlanTogether Server
+  version: 0.1.0
+  description: |
+    Launch MVP 서버 API. 기준 설계는 docs/account_backend_design.md다.
+
+    P0 범위는 운영 health endpoint 두 개뿐이다. 인증과 도메인 endpoint는
+    구현과 함께 추가한다.
+
+servers:
+  - url: http://localhost:8080
+    description: 로컬 개발
+
+paths:
+  /livez:
+    get:
+      summary: liveness 검사
+      description: |
+        프로세스가 살아 있는지만 보고한다. DB를 비롯한 어떤 외부 의존성도
+        확인하지 않는다. liveness가 DB에 의존하면 DB 장애가 모든 API
+        인스턴스의 재시작 루프로 번진다.
+      operationId: getLiveness
+      tags: [operations]
+      security: []
+      responses:
+        "200":
+          description: 프로세스가 요청을 처리할 수 있다.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+
+  /readyz:
+    get:
+      summary: readiness 검사
+      description: |
+        트래픽을 받을 준비가 됐는지 보고한다. DB 왕복에 의존하므로 DB가
+        닿지 않으면 503을 반환하고 load balancer가 이 인스턴스를 제외한다.
+
+        account_backend_design.md §11에 따라 응답에 token, 자격, 내부 상세를
+        포함하지 않는다. 실패 원인은 서버 로그에만 남는다.
+      operationId: getReadiness
+      tags: [operations]
+      security: []
+      responses:
+        "200":
+          description: DB에 연결할 수 있어 트래픽을 받을 수 있다.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+        "503":
+          description: DB에 연결할 수 없어 트래픽을 받을 수 없다.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: unavailable
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable]
+          description: |
+            운영 상태만 나타낸다. 진단 상세를 담지 않는다.
