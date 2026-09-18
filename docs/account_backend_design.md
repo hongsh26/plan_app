@@ -8,6 +8,11 @@
 - 우선순위: 초기 개발 속도보다 인프라 통제, 데이터 소유권, 장기 확장성
 - 현재 iOS 구현 연결점: `src/PlanTogether/Models.swift`, `src/PlanTogether/AppStore.swift`, `src/PlanTogether/CalendarService.swift`
 
+개정 이력:
+
+- 설계 9(알림)가 요구한 3건을 §7.2, §7.3, §8에 반영했다(§17).
+- 구현 착수 시 §7.1의 sync 변경 피드 순서 키를 `BIGSERIAL`에서 `(txid, ordinal)`로 바꿨다. `BIGSERIAL`은 번호 순서와 커밋 순서를 일치시키지 않아 먼저 번호를 받고 나중에 커밋한 트랜잭션의 변경이 영구 유실되는 경로가 있었다. §7.1, §7.2, §8, §12, §14, §15와 `party_membership_design.md` §9.2를 함께 갱신했다.
+
 이 설계는 계정, 세션, 기기, 서버 데이터 소유권, 동기화, 비동기 작업과 배포 경계를 확정한다. Party의 초대·역할·탈퇴 정책은 후속 설계에서 확정하며, 캘린더 공개·동기화 세부 계약은 `docs/calendar_privacy_sync_design.md`를 따른다.
 
 ## 2. 목표와 제외 범위
@@ -193,16 +198,27 @@ Party, 공개 설정, 제안 API는 후속 설계에서 추가하되 공통 멱�
 
 ### 7.1 서버 변경 피드
 
-- `sync_changes.seq`는 전체 시스템에서 단조 증가하는 `BIGINT`다.
+- 변경 순서 키는 `(txid, ordinal)`이다. `txid`는 `xid8 NOT NULL DEFAULT pg_current_xact_id()`이고 `ordinal`은 같은 트랜잭션 안에서 0부터 증가하는 `INT`다. 둘이 합쳐 primary key를 이룬다. 전역 `BIGSERIAL` 순번은 두지 않는다.
 - 각 변경은 `recipient_user_id`를 가져 사용자별로 접근을 제한한다.
-- 클라이언트 cursor는 마지막으로 반영한 `seq` 하나다. 중간 번호가 비어도 정상이다.
+- **클라이언트 cursor는 서버가 발급한 opaque 문자열이다.** 클라이언트는 받은 값을 그대로 돌려줄 뿐 파싱하거나 비교하거나 직접 만들지 않는다. 내부 표현은 `(txid, ordinal)`이지만 계약이 아니다.
+- **읽기는 settled horizon 아래만 반환한다.** 조회 트랜잭션은 `horizon = pg_snapshot_xmin(pg_current_snapshot())`을 구하고 `WHERE recipient_user_id = $1 AND (txid, ordinal) > cursor AND txid < horizon ORDER BY txid, ordinal`로 읽는다. `horizon` 미만의 트랜잭션은 전부 종료(커밋 또는 abort)되었으므로 아직 진행 중인 트랜잭션의 변경이 cursor 뒤에 나타날 수 없다.
+- `ordinal`은 트랜잭션 내부 counter이며 §5의 mutation transaction helper가 단독으로 발급한다. 개별 call site가 직접 세지 않는다.
 - 변경 payload는 전체 객체가 아닌 type, id, operation, version과 최소 projection을 포함한다.
 - 삭제와 탈퇴는 tombstone으로 전달한다.
-- 변경 피드는 기본 30일 보존하며 만료된 cursor는 `410`을 반환해 전체 재동기화를 요구한다.
+- 변경 피드는 기본 30일 보존한다. 보존 하한은 `txid` 자체가 아니라 row의 `created_at`으로 판정하며, cursor가 가리키는 위치가 보존 하한보다 오래되었으면 `410 sync_cursor_expired`를 반환해 전체 재동기화를 요구한다. `410`을 쓰는 다른 코드와 구별되도록 클라이언트는 상태 코드가 아니라 `code` 값으로 분기한다.
+
+#### 순서 키를 `BIGSERIAL`로 두지 않는 이유
+
+`BIGSERIAL`의 `nextval`은 트랜잭션 밖에서 즉시 소비되므로 번호 순서와 커밋 순서가 일치하지 않는다. 트랜잭션 A가 5번을, B가 6번을 받은 상태에서 B가 먼저 커밋되면 클라이언트는 6까지 읽고 cursor를 6으로 올린다. 그 뒤 A가 커밋하면 5번 변경은 어떤 cursor로도 다시 조회되지 않고 영구히 유실된다.
+
+`BIGSERIAL`을 유지한 채 `txid` 열을 덧붙여 horizon으로 거르는 절충안도 성립하지 않는다. 트랜잭션은 `sync_changes`에 쓰기 한참 전의 다른 쓰기에서 `txid`를 먼저 얻으므로 `txid` 순서와 `seq` 순서가 서로 뒤집힐 수 있다. C(txid 99)가 A(txid 100)보다 늦게 `sync_changes`에 삽입하면 A는 `seq 5`, C는 `seq 6`을 갖는다. A가 진행 중일 때 horizon은 100이고 C는 `txid 99 < 100`으로 필터를 통과해 `seq 6`이 전달된다. cursor가 6으로 올라간 뒤 A가 커밋하면 `seq 5`가 유실된다. 순서 키 자체가 `txid`여야 이 역전이 사라진다.
+
+대안이었던 "commit 직전 advisory lock으로 순번 부여"는 정확하지만, 이후 모든 도메인 트랜잭션이 영원히 같은 전역 lock을 마지막에 잡아야 한다는 규약을 설계 4~9 전체에 퍼뜨린다. 또한 Party 초대 동시 수락 같은 경쟁 테스트를 전역 직렬화로 자동 통과시켜 실제 잠금 순서의 결함을 가린다. 정확성을 읽기 쿼리 하나와 열 기본값에 가두는 쪽을 택했다.
 
 ### 7.2 Bootstrap
 
-- `/v1/sync/bootstrap`은 `schema_version`, `snapshot`, `cursor_watermark`, `server_time`을 반환한다.
+- `/v1/sync/bootstrap`은 `schema_version`, `snapshot`, `cursor_watermark`, `server_time`, `notification_ref_key`를 반환한다. `GET /v1/me`도 `notification_ref_key`를 같은 의미로 반환한다(설계 9 §17.2).
+- `cursor_watermark`는 §7.1과 같은 형식의 opaque cursor 문자열이다. snapshot을 만든 트랜잭션이 자신의 `horizon`을 구해 그 직전 위치를 인코딩하며, snapshot에 이미 반영된 변경을 증분으로 다시 받지 않으면서 진행 중이던 트랜잭션의 변경은 빠짐없이 받도록 한다.
 - snapshot은 호출 사용자가 현재 볼 수 있는 사용자, Party, 멤버십, 공개 설정, 제안, 확정 이벤트와 캘린더 명령만 포함한다.
 - iOS는 한 개의 SwiftData transaction에서 기존 서버 투영을 snapshot으로 교체하고 cursor를 watermark로 설정한다.
 - 아직 전송하지 않은 로컬 mutation은 별도 queue에 보존하고 snapshot 반영 후 의존 entity/version을 다시 확인해 재전송하거나 conflict로 표시한다.
@@ -211,6 +227,7 @@ Party, 공개 설정, 제안 API는 후속 설계에서 추가하되 공통 멱�
 ### 7.3 iOS 로컬 상태
 
 - SwiftData는 서버 데이터의 읽기 캐시이며 기준 데이터가 아니다.
+- **SwiftData 저장소는 App Group 공유 컨테이너에 두고 `notification_ref_key`는 공유 keychain access group에 둔다.** Notification Service Extension이 앱 본체와 별도 샌드박스에서 실행되므로 공유하지 않으면 알림 문구를 로컬 데이터로 완성할 수 없다(설계 9 §4.2, §17.2).
 - 로컬 서버 투영은 `server_id`, `server_version`, `updated_at`, `deleted_at`을 공통으로 가진다.
 - 로컬 mutation queue는 `operation_id`, `idempotency_key`, `entity_type`, `entity_id`, `expected_version`, `payload`, `created_at`, `attempt_count`, `last_error`를 가진다.
 - EventKit mapping은 `source_event_key`, 로컬 EventKit identifier, calendar identifier와 마지막 확인 시각을 기기에만 저장한다.
@@ -250,7 +267,7 @@ Party, 공개 설정, 제안 API는 후속 설계에서 추가하되 공통 멱�
 | `confirmed_events` | `proposal_id`, `status`, `version`; proposal당 활성 확정 unique |
 | `calendar_write_commands` | `confirmed_event_id`, `user_id`, `executor_device_id`, `operation`, `revision`, `status`, `lease_until`, `result_locator`; 활성 command unique |
 | `idempotency_keys` | `user_id`, `device_id`, `key`, `request_hash`, 최소 result pointer, `expires_at`; unique `(user_id, device_id, key)` |
-| `sync_changes` | `seq`, `recipient_user_id`, `entity_type`, `entity_id`, `operation`, `entity_version`, `payload` |
+| `sync_changes` | `txid`(`xid8`), `ordinal`, `recipient_user_id`, `entity_type`, `entity_id`, `operation`, `entity_version`, `payload`, `created_at`; PK `(txid, ordinal)`, append-only이므로 `version` 없음 |
 | `outbox_jobs` | `type`, `payload`, `status`, `attempt_count`, `next_run_at`, `locked_until`, `dedupe_key` |
 | `audit_events` | actor/action/target/result/request ID; 캘린더 내용과 token 저장 금지 |
 
@@ -262,7 +279,7 @@ Party, 공개 설정, 제안 API는 후속 설계에서 추가하되 공통 멱�
 - 제안 하나에는 활성 확정 이벤트가 최대 하나다.
 - 도메인 상태 전이와 `sync_changes`/`outbox_jobs`/`calendar_write_commands` 생성은 같은 트랜잭션에서 커밋한다.
 - 멱등성 키의 request hash가 다르면 원래 결과를 재사용하지 않고 오류를 반환한다.
-- `sync_changes`는 `(recipient_user_id, seq)` index로 사용자 cursor 조회를 보장한다.
+- `sync_changes`는 `(recipient_user_id, txid, ordinal)` index로 사용자 cursor 조회를 보장한다. 순서 키가 `txid`이므로 번호 순서와 커밋 순서가 어긋나지 않는다(§7.1).
 - 활성 membership은 `(party_id, user_id) WHERE status = 'active'` partial unique index를 가진다.
 - 활성 outbox dedupe는 `(type, dedupe_key) WHERE status IN ('pending','running','retryable_failed')` partial unique index를 가진다.
 - 일정 범위 조회는 `(user_id, start_at, end_at)` index를 가진다.
@@ -343,6 +360,7 @@ pending → running → succeeded
 |---|---|
 | 일반 API latency | 서버 측 p95 300ms 이하 |
 | sync latency | 앱 활성화 후 정상 네트워크에서 5초 안에 최신 변경 반영 |
+| sync horizon lag | `now() - pg_snapshot_xmin(pg_current_snapshot())` 트랜잭션의 시작 시각 차이를 p95 5초 이하로 유지하고 30초 초과 시 경보 |
 | outbox/캘린더 명령 생성 | 도메인 commit과 원자적, 누락 0건 |
 | 알림 작업 생성 | 도메인 이벤트 commit 후 5초 이내 worker 대상화 |
 | 캘린더 명령 claim | 앱 활성화 및 sync 후 5초 이내 지정 기기가 claim 가능 |
@@ -395,6 +413,7 @@ project-root/
 ### 동기화·충돌
 
 - device A의 변경 이후 device B가 이전 cursor로 sync하면 변경을 한 번 이상 전달받고 version 기준으로 정확히 한 번 적용한다.
+- 먼저 시작해 나중에 커밋한 트랜잭션의 변경이 cursor 뒤로 밀려 유실되지 않는다. 진행 중인 쓰기 트랜잭션이 있으면 그보다 뒤에 커밋된 변경도 함께 대기했다가 순서대로 전달된다.
 - 같은 멱등성 키로 제안을 재전송해도 proposal ID는 하나만 생성된다.
 - 같은 키에 다른 request body를 보내면 `idempotency_mismatch`가 반환된다.
 - stale version mutation은 `409`와 최신 version을 반환한다.
@@ -432,6 +451,7 @@ project-root/
 
 - unique/check/FK 제약
 - 상태 전이 + sync change + outbox 원자성
+- **sync 순서 역전 회귀 테스트.** 트랜잭션 A가 먼저 `sync_changes`에 쓰고 커밋하지 않은 채 B가 쓰고 커밋한 뒤, 같은 수신자가 sync하면 B의 변경도 아직 전달되지 않아야 한다(A가 horizon을 잡고 있으므로). A 커밋 후 다시 sync하면 A와 B가 순서대로 정확히 한 번 전달된다. cursor가 B만 받고 A를 건너뛰면 실패다.
 - 두 transaction의 동시 응답/확정 경쟁
 - `SKIP LOCKED` worker 경쟁과 lease 복구
 - 계정 삭제 cascade와 익명화
@@ -478,10 +498,10 @@ project-root/
 - 가능 시간: sync freshness, 검색 기간, 활동 시간, 슬롯 단위.
 - 제안: 참여자 snapshot, 응답 변경, 확정 조건과 취소 상태.
 - 캘린더 쓰기: 사용자별 상태와 영구 실패 UX.
-- 알림: 알림별 urgency, quiet hours, 중복 억제. → 설계 9 `docs/notification_design.md`에서 확정했다. 설계 9가 이 문서에 요구하는 개정은 3건이다.
-  - §8 `devices`에 `push_authorization`, `push_environment`, `time_sensitive_setting` 열 추가
-  - §7.2 `/v1/sync/bootstrap`과 `GET /v1/me` 응답에 본인 전용 `notification_ref_key` 추가
-  - §7.3 iOS SwiftData 저장소를 App Group 공유 컨테이너로, `notification_ref_key`를 공유 keychain access group으로. Notification Service Extension이 별도 샌드박스에서 실행되어 앱 본체의 저장소를 직접 읽을 수 없다.
+- 알림: 알림별 urgency, quiet hours, 중복 억제. → 설계 9 `docs/notification_design.md`에서 확정했다. 설계 9가 이 문서에 요구한 개정 3건은 모두 본문에 반영했다.
+  - §8 `devices`에 `push_authorization`, `push_environment`, `time_sensitive_setting` 열 추가 — 반영됨
+  - §7.2 `/v1/sync/bootstrap`과 `GET /v1/me` 응답에 본인 전용 `notification_ref_key` 추가 — 반영됨
+  - §7.3 iOS SwiftData 저장소를 App Group 공유 컨테이너로, `notification_ref_key`를 공유 keychain access group으로. Notification Service Extension이 별도 샌드박스에서 실행되어 앱 본체의 저장소를 직접 읽을 수 없다. — 반영됨
 
 ## 18. 참고 공식 문서
 

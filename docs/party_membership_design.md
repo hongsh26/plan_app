@@ -613,7 +613,7 @@ Universal Link를 위해 다음이 함께 필요하다.
   `proposal`은 T5·T7이 tombstone으로만 발행하며 생성·갱신 계약은 설계 7이 소유한다.
   `party_schedule_projection`은 T1·T3가 upsert를, T5·T7이 tombstone을 발행한다. 그 외의 생성·갱신 계약은 `calendar_privacy_sync_design.md`가 소유한다.
 - 탈퇴·강퇴·해산은 tombstone(`operation='delete'`)으로 전달하며 떠난 사용자와 남은 사용자 **양쪽 모두**에게 보낸다.
-- 초대 수락 직후 신규 멤버는 해당 Party 하위 데이터를 아직 갖고 있지 않으므로, 서버는 신규 멤버 대상 변경 row를 Party 단위 부트스트랩으로 묶어 발행한다. cursor가 이미 앞서 있어도 누락되지 않는다.
+- 초대 수락 직후 신규 멤버는 해당 Party 하위 데이터를 아직 갖고 있지 않으므로, 서버는 신규 멤버 대상 변경 row를 Party 단위 부트스트랩으로 묶어 발행한다. 이 row들은 T3 수락 트랜잭션의 `txid`를 갖고 그 `txid`는 신규 멤버의 기존 cursor보다 반드시 크므로(`account_backend_design.md` §7.1), cursor가 이미 앞서 있어서 누락되는 경우는 성립하지 않는다.
 - `party_invite` 변경은 현재 방장에게만 전달한다. 위임(T4)의 무효화 tombstone만 예외적으로 직전 방장에게도 전달해 그 기기의 로컬 목록이 정리되게 한다.
 
 ### 9.3 알림 (outbox job)
