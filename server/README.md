@@ -69,16 +69,22 @@ set -a && . ./.env && set +a
 go run ./cmd/api -migrate up
 ```
 
-`MIGRATION_DATABASE_URL`을 쓴다. 런타임 `DATABASE_URL`(api 역할)은 DDL 권한이
-없으므로 §11의 역할 분리가 유지된다.
+`MIGRATION_DATABASE_URL`과 `APP_ENV`를 쓴다. 런타임 `DATABASE_URL`(api 역할)은
+DDL 권한이 없으므로 §11의 역할 분리가 유지된다.
 
 다른 방향:
 
 ```sh
 go run ./cmd/api -migrate status   # 적용 상태
-go run ./cmd/api -migrate down     # 마지막 하나 되돌리기
-go run ./cmd/api -migrate reset    # 전부 되돌리기 (로컬 전용)
+go run ./cmd/api -migrate down     # 마지막 하나 되돌리기 (APP_ENV=local 전용)
+go run ./cmd/api -migrate reset    # 전부 되돌리기 (APP_ENV=local 전용)
 ```
+
+`down`과 `reset`은 `APP_ENV=local`에서만 실행된다. 다른 값이거나 `APP_ENV`가
+없으면 `postgres.Migrate`가 DB에 연결하기 전에 거부한다. 프로덕션 api task에
+`MIGRATION_DATABASE_URL`이 주입된 상태에서 `-migrate reset`이 한 번 실행되면
+스키마 전체가 사라지기 때문이다. 현재 마이그레이션은 하나뿐이라 `down` 한 번이
+`reset`과 결과가 같으므로 둘 다 막는다.
 
 ### 4. 서버 실행
 
@@ -128,11 +134,31 @@ TEST_DATABASE_URL='postgres://plantogether_migration:local_migration_password@lo
 
 `TEST_DATABASE_URL`이 없으면 **skip**한다. skip이 통과로 위장되지 않게 하려면
 `REQUIRE_DB_TESTS=1`을 켠다. 그러면 DB에 연결할 수 없을 때 skip 대신 실패한다.
-CI는 이 변수를 켜야 한다.
 
 ```sh
 REQUIRE_DB_TESTS=1 TEST_DATABASE_URL='...' go test ./test/...
 ```
+
+## CI
+
+`.github/workflows/server-ci.yml`이 `server/` 변경마다 돈다. 이 워크플로가
+`REQUIRE_DB_TESTS=1`을 켜는 주체다. 켜는 주체가 없으면 `go test ./...`는 통합
+테스트를 전부 skip하고 `ok`를 출력하므로, §8 불변식 검증이 통째로 사라져도
+초록불이 난다.
+
+CI는 GitHub Actions의 `services:` 블록이 아니라 `docker compose up -d --wait`을
+쓴다. `services:`는 `docker-entrypoint-initdb.d`를 마운트할 수 없어
+`docker/postgres-init/01-roles.sql`을 따로 다시 적용해야 하고, 그러면 CI와
+로컬의 역할·기본 권한이 갈라진다.
+
+CI가 확인하는 것:
+
+- `gofmt`, `go vet`
+- 마이그레이션 `up` -> `status` -> `reset` -> `up` 왕복
+- `REQUIRE_DB_TESTS=1`로 통합 테스트 실행, 그리고 skip된 테스트가 **0건**인지
+  별도 확인 (`connect()` 헬퍼를 거치지 않는 테스트가 나중에 추가될 경우 대비)
+- `APP_ENV=production`에서 `-migrate reset`이 거부되는지 (가드가 진입점까지
+  연결돼 있는지)
 
 ### 전체
 

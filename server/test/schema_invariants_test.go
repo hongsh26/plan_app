@@ -26,8 +26,12 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// pgUniqueViolation은 PostgreSQL의 unique_violation SQLSTATE다.
-const pgUniqueViolation = "23505"
+// PostgreSQL SQLSTATE. 제약 위반을 "그냥 오류가 났다"가 아니라 "그 제약이
+// 거부했다"로 확인하기 위해 쓴다.
+const (
+	pgUniqueViolation = "23505"
+	pgCheckViolation  = "23514"
+)
 
 // connect는 테스트용 연결을 연다. DB가 없으면 skip하거나, REQUIRE_DB_TESTS가
 // 켜져 있으면 실패한다.
@@ -87,6 +91,29 @@ func assertUniqueViolation(t *testing.T, err error, wantConstraint string) {
 	}
 	if pgErr.Code != pgUniqueViolation {
 		t.Fatalf("SQLSTATE = %s, want %s (unique_violation): %v", pgErr.Code, pgUniqueViolation, err)
+	}
+	if pgErr.ConstraintName != wantConstraint {
+		t.Errorf("거부한 제약 = %q, want %q", pgErr.ConstraintName, wantConstraint)
+	}
+}
+
+// assertCheckViolation은 CHECK constraint가 실제로 거부했는지 확인한다.
+//
+// "오류가 났다"만 보면 제약이 통째로 사라져도 초록불이 된다. 열 이름이 바뀌어
+// undefined_column(42703)이 나거나 타입 오류가 나도 err != nil이기 때문이다.
+// SQLSTATE 23514와 제약 이름까지 봐야 그 CHECK가 거부했음이 성립한다.
+func assertCheckViolation(t *testing.T, err error, wantConstraint string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("제약 %s가 위반을 거부하지 않고 삽입을 허용했다", wantConstraint)
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("PostgreSQL 오류가 아니다: %v", err)
+	}
+	if pgErr.Code != pgCheckViolation {
+		t.Fatalf("SQLSTATE = %s, want %s (check_violation). "+
+			"제약이 아니라 다른 이유로 실패했다: %v", pgErr.Code, pgCheckViolation, err)
 	}
 	if pgErr.ConstraintName != wantConstraint {
 		t.Errorf("거부한 제약 = %q, want %q", pgErr.ConstraintName, wantConstraint)
@@ -350,9 +377,7 @@ func TestStatusCheckConstraintsRejectUnknownValues(t *testing.T) {
 		_, err := tx.Exec(ctx,
 			`INSERT INTO users (id, display_name, status) VALUES ($1, '테스트', 'pending_approval')`,
 			uuid.New())
-		if err == nil {
-			t.Fatal("users_status_check가 알 수 없는 상태를 허용했다")
-		}
+		assertCheckViolation(t, err, "users_status_check")
 	})
 
 	t.Run("devices.push_authorization", func(t *testing.T) {
@@ -361,9 +386,7 @@ func TestStatusCheckConstraintsRejectUnknownValues(t *testing.T) {
 		_, err := tx.Exec(ctx,
 			`INSERT INTO devices (id, user_id, platform, push_authorization)
 			 VALUES ($1, $2, 'ios', 'maybe')`, uuid.New(), userID)
-		if err == nil {
-			t.Fatal("devices_push_authorization_check가 알 수 없는 값을 허용했다")
-		}
+		assertCheckViolation(t, err, "devices_push_authorization_check")
 	})
 
 	t.Run("outbox_jobs.status", func(t *testing.T) {
@@ -371,9 +394,7 @@ func TestStatusCheckConstraintsRejectUnknownValues(t *testing.T) {
 		_, err := tx.Exec(ctx,
 			`INSERT INTO outbox_jobs (id, type, payload, status)
 			 VALUES ($1, 'x', '{}'::jsonb, 'cancelled')`, uuid.New())
-		if err == nil {
-			t.Fatal("outbox_jobs_status_check가 알 수 없는 상태를 허용했다")
-		}
+		assertCheckViolation(t, err, "outbox_jobs_status_check")
 	})
 }
 
@@ -409,9 +430,8 @@ func TestUserDeletedAtAllowsDeletionPipeline(t *testing.T) {
 	for _, status := range []string{"active", "disabled", "deletion_requested"} {
 		t.Run(status+"은_deleted_at을_거부한다", func(t *testing.T) {
 			tx := begin(t, conn)
-			if err := insert(tx, status, time.Now()); err == nil {
-				t.Fatalf("%s 상태인데 deleted_at이 허용됐다", status)
-			}
+			assertCheckViolation(t, insert(tx, status, time.Now()),
+				"users_deleted_at_requires_terminal_status_check")
 		})
 	}
 

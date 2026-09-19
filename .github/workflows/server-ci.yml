@@ -1,0 +1,134 @@
+# 서버 CI.
+#
+# 이 워크플로가 존재하는 이유는 하나다. `go test ./...`는 TEST_DATABASE_URL이
+# 없으면 PostgreSQL 통합 테스트를 전부 skip하고 `ok`를 출력한다. 스키마 불변식
+# 검증(account_backend_design.md §8)은 전부 그 통합 테스트 안에 있으므로,
+# REQUIRE_DB_TESTS=1을 켜는 주체가 없으면 제약이 통째로 사라져도 초록불이 난다.
+# 게이트는 켜는 주체가 생기기 전까지 게이트가 아니다.
+#
+# GitHub Actions의 `services:` 블록이 아니라 docker compose를 쓴다. services는
+# docker-entrypoint-initdb.d를 마운트할 수 없어서 docker/postgres-init/01-roles.sql을
+# 별도 스텝으로 다시 적용해야 하고, 그러면 CI와 로컬의 역할·기본 권한이 조용히
+# 갈라진다. compose를 쓰면 고정된 postgres 태그와 같은 초기화 경로를 그대로 쓴다.
+
+name: server-ci
+
+on:
+  push:
+    branches: [main, "feature/**"]
+    paths:
+      - "server/**"
+      - ".github/workflows/server-ci.yml"
+  pull_request:
+    paths:
+      - "server/**"
+      - ".github/workflows/server-ci.yml"
+
+# 같은 브랜치에 새 push가 오면 이전 실행을 취소한다.
+concurrency:
+  group: server-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: server
+
+    env:
+      # 마이그레이션 경로가 APP_ENV를 요구한다. 파괴적 방향(down, reset)은
+      # local에서만 허용되므로, CI가 reset을 쓰려면 local이어야 한다.
+      APP_ENV: local
+
+      # docker-compose.yml과 docker/postgres-init/01-roles.sql이 만드는 로컬
+      # 전용 자격이다. 저장소에 이미 평문으로 있고 CI 컨테이너 밖으로 나가지
+      # 않는다. 스테이징·프로덕션 자격은 §12에 따라 분리한다.
+      MIGRATION_DATABASE_URL: postgres://plantogether_migration:local_migration_password@localhost:5432/plantogether?sslmode=disable
+      TEST_DATABASE_URL: postgres://plantogether_migration:local_migration_password@localhost:5432/plantogether?sslmode=disable
+
+      # 이 워크플로의 존재 이유다. skip을 실패로 바꾼다.
+      REQUIRE_DB_TESTS: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # go.mod가 유일한 출처다. 워크플로에 버전을 적으면 go.mod와 갈라진다.
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: gofmt
+        # gofmt -l은 형식이 어긋난 파일 이름을 출력하고 종료 코드는 0이다.
+        # 출력이 비어 있는지 직접 확인해야 CI가 걸린다.
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt가 필요한 파일:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: PostgreSQL 기동
+        # --wait은 compose의 healthcheck(pg_isready)가 통과할 때까지 기다리고,
+        # 통과하지 못하면 실패한다. sleep으로 대체하면 연결 실패가 테스트 실패로
+        # 위장된다.
+        run: docker compose up -d --wait
+
+      - name: 마이그레이션 적용
+        run: go run ./cmd/api -migrate up
+
+      - name: 마이그레이션 status
+        run: go run ./cmd/api -migrate status
+
+      - name: 테스트
+        # -v로 각 테스트의 PASS/SKIP을 남긴다. REQUIRE_DB_TESTS=1이 켜져 있어
+        # skip은 실패가 되지만, 로그에서 통합 테스트가 실제로 돌았는지 사람이
+        # 확인할 수 있어야 한다.
+        run: go test -v -count=1 ./...
+
+      - name: skip이 없었는지 확인
+        # 이중 안전장치다. connect() 헬퍼를 거치지 않는 테스트가 나중에 추가되면
+        # REQUIRE_DB_TESTS만으로는 skip을 잡지 못한다.
+        #
+        # 주의: go test -json은 테스트 파일이 없는 패키지(cmd/api, migrations 등)에도
+        # Action:"skip"을 낸다. 그 줄에는 "Test" 필드가 없다. 두 조건을 함께 걸지
+        # 않으면 이 스텝이 항상 실패한다.
+        run: |
+          go test -count=1 -json ./... > /tmp/test.json
+          skips="$(grep '"Action":"skip"' /tmp/test.json | grep '"Test":' || true)"
+          if [ -n "$skips" ]; then
+            echo "skip된 테스트가 있다. REQUIRE_DB_TESTS=1에서는 허용하지 않는다:"
+            echo "$skips"
+            exit 1
+          fi
+
+      - name: 마이그레이션 down 왕복
+        # up만 확인하면 되돌릴 수 없는 마이그레이션이 들어와도 모른다.
+        # APP_ENV=local이므로 파괴적 방향 가드를 통과한다.
+        run: |
+          go run ./cmd/api -migrate reset
+          go run ./cmd/api -migrate up
+
+      - name: 파괴적 마이그레이션 가드가 로컬 밖에서 막는지 확인
+        # 가드의 단위 테스트는 postgres 패키지에 있지만, 진입점에서 실제로
+        # 연결되는지는 여기서만 확인된다. 프로덕션 자격이 주입된 api task에서
+        # -migrate reset이 실행되는 상황이 이 스텝이 막는 것이다.
+        env:
+          APP_ENV: production
+        run: |
+          if go run ./cmd/api -migrate reset; then
+            echo "APP_ENV=production에서 -migrate reset이 성공했다. 가드가 연결되지 않았다."
+            exit 1
+          fi
+          echo "APP_ENV=production에서 reset이 거부됐다."
+
+      - name: PostgreSQL 종료
+        if: always()
+        run: docker compose down -v

@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	// pgx의 database/sql 드라이버. goose는 *sql.DB를 요구하므로 pgxpool이
@@ -10,6 +11,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
+	"plantogether/server/internal/platform/config"
 	"plantogether/server/migrations"
 )
 
@@ -27,6 +29,22 @@ const (
 	MigrateStatus MigrateDirection = "status"
 )
 
+// ErrDestructiveMigrationNotLocal은 파괴적 마이그레이션이 로컬 밖에서
+// 요청됐을 때 반환된다.
+var ErrDestructiveMigrationNotLocal = errors.New(
+	"파괴적 마이그레이션은 APP_ENV=local에서만 허용된다")
+
+// isDestructive는 방향이 데이터를 잃는지 판정한다.
+//
+// reset뿐 아니라 down도 포함한다. 현재 마이그레이션은 00001 하나뿐이라
+// down 한 번이 reset과 똑같이 8개 테이블을 전부 DROP한다. reset만 막으면
+// 가드가 이름만 남고 실제로는 뚫려 있다. 마이그레이션이 늘어나 down의 폭이
+// 줄어든 뒤에도, 되돌리기는 운영 DB에서 사람이 판단할 일이지 프로세스 인자
+// 하나로 실행될 일이 아니므로 목록에 남긴다.
+func isDestructive(direction MigrateDirection) bool {
+	return direction == MigrateReset || direction == MigrateDownOne
+}
+
 // Migrate는 embed된 SQL 마이그레이션을 실행한다.
 //
 // databaseURL은 MIGRATION_DATABASE_URL이어야 한다. §11이 DB 역할을 migration,
@@ -35,7 +53,22 @@ const (
 //
 // goose를 라이브러리로 쓰고 embed.FS를 넘긴다. 별도 goose 바이너리 설치를
 // 요구하지 않는다.
-func Migrate(ctx context.Context, databaseURL string, direction MigrateDirection) error {
+//
+// env는 APP_ENV다. 파괴적 방향(down, reset)은 config.EnvLocal에서만 허용한다.
+// 이 판정을 호출자가 아니라 여기에 두는 이유는 두 가지다. 프로덕션 api task에
+// MIGRATION_DATABASE_URL이 주입된 상태에서 -migrate reset이 한 번 실행되면
+// 스키마 전체가 사라지는데, 호출자 쪽 CLI 인자 검사는 다음에 추가될 진입점이
+// 그대로 빠뜨릴 수 있다. DROP을 실제로 수행하는 함수가 스스로 거부해야 우회
+// 경로가 생기지 않는다.
+func Migrate(ctx context.Context, databaseURL string, direction MigrateDirection, env string) error {
+	// 연결을 열기 전에 판정한다. 거부는 DB 왕복 없이 성립해야 하고, 그래야
+	// 실제 PostgreSQL 없이도 가드를 테스트할 수 있다.
+	if isDestructive(direction) && env != config.EnvLocal {
+		// 환경 이름은 비밀이 아니고 진단에 필요하므로 그대로 싣는다.
+		// DSN은 싣지 않는다 (§11).
+		return fmt.Errorf("%w: 방향 %s, APP_ENV %s", ErrDestructiveMigrationNotLocal, direction, env)
+	}
+
 	db, err := sql.Open("pgx", databaseURL)
 	if err != nil {
 		// DSN 원문이 오류에 실리지 않게 감싸지 않는다.

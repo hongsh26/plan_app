@@ -41,6 +41,14 @@ const (
 	RoleScheduler Role = "scheduler"
 )
 
+// APP_ENV의 허용 값이다. 문자열 리터럴을 여러 패키지에 흩어 두면 파괴적
+// 마이그레이션 가드가 오타 하나로 조용히 무력화되므로 여기서만 정의한다.
+const (
+	EnvLocal      = "local"
+	EnvStaging    = "staging"
+	EnvProduction = "production"
+)
+
 // Config는 모든 역할이 공유하는 설정과 역할별 설정을 담는다.
 type Config struct {
 	Role Role
@@ -95,7 +103,7 @@ func Load(role Role, lookup Lookup) (Config, error) {
 
 	cfg := Config{
 		Role:             role,
-		Env:              v.requiredOneOf(envEnv, "local", "staging", "production"),
+		Env:              v.requiredOneOf(envEnv, EnvLocal, EnvStaging, EnvProduction),
 		DatabaseURL:      v.requiredNonEmpty(envDatabaseURL),
 		DatabaseMaxConns: int32(v.optionalInt(envDatabaseMaxConns, 10, 1, 1000)),
 		ShutdownTimeout:  v.optionalDuration(envShutdownTimeout, 15*time.Second),
@@ -117,15 +125,37 @@ func Load(role Role, lookup Lookup) (Config, error) {
 	return cfg, nil
 }
 
-// LoadMigrationDatabaseURL은 마이그레이션 전용 자격을 읽는다. 런타임 설정과
+// MigrationSettings는 마이그레이션 실행에 필요한 설정이다. 런타임 Config와
 // 분리해 두어 api 자격으로 DDL을 실행하는 경로를 만들지 않는다.
-func LoadMigrationDatabaseURL(lookup Lookup) (string, error) {
-	v := &validator{lookup: lookup}
-	url := v.requiredNonEmpty(MigrationDatabaseURLEnv)
-	if err := v.err(); err != nil {
-		return "", err
+type MigrationSettings struct {
+	// Env는 APP_ENV다. 파괴적 마이그레이션(down, reset)을 배포 환경에서
+	// 거부하는 판단 근거이므로 마이그레이션 경로에서도 필수다.
+	Env string
+
+	// DatabaseURL은 MIGRATION_DATABASE_URL이다. DDL 권한이 있는 유일한 역할의
+	// 자격이다 (§11).
+	DatabaseURL string
+}
+
+// LoadMigrationSettings는 마이그레이션 전용 설정을 읽는다.
+//
+// APP_ENV를 여기서도 필수로 요구한다. 환경을 모르면 파괴적 연산을 거부할지
+// 판단할 수 없고, "모르면 허용"은 프로덕션에서 스키마를 통째로 날리는 쪽으로
+// 실패한다.
+func LoadMigrationSettings(lookup Lookup) (MigrationSettings, error) {
+	if lookup == nil {
+		return MigrationSettings{}, errors.New("config: lookup이 nil이다")
 	}
-	return url, nil
+
+	v := &validator{lookup: lookup}
+	s := MigrationSettings{
+		Env:         v.requiredOneOf(envEnv, EnvLocal, EnvStaging, EnvProduction),
+		DatabaseURL: v.requiredNonEmpty(MigrationDatabaseURLEnv),
+	}
+	if err := v.err(); err != nil {
+		return MigrationSettings{}, err
+	}
+	return s, nil
 }
 
 // validator는 누락과 형식 오류를 모아 둔다.

@@ -5,7 +5,8 @@
 //
 // -migrate 플래그는 MIGRATION_DATABASE_URL 자격으로 마이그레이션만 실행하고
 // 종료한다. 런타임 DATABASE_URL(api 역할)은 DDL 권한이 없어야 하므로 두 자격을
-// 섞지 않는다 (§11).
+// 섞지 않는다 (§11). 파괴적 방향(down, reset)은 postgres.Migrate가 APP_ENV를
+// 보고 로컬 밖에서 거부한다.
 package main
 
 import (
@@ -27,7 +28,8 @@ import (
 func main() {
 	migrateDirection := flag.String("migrate", "",
 		"마이그레이션만 실행하고 종료한다 (up, down, reset, status). "+
-			"MIGRATION_DATABASE_URL을 사용한다.")
+			"MIGRATION_DATABASE_URL과 APP_ENV가 필요하다. "+
+			"파괴적 방향(down, reset)은 APP_ENV=local에서만 허용된다.")
 	flag.Parse()
 
 	if *migrateDirection != "" {
@@ -46,14 +48,14 @@ func main() {
 }
 
 func runMigrate(direction string) error {
-	databaseURL, err := config.LoadMigrationDatabaseURL(config.FromEnv())
+	settings, err := config.LoadMigrationSettings(config.FromEnv())
 	if err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	return postgres.Migrate(ctx, databaseURL, postgres.MigrateDirection(direction))
+	return postgres.Migrate(ctx, settings.DatabaseURL, postgres.MigrateDirection(direction), settings.Env)
 }
 
 func run() error {

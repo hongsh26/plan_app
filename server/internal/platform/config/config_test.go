@@ -190,19 +190,53 @@ func TestLoadParsesOptionalOverrides(t *testing.T) {
 }
 
 // 마이그레이션 자격은 런타임 자격과 분리돼 있어야 한다 (§11의 DB 역할 분리).
-func TestLoadMigrationDatabaseURL(t *testing.T) {
-	if _, err := LoadMigrationDatabaseURL(FromMap(validEnv())); err == nil {
+func TestLoadMigrationSettings(t *testing.T) {
+	const migrationURL = "postgres://migration@localhost:5432/db"
+
+	if _, err := LoadMigrationSettings(FromMap(validEnv())); err == nil {
 		t.Fatal("MIGRATION_DATABASE_URL 없이 통과했다. DATABASE_URL로 대체되면 안 된다")
 	}
 
-	got, err := LoadMigrationDatabaseURL(FromMap(map[string]string{
-		MigrationDatabaseURLEnv: "postgres://migration@localhost:5432/db",
+	got, err := LoadMigrationSettings(FromMap(map[string]string{
+		"APP_ENV":               EnvLocal,
+		MigrationDatabaseURLEnv: migrationURL,
 	}))
 	if err != nil {
-		t.Fatalf("유효한 마이그레이션 자격이 거부됐다: %v", err)
+		t.Fatalf("유효한 마이그레이션 설정이 거부됐다: %v", err)
 	}
-	if got != "postgres://migration@localhost:5432/db" {
-		t.Errorf("반환값 = %q", got)
+	if got.DatabaseURL != migrationURL {
+		t.Errorf("DatabaseURL = %q", got.DatabaseURL)
+	}
+	if got.Env != EnvLocal {
+		t.Errorf("Env = %q, want %q", got.Env, EnvLocal)
+	}
+}
+
+// APP_ENV는 마이그레이션 경로에서도 필수다. 환경을 모르면 파괴적 방향을
+// 거부할지 판단할 수 없고, postgres.Migrate의 가드가 빈 문자열을 받게 된다.
+func TestLoadMigrationSettingsRequiresAppEnv(t *testing.T) {
+	_, err := LoadMigrationSettings(FromMap(map[string]string{
+		MigrationDatabaseURLEnv: "postgres://migration@localhost:5432/db",
+	}))
+	if err == nil {
+		t.Fatal("APP_ENV 없이 마이그레이션 설정이 통과했다")
+	}
+	if !strings.Contains(err.Error(), "APP_ENV") {
+		t.Errorf("오류가 APP_ENV를 지목하지 않는다: %v", err)
+	}
+
+	_, err = LoadMigrationSettings(FromMap(map[string]string{
+		"APP_ENV":               "dev",
+		MigrationDatabaseURLEnv: "postgres://migration@localhost:5432/db",
+	}))
+	if err == nil {
+		t.Fatal("허용되지 않은 APP_ENV가 마이그레이션 설정에서 통과했다")
+	}
+}
+
+func TestLoadMigrationSettingsRejectsNilLookup(t *testing.T) {
+	if _, err := LoadMigrationSettings(nil); err == nil {
+		t.Fatal("nil lookup이 통과했다")
 	}
 }
 
