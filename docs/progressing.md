@@ -44,6 +44,7 @@
 
 - **§7.1의 settled horizon 읽기 쿼리는 미구현이다.** P0은 쓰기 쪽 스키마만 다뤘다. sync 변경 유실 방지의 핵심은 읽기 경로에 있으므로, 이것이 구현되기 전까지 개정은 절반만 적용된 상태다. §15의 순서 역전 회귀 테스트와 함께 **P6**에서 반드시 처리한다.
 - KMS envelope encryption 미적용 (로컬에 KMS 없음, ciphertext 열만 비워둠)
+- **DB 역할 분리에 자동 커버리지가 없다.** `plantogether_api`의 DDL 거부와 `plantogether_readonly`의 DELETE 거부는 `ccc0b1b`에서 사람이 한 번 확인했을 뿐이다. 모든 통합 테스트가 DDL 권한이 있는 `plantogether_migration`으로 접속하므로 `01-roles.sql`의 `ALTER DEFAULT PRIVILEGES`가 회귀해도 CI는 초록이다. P1에서 각 역할 자격으로 `CREATE TABLE`·`DELETE`를 시도해 SQLSTATE `42501`로 거부되는지 보는 통합 테스트를 추가한다.
 - **CI를 GitHub Actions에서 실제로 돌려본 적이 없다.** 로컬에서 각 스텝을 동등하게 실행해 확인했을 뿐이다. push 후 첫 실행이 초록인지, 그리고 일부러 테스트를 깨뜨렸을 때 빨간불이 나는지를 확인해야 M-8이 실제로 닫힌다. 초록불 하나는 "테스트가 돌아서 통과"와 "skip돼서 통과"를 구분하지 못한다
 
 ### 최근 결정

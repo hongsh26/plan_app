@@ -58,8 +58,16 @@ func isDestructive(direction MigrateDirection) bool {
 // 이 판정을 호출자가 아니라 여기에 두는 이유는 두 가지다. 프로덕션 api task에
 // MIGRATION_DATABASE_URL이 주입된 상태에서 -migrate reset이 한 번 실행되면
 // 스키마 전체가 사라지는데, 호출자 쪽 CLI 인자 검사는 다음에 추가될 진입점이
-// 그대로 빠뜨릴 수 있다. DROP을 실제로 수행하는 함수가 스스로 거부해야 우회
-// 경로가 생기지 않는다.
+// 그대로 빠뜨릴 수 있다. DROP을 실제로 수행하는 함수가 스스로 거부해야
+// 이 모듈의 어느 진입점을 통해서도 우회되지 않는다.
+//
+// 이 가드의 범위는 거기까지다. 두 가지는 막지 못한다.
+//   - MIGRATION_DATABASE_URL을 쥔 사람이 psql이나 goose 바이너리를 직접 쓰는 것.
+//     DB 수준 방어(배포 시에만 migration 역할에 DDL 부여)는 별개 과제다.
+//   - 미래의 호출자가 APP_ENV를 읽지 않고 config.EnvLocal을 하드코딩하는 것.
+//     env를 named type으로 바꿔도 막히지 않는다. Go는 untyped 문자열 상수를
+//     named string type에 암묵 변환하므로 Migrate(..., "local")이 그대로
+//     컴파일된다. 이 경로는 타입이 아니라 리뷰가 막아야 한다.
 func Migrate(ctx context.Context, databaseURL string, direction MigrateDirection, env string) error {
 	// 연결을 열기 전에 판정한다. 거부는 DB 왕복 없이 성립해야 하고, 그래야
 	// 실제 PostgreSQL 없이도 가드를 테스트할 수 있다.

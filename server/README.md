@@ -147,9 +147,10 @@ REQUIRE_DB_TESTS=1 TEST_DATABASE_URL='...' go test ./test/...
 초록불이 난다.
 
 CI는 GitHub Actions의 `services:` 블록이 아니라 `docker compose up -d --wait`을
-쓴다. `services:`는 `docker-entrypoint-initdb.d`를 마운트할 수 없어
-`docker/postgres-init/01-roles.sql`을 따로 다시 적용해야 하고, 그러면 CI와
-로컬의 역할·기본 권한이 갈라진다.
+쓴다. `services:`에도 `volumes:` 키는 있지만, 서비스 컨테이너는
+`actions/checkout`보다 먼저 기동되므로 그 시점에 작업 공간의
+`docker/postgres-init/`이 아직 없다. 결국 `01-roles.sql`을 따로 다시 적용해야
+하고, 그러면 CI와 로컬의 역할·기본 권한이 갈라진다.
 
 CI가 확인하는 것:
 
