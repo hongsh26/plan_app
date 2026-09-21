@@ -1,13 +1,19 @@
 openapi: 3.1.0
 
-# P0 서버 골격 범위의 계약만 담는다.
+# P1 인증 범위까지의 계약을 담는다.
 #
-# /v1 도메인 endpoint 전체(auth, me, devices, sync, calendar-write-commands)는
-# account_backend_design.md §6이 정의하지만 P1 이후에 구현과 함께 추가한다.
-# 계약만 먼저 적어 두면 handler와 어긋난 채로 남기 쉽다.
+# 담긴 것: 운영 health endpoint, 인증(§5), 계정·기기 조회.
+# 아직 없는 것: PATCH/DELETE /v1/me, DELETE /v1/devices/{id},
+# PUT /v1/devices/{id}/push-token, sync, calendar-write-commands.
+# mutation은 Idempotency-Key와 expected_version을 한 곳에서 강제하는 mutation
+# transaction helper와 함께 추가한다. 구현보다 계약을 먼저 적으면 handler와
+# 어긋난 채로 남기 쉽다.
 #
 # health endpoint는 /v1 아래에 두지 않는다. API 버전 계약의 일부가 아니라
 # 인프라(load balancer, 오케스트레이터)가 보는 운영 endpoint이기 때문이다.
+#
+# 모든 응답에는 X-Request-ID 헤더가 있다. 서버가 발급하며 클라이언트 값을
+# 채택하지 않는다.
 
 info:
   title: PlanTogether Server
@@ -15,8 +21,11 @@ info:
   description: |
     Launch MVP 서버 API. 기준 설계는 docs/account_backend_design.md다.
 
-    P0 범위는 운영 health endpoint 두 개뿐이다. 인증과 도메인 endpoint는
-    구현과 함께 추가한다.
+    인증 endpoint(/v1/auth/*)는 §6의 Idempotency-Key 규칙 밖이다. 로그인
+    시점에는 idempotency 키를 묶을 user_id·device_id가 없다.
+
+security:
+  - bearerAuth: []
 
 servers:
   - url: http://localhost:8080
@@ -73,7 +82,157 @@ paths:
               example:
                 status: unavailable
 
+  /v1/auth/apple:
+    post:
+      summary: Apple 로그인·가입
+      description: |
+        account_backend_design.md §5.1. identity token의 서명·iss·aud·exp·nonce를
+        검증하고 authorization code를 즉시 교환한다. 같은 Apple subject는 같은
+        user_id에 연결된다. 로그인할 때마다 서버가 새 device_id를 발급한다.
+
+        raw_nonce는 iOS가 만든 원문이다. iOS는 그 SHA-256 hex를 Apple 요청의
+        nonce로 보내야 한다.
+      operationId: signInWithApple
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignInRequest"
+      responses:
+        "200":
+          description: 로그인 성공.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "423":
+          $ref: "#/components/responses/AccountLocked"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/auth/refresh:
+    post:
+      summary: refresh token 회전
+      description: |
+        §5.2. 성공하면 이전 refresh token은 폐기되고 새 쌍이 발급된다. 이미 쓰인
+        token을 다시 보내면 탈취로 간주해 그 기기의 token family와 기기를 모두
+        폐기하고 401을 반환한다. 응답을 잃고 같은 token으로 재시도해도 같다.
+      operationId: refreshSession
+      tags: [auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: 회전 성공.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "423":
+          $ref: "#/components/responses/AccountLocked"
+
+  /v1/auth/logout:
+    post:
+      summary: 현재 기기 로그아웃
+      description: |
+        §5.2. 현재 기기의 세션과 기기 자체를 폐기한다. 다른 기기는 영향이 없다.
+        이미 로그아웃한 기기에 다시 호출해도 성공한다(access token이 아직
+        인증되는 동안).
+      operationId: logout
+      tags: [auth]
+      responses:
+        "204":
+          description: 로그아웃됐다.
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "423":
+          $ref: "#/components/responses/AccountLocked"
+
+  /v1/me:
+    get:
+      summary: 내 계정 조회
+      operationId: getMe
+      tags: [account]
+      responses:
+        "200":
+          description: 계정 정보.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "423":
+          $ref: "#/components/responses/AccountLocked"
+
+  /v1/devices:
+    get:
+      summary: 로그인된 기기 목록
+      description: |
+        §5.2. 폐기되지 않은 기기만 보여준다. push token은 반환하지 않는다.
+      operationId: listDevices
+      tags: [account]
+      responses:
+        "200":
+          description: 기기 목록.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DevicesResponse"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "423":
+          $ref: "#/components/responses/AccountLocked"
+
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: 15분 수명의 access token. 서명 외에 기기 폐기와 계정 상태를 매 요청 DB에서 확인한다.
+
+  responses:
+    InvalidRequest:
+      description: 형식 또는 필드 검증 실패.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InvalidSession:
+      description: 자격이 무효다. 원인(만료, 폐기, 위조, 재사용)을 구분하지 않는다. 클라이언트는 refresh를 시도하고, refresh도 401이면 다시 로그인한다.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    AccountLocked:
+      description: 계정이 active가 아니다(disabled, deletion_requested, deleting, deleted).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unavailable:
+      description: Apple 같은 외부 의존성 장애. 사용자 자격 문제가 아니므로 클라이언트는 로그아웃하지 않고 재시도한다.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
   schemas:
     HealthResponse:
       type: object
@@ -85,3 +244,121 @@ components:
           enum: [ok, unavailable]
           description: |
             운영 상태만 나타낸다. 진단 상세를 담지 않는다.
+
+    ErrorResponse:
+      type: object
+      required: [code, message, request_id]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          enum: [invalid_request, invalid_session, forbidden, not_found, version_conflict,
+                 idempotency_mismatch, sync_cursor_expired, account_locked, rate_limited, internal]
+        message:
+          type: string
+          description: 사람이 읽는 짧은 설명. 클라이언트는 code로 분기한다.
+        request_id:
+          type: string
+          format: uuid
+        current_version:
+          type: integer
+          format: int64
+          description: version_conflict에서만 있다.
+
+    SignInRequest:
+      type: object
+      required: [identity_token, authorization_code, raw_nonce]
+      additionalProperties: false
+      properties:
+        identity_token:
+          type: string
+        authorization_code:
+          type: string
+          description: 1회용, 5분 유효. 서버가 즉시 Apple과 교환한다.
+        raw_nonce:
+          type: string
+        display_name:
+          type: string
+          description: Apple이 최초 동의 때 준 이름. 신규 가입에만 쓴다. 제어 문자는 지우고 50자로 자른다.
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      additionalProperties: false
+      properties:
+        refresh_token:
+          type: string
+
+    SessionResponse:
+      type: object
+      required: [request_id, user_id, device_id, access_token, access_token_expires_at,
+                 refresh_token, refresh_token_expires_at, new_user]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        user_id: {type: string, format: uuid}
+        device_id:
+          type: string
+          format: uuid
+          description: 서버가 발급한 기기 ID. access token에 결합돼 있다.
+        access_token: {type: string}
+        access_token_expires_at: {type: string, format: date-time}
+        refresh_token:
+          type: string
+          description: Keychain에만 저장한다. 로그·분석 이벤트에 남기지 않는다.
+        refresh_token_expires_at: {type: string, format: date-time}
+        new_user: {type: boolean}
+
+    User:
+      type: object
+      required: [id, display_name, status, version, created_at]
+      additionalProperties: false
+      properties:
+        id: {type: string, format: uuid}
+        display_name: {type: string}
+        status:
+          type: string
+          enum: [active, disabled, deletion_requested, deleting, deleted]
+        version: {type: integer, format: int64}
+        created_at: {type: string, format: date-time}
+
+    MeResponse:
+      type: object
+      required: [request_id, user]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        user:
+          $ref: "#/components/schemas/User"
+
+    Device:
+      type: object
+      required: [id, platform, current, push_authorization, time_sensitive_setting,
+                 last_seen_at, version, created_at]
+      additionalProperties: false
+      properties:
+        id: {type: string, format: uuid}
+        platform: {type: string, enum: [ios]}
+        current:
+          type: boolean
+          description: 이 요청을 보낸 기기인지.
+        push_authorization:
+          type: string
+          enum: [unknown, authorized, provisional, denied]
+        time_sensitive_setting:
+          type: string
+          enum: [enabled, disabled, not_supported]
+        last_seen_at: {type: [string, "null"], format: date-time}
+        version: {type: integer, format: int64}
+        created_at: {type: string, format: date-time}
+
+    DevicesResponse:
+      type: object
+      required: [request_id, devices]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/Device"

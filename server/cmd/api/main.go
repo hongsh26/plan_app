@@ -1,7 +1,8 @@
 // Command api는 HTTP API 프로세스다. account_backend_design.md §9의 역할
 // 구분에서 인증, 권한, 상태 전이, sync를 담당한다.
 //
-// P0에서는 liveness와 readiness만 제공한다. 인증과 도메인 endpoint는 P1 이후다.
+// P1부터 인증(§5)과 계정 조회 endpoint를 제공한다. 인증 설정 규칙은
+// config.LoadAuth에 있다.
 //
 // -migrate 플래그는 MIGRATION_DATABASE_URL 자격으로 마이그레이션만 실행하고
 // 종료한다. 런타임 DATABASE_URL(api 역할)은 DDL 권한이 없어야 하므로 두 자격을
@@ -20,9 +21,13 @@ import (
 	"os/signal"
 	"syscall"
 
+	"plantogether/server/internal/account"
+	"plantogether/server/internal/auth"
+	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/config"
 	"plantogether/server/internal/platform/httpapi"
 	"plantogether/server/internal/platform/postgres"
+	"plantogether/server/internal/platform/secretbox"
 )
 
 func main() {
@@ -64,6 +69,11 @@ func run() error {
 		return err
 	}
 
+	authSettings, err := config.LoadAuth(cfg.Env, config.FromEnv())
+	if err != nil {
+		return err
+	}
+
 	logger := httpapi.NewLogger(cfg.LogLevel, string(cfg.Role))
 
 	// SIGINT/SIGTERM에 취소되는 context.
@@ -78,7 +88,15 @@ func run() error {
 	}
 	defer pool.Close()
 
-	server := httpapi.NewServer(cfg.HTTPAddr, httpapi.NewMux(pool, logger))
+	authHandler, err := newAuthHandler(cfg, authSettings, pool, logger)
+	if err != nil {
+		return err
+	}
+	mux := httpapi.NewMux(pool, logger)
+	authHandler.Register(mux)
+	account.NewHandler(pool.Pool(), logger).Register(mux, authHandler.Require)
+
+	server := httpapi.NewServer(cfg.HTTPAddr, httpapi.Wrap(logger, mux))
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -121,4 +139,53 @@ func run() error {
 		slog.String("result", "success"),
 	)
 	return <-serveErr
+}
+
+// newAuthHandler는 인증 서비스를 조립한다.
+//
+// Apple code 교환 자격이 없으면 교환을 건너뛴다. config.LoadAuth가 이 조합을
+// APP_ENV=local에서만 허용하므로 여기서 다시 확인하지 않는다. 대신 기동 로그에
+// 남겨 개발자가 모르고 지나가지 않게 한다.
+func newAuthHandler(cfg config.Config, s config.AuthSettings, pool *postgres.Pool, logger *slog.Logger) (*auth.Handler, error) {
+	tokens, err := auth.NewAccessTokens(s.AccessTokenSigningKey, nil)
+	if err != nil {
+		return nil, err
+	}
+	verifier, err := appleid.NewVerifier(s.AppleClientID, "", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	deps := auth.Deps{Pool: pool.Pool(), Apple: verifier, Tokens: tokens}
+
+	if s.AppleCodeExchange != nil {
+		key, err := appleid.ParsePrivateKey(s.AppleCodeExchange.PrivateKeyPEM)
+		if err != nil {
+			return nil, err
+		}
+		client, err := appleid.NewClient(appleid.Credentials{
+			TeamID:     s.AppleCodeExchange.TeamID,
+			KeyID:      s.AppleCodeExchange.KeyID,
+			ClientID:   s.AppleClientID,
+			PrivateKey: key,
+		}, "", "", nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		box, err := secretbox.NewLocal(cfg.Env, s.TokenEncryptionKey)
+		if err != nil {
+			return nil, err
+		}
+		deps.CodeExchanger = client
+		deps.Sealer = box
+	} else {
+		logger.Warn("Apple code 교환이 꺼져 있다. Apple refresh token을 저장하지 않으므로 계정 삭제 시 revoke할 수 없다 (로컬 전용)",
+			slog.String("action", "startup"),
+		)
+	}
+
+	svc, err := auth.NewService(deps)
+	if err != nil {
+		return nil, err
+	}
+	return auth.NewHandler(svc, logger), nil
 }

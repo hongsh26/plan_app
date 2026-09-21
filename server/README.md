@@ -2,29 +2,35 @@
 
 Go + PostgreSQL 모듈러 모놀리스. 기준 설계는 [`docs/account_backend_design.md`](../docs/account_backend_design.md)다.
 
-현재 구현 범위는 **P0 서버 골격**이다. 세 진입점, 설정 검증, health/readiness,
-8개 테이블 마이그레이션까지다. 인증과 도메인 endpoint는 P1 이후다.
+현재 구현 범위는 **P1 인증**까지다. P0 서버 골격(세 진입점, 설정 검증,
+health/readiness, 8개 테이블 마이그레이션) 위에 Apple 로그인, 세션 회전,
+로그아웃, 계정·기기 조회를 올렸다. 계정 수정·삭제와 기기 mutation은
+Idempotency-Key를 강제하는 mutation helper와 함께 들어온다.
 
 ## 구성
 
 | 경로 | 역할 |
 |---|---|
-| `cmd/api/` | HTTP API. 인증·권한·상태 전이·sync (§9). P0에서는 health endpoint와 마이그레이션 실행만 |
+| `cmd/api/` | HTTP API. 인증·권한·상태 전이·sync (§9). 현재 health, 인증, 계정 조회와 마이그레이션 실행 |
 | `cmd/worker/` | APNs 발송, 계정 삭제, 명령 만료·재할당 (§9). P0에서는 no-op 루프 |
 | `cmd/scheduler/` | 만료 초대, 알림 예약, 작업 복구 (§9). P0에서는 no-op 루프 |
 | `internal/platform/config/` | 환경 변수 로드와 기동 시 검증 |
 | `internal/platform/postgres/` | pgx 연결 pool과 goose 마이그레이션 러너 |
-| `internal/platform/httpapi/` | `net/http` 서버 골격, health/readiness 핸들러, 구조화 로거 |
+| `internal/auth/` | Apple 로그인, refresh 회전·재사용 탐지, 로그아웃, 인증 미들웨어 (§5) |
+| `internal/account/` | `GET /v1/me`, `GET /v1/devices` |
+| `internal/platform/appleid/` | Apple identity token 검증(JWKS), code 교환, revoke |
+| `internal/platform/secretbox/` | Apple refresh token 암호화. 로컬 전용 AES-GCM만 있고 KMS 구현은 아직 없다 |
+| `internal/platform/httpapi/` | `net/http` 서버 골격, request_id·access log 미들웨어, §6 오류 응답, health/readiness |
 | `migrations/` | SQL 마이그레이션. 바이너리에 embed된다 |
-| `openapi/` | API 계약. P0 범위인 health endpoint만 |
+| `openapi/` | API 계약. health, 인증, 계정 조회 |
 | `test/` | PostgreSQL 통합 테스트 (§8 불변식 검증) |
 
-도메인 패키지(`internal/auth/`, `internal/account/`, `internal/sync/` 등)는 §13에
-있지만 P0에서 만들지 않는다. 빈 디렉터리를 두지 않는다.
+나머지 도메인 패키지(`internal/sync/`, `internal/party/` 등)는 §13에 있지만
+구현할 때 만든다. 빈 디렉터리를 두지 않는다.
 
 ## 사전 요구
 
-- Go 1.27 이상
+- Go 1.27.1 이상 (`go.mod`의 `go` 지시어가 기준이다. 1.27.0으로는 빌드되지 않는다)
 - Docker와 Docker Compose
 
 goose 바이너리는 **필요 없다.** goose를 라이브러리로 쓰고 마이그레이션을
@@ -62,6 +68,15 @@ cp .env.example .env
 ```sh
 set -a && . ./.env && set +a
 ```
+
+api는 `ACCESS_TOKEN_SIGNING_KEY`와 `APPLE_CLIENT_ID`가 없으면 기동하지 않는다.
+서명 키는 `openssl rand -base64 32`로 만든다. Apple code 교환 자격
+(`APPLE_TEAM_ID`, `APPLE_KEY_ID`, `APPLE_PRIVATE_KEY`)은 로컬에서 선택이다.
+없으면 교환을 건너뛰고 기동 로그에 경고를 남긴다.
+
+**api는 `APP_ENV=local`에서만 기동한다.** Apple refresh token을 KMS로 암호화하는
+구현이 아직 없어서, 스테이징·프로덕션에서는 로컬 키 암호화로 조용히 대체하지 않고
+기동을 거부한다.
 
 ### 3. 마이그레이션 적용
 
@@ -125,7 +140,15 @@ go test ./internal/...
 
 ### PostgreSQL 통합 테스트
 
-§8의 필수 불변식을 DB가 실제로 거부하는지 확인한다.
+두 종류가 있다.
+
+- `test/`: §8 불변식을 DB가 실제로 거부하는지(migration 역할), 그리고 DB 역할
+  분리가 지켜지는지(각 역할 자격)를 본다.
+- `internal/auth/`, `internal/account/`: 인증 인수 조건(§14)을 실제 DB에서 본다.
+  **api 런타임 역할**로 접속한다. migration 역할로 돌리면 서비스가 권한 밖의
+  동작에 기대도 테스트가 통과하고 운영에서야 실패한다.
+
+필요한 변수는 `.env.example`의 "통합 테스트 전용" 절에 있다.
 
 ```sh
 TEST_DATABASE_URL='postgres://plantogether_migration:local_migration_password@localhost:5432/plantogether?sslmode=disable' \
@@ -136,12 +159,15 @@ TEST_DATABASE_URL='postgres://plantogether_migration:local_migration_password@lo
 `REQUIRE_DB_TESTS=1`을 켠다. 그러면 DB에 연결할 수 없을 때 skip 대신 실패한다.
 
 ```sh
-REQUIRE_DB_TESTS=1 TEST_DATABASE_URL='...' go test ./test/...
+set -a && . ./.env && set +a
+REQUIRE_DB_TESTS=1 go test ./...
 ```
 
 ## CI
 
-`.github/workflows/server-ci.yml`이 `server/` 변경마다 돈다. 이 워크플로가
+`.github/workflows/server-ci.yml`이 모든 push(`main`, `feature/**`)와 PR마다 돈다.
+`paths` 필터를 두지 않는다. required status check로 지정했을 때 필터에 걸린 PR이
+pending에서 멈추는 것을 막고, 초록불이 언제나 "테스트가 돌아서 통과"를 뜻하게 한다. 이 워크플로가
 `REQUIRE_DB_TESTS=1`을 켜는 주체다. 켜는 주체가 없으면 `go test ./...`는 통합
 테스트를 전부 skip하고 `ok`를 출력하므로, §8 불변식 검증이 통째로 사라져도
 초록불이 난다.
@@ -155,6 +181,7 @@ CI는 GitHub Actions의 `services:` 블록이 아니라 `docker compose up -d --
 CI가 확인하는 것:
 
 - `gofmt`, `go vet`
+- DB 역할 분리 (api·worker의 DDL 거부와 DML 허용, readonly의 쓰기 거부)
 - 마이그레이션 `up` -> `status` -> `reset` -> `up` 왕복
 - `REQUIRE_DB_TESTS=1`로 통합 테스트 실행, 그리고 skip된 테스트가 **0건**인지
   별도 확인 (`connect()` 헬퍼를 거치지 않는 테스트가 나중에 추가될 경우 대비)
