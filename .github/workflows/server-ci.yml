@@ -15,16 +15,16 @@
 
 name: server-ci
 
+# paths 필터를 두지 않는다. 이 워크플로의 job은 main의 required status check다.
+# 워크플로 수준 paths 필터에 걸려 실행되지 않은 PR에는 check가 아예 보고되지
+# 않아 병합이 pending에서 영원히 멈춘다. job 안에서 변경 경로를 보고 테스트를
+# 건너뛰는 방식도 택하지 않았다. 그러면 초록불이 "통과"와 "안 돌림"을 다시
+# 구분하지 못하게 되고, 이는 위에서 말한 이 워크플로의 존재 이유와 정면으로
+# 충돌한다. 실행 시간(약 1분 20초)보다 신호의 정확성이 중요하다.
 on:
   push:
     branches: [main, "feature/**"]
-    paths:
-      - "server/**"
-      - ".github/workflows/server-ci.yml"
   pull_request:
-    paths:
-      - "server/**"
-      - ".github/workflows/server-ci.yml"
 
 # 같은 브랜치에 새 push가 오면 이전 실행을 취소한다.
 concurrency:
