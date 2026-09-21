@@ -24,7 +24,7 @@
 
 ### P0 서버 골격 진행 상황
 
-`feature/server-skeleton`에서 구현하고 독립 리뷰 2회를 받았다. Medium은 전부 닫았고 **`a611103`으로 `main`에 fast-forward 병합했다**(히스토리가 선형이라 기존 관례를 따랐다). `main`은 `origin/main`보다 7커밋 앞서 있고 **아직 push하지 않았다.**
+`feature/server-skeleton`에서 구현하고 독립 리뷰 2회를 받았다. Medium은 전부 닫았고 `main`에 병합해 push했다(`ea6d095`). **원격 CI 확인까지 끝나 M-8이 닫혔다**(`docs/rec/2026-09-21_1550_ci_remote_verification.md`). 원격 실행에서 PASS 64·SKIP 0이었고, 유니크 제약을 일부러 없애자 빨간불이 났다.
 
 - `server/`에 Go 모듈, 진입점 3개(api/worker/scheduler), 마이그레이션 8개 테이블, Docker Compose, 테스트, CI 워크플로
 - 리뷰에서 Critical/High 없음. Medium 9건 전부 반영. 남은 것은 Low 5건이다
@@ -45,7 +45,7 @@
 - **§7.1의 settled horizon 읽기 쿼리는 미구현이다.** P0은 쓰기 쪽 스키마만 다뤘다. sync 변경 유실 방지의 핵심은 읽기 경로에 있으므로, 이것이 구현되기 전까지 개정은 절반만 적용된 상태다. §15의 순서 역전 회귀 테스트와 함께 **P6**에서 반드시 처리한다.
 - KMS envelope encryption 미적용 (로컬에 KMS 없음, ciphertext 열만 비워둠)
 - **DB 역할 분리에 자동 커버리지가 없다.** `plantogether_api`의 DDL 거부와 `plantogether_readonly`의 DELETE 거부는 `ccc0b1b`에서 사람이 한 번 확인했을 뿐이다. 모든 통합 테스트가 DDL 권한이 있는 `plantogether_migration`으로 접속하므로 `01-roles.sql`의 `ALTER DEFAULT PRIVILEGES`가 회귀해도 CI는 초록이다. P1에서 각 역할 자격으로 `CREATE TABLE`·`DELETE`를 시도해 SQLSTATE `42501`로 거부되는지 보는 통합 테스트를 추가한다.
-- **CI를 GitHub Actions에서 실제로 돌려본 적이 없다.** 로컬에서 각 스텝을 동등하게 실행해 확인했을 뿐이다(병합 후 `main`에서도 재확인했다). push 후 첫 실행이 초록인지, 그리고 일부러 테스트를 깨뜨렸을 때 빨간불이 나는지를 확인해야 M-8이 실제로 닫힌다. 초록불 하나는 "테스트가 돌아서 통과"와 "skip돼서 통과"를 구분하지 못한다
+- **`server-ci`는 아직 required status check가 아니다.** 지정한다면 `paths` 필터 때문에 `docs/`만 바꾼 PR이 pending 상태로 계속 남는 문제를 함께 처리한다(필터 제거 또는 같은 이름의 skip job). 저장소 설정이라 사용자 결정 사항이다
 
 ### 최근 결정
 
@@ -55,13 +55,9 @@
 
 ## 다음 작업
 
-1. **`main`을 push하고 CI를 원격에서 확인한다.** 이것이 M-8의 마지막 단계다.
-   - push 후 GitHub Actions에서 `server-ci`가 실제로 도는지 본다. 초록불만 보지 말고 로그에서 통합 테스트가 `--- PASS`인지(`--- SKIP`이 아닌지) 확인한다.
-   - 그 다음 테스트를 일부러 하나 깨뜨려 빨간불이 나는지 확인한다. 여기까지 해야 M-8이 닫힌다.
-   - `server-ci`를 required status check로 지정한다면, `paths` 필터 때문에 `docs/`만 바꾼 PR이 영원히 pending으로 남는 GitHub의 알려진 함정을 함께 처리한다(필터 제거 또는 같은 이름의 skip job).
-2. **P1 인증.** `docs/account_backend_design.md` §5와 `.omc/plans/account-backend-implementation.md`. L-6(`request_id` 미들웨어)을 여기서 함께 처리한다.
-3. P1 이후 의존성 순서대로 기능별 브랜치에서 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
-4. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.
+1. **P1 인증.** `docs/account_backend_design.md` §5와 `.omc/plans/account-backend-implementation.md`. L-6(`request_id` 미들웨어)을 여기서 함께 처리한다.
+2. P1 이후 의존성 순서대로 기능별 브랜치에서 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
+3. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.
 
 ## 유의 사항
 
