@@ -6,7 +6,8 @@ Go + PostgreSQL 모듈러 모놀리스. 기준 설계는 [`docs/account_backend_
 health/readiness, 8개 테이블 마이그레이션) 위에 Apple 로그인, 세션 회전,
 로그아웃, 계정·기기 조회를 올렸고, 공통 mutation helper(Idempotency-Key,
 If-Match, sync 변경 피드, outbox를 한 트랜잭션에서 강제) 위에 프로필 수정, 기기
-폐기, push token 등록을 구현했다. 계정 삭제 요청은 삭제 파이프라인(worker)과 함께
+폐기, push token 등록을 구현했다. worker·scheduler 골격(outbox 점유·재시도·dead,
+주기 정리 작업)도 들어갔다. 계정 삭제 요청은 삭제 파이프라인(worker job)과 함께
 들어온다.
 
 ## 구성
@@ -14,8 +15,11 @@ If-Match, sync 변경 피드, outbox를 한 트랜잭션에서 강제) 위에 �
 | 경로 | 역할 |
 |---|---|
 | `cmd/api/` | HTTP API. 인증·권한·상태 전이·sync (§9). 현재 health, 인증, 계정 조회와 마이그레이션 실행 |
-| `cmd/worker/` | APNs 발송, 계정 삭제, 명령 만료·재할당 (§9). P0에서는 no-op 루프 |
-| `cmd/scheduler/` | 만료 초대, 알림 예약, 작업 복구 (§9). P0에서는 no-op 루프 |
+| `cmd/worker/` | APNs 발송, 계정 삭제, 명령 만료·재할당 (§9). outbox job 루프. 아직 등록된 job 종류가 없다 |
+| `cmd/scheduler/` | 만료 초대, 알림 예약, 작업 복구 (§9). 현재 sync 피드·세션·idempotency·끝난 job 정리와 밀린 job 감시 |
+| `internal/platform/jobs/` | outbox 점유(`FOR UPDATE SKIP LOCKED` + lease), 지수 backoff 재시도, dead 전이, 종료 시 lease 반납 |
+| `internal/platform/schedule/` | 주기 작업의 DB lease(`scheduled_tasks`). scheduler가 여럿 떠도 작업은 한 번에 하나만 돈다 |
+| `internal/platform/apns/` | APNs 발송 interface. 구현은 알림 단계에서 |
 | `internal/platform/config/` | 환경 변수 로드와 기동 시 검증 |
 | `internal/platform/postgres/` | pgx 연결 pool과 goose 마이그레이션 러너 |
 | `internal/auth/` | Apple 로그인, refresh 회전·재사용 탐지, 로그아웃, 인증 미들웨어 (§5) |

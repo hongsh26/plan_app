@@ -2,8 +2,9 @@
 // 역할 구분에서 APNs 발송, 계정 삭제, 명령 만료·재할당과 서버 측 재시도 상태
 // 관리를 담당한다. EventKit 작업은 수행하지 않는다.
 //
-// P0에서는 설정 로드, DB 연결, graceful shutdown, no-op 루프까지만 만든다.
-// 실제 job claim(FOR UPDATE SKIP LOCKED)과 lease 처리는 P7이다.
+// job 점유·재시도·dead 처리는 internal/platform/jobs가 한다. 여기서는 job 종류를
+// 등록하고 루프를 돌린다. 아직 등록된 종류가 없으므로 아무 job도 점유하지 않는다.
+// 계정 삭제·APNs 발송 종류가 생기면 kinds()에 넣는다.
 package main
 
 import (
@@ -13,10 +14,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"plantogether/server/internal/platform/config"
 	"plantogether/server/internal/platform/httpapi"
+	"plantogether/server/internal/platform/jobs"
 	"plantogether/server/internal/platform/postgres"
 )
 
@@ -50,37 +51,35 @@ func run() error {
 		slog.String("poll_interval", cfg.PollInterval.String()),
 	)
 
-	ticker := time.NewTicker(cfg.PollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			// no-op 루프는 진행 중인 작업이 없으므로 즉시 끝난다. P7에서 실제
-			// job이 생기면 여기서 lease 반납과 진행 중 작업 대기를 한다.
-			logger.Info("worker 종료 완료",
-				slog.String("action", "shutdown"),
-				slog.String("result", "success"),
-			)
-			return nil
-		case <-ticker.C:
-			// P0은 job을 claim하지 않는다. DB 연결이 살아 있는지만 확인해
-			// 설정과 자격이 실제로 동작하는지 기동 직후에 드러나게 한다.
-			pingCtx, cancel := context.WithTimeout(ctx, postgres.DefaultPingTimeout)
-			err := pool.Ping(pingCtx)
-			cancel()
-			if err != nil {
-				logger.Warn("DB 연결 확인 실패",
-					slog.String("action", "db_probe"),
-					slog.String("result", "failure"),
-					slog.String("error", err.Error()),
-				)
-				continue
-			}
-			logger.Debug("job 처리 없음",
-				slog.String("action", "poll"),
-				slog.String("result", "success"),
-			)
-		}
+	kinds := kinds()
+	runner := &jobs.Runner{
+		Pool:            pool.Pool(),
+		Kinds:           kinds,
+		Lease:           cfg.WorkerLease,
+		BatchSize:       cfg.WorkerBatchSize,
+		PollInterval:    cfg.PollInterval,
+		ShutdownTimeout: cfg.ShutdownTimeout,
+		Logger:          logger,
 	}
+	logger.Info("job 종류 등록",
+		slog.String("action", "startup"),
+		slog.Int("kinds", len(kinds)),
+		slog.String("lease", cfg.WorkerLease.String()),
+		slog.Int("batch_size", cfg.WorkerBatchSize),
+	)
+
+	if err := runner.Run(ctx); err != nil {
+		return err
+	}
+	logger.Info("worker 종료 완료",
+		slog.String("action", "shutdown"),
+		slog.String("result", "success"),
+	)
+	return nil
+}
+
+// kinds는 이 worker가 처리하는 job 종류다. 여기 없는 종류는 점유하지 않는다
+// (jobs.Claim 문서의 롤링 배포 이유).
+func kinds() map[string]jobs.Kind {
+	return map[string]jobs.Kind{}
 }

@@ -69,8 +69,16 @@ type Config struct {
 	// ShutdownTimeout은 SIGINT/SIGTERM 수신 후 진행 중 작업을 기다리는 한도다.
 	ShutdownTimeout time.Duration
 
-	// PollInterval은 worker와 scheduler의 루프 주기다. P0에서는 no-op 루프가 쓴다.
+	// PollInterval은 worker와 scheduler의 루프 주기다. worker는 점유할 job이 없을 때만
+	// 이만큼 기다린다.
 	PollInterval time.Duration
+
+	// WorkerLease는 worker가 job 하나를 점유하는 기간이자 handler 제한 시간이다.
+	// worker가 죽으면 이 시간이 지난 뒤 다른 worker가 job을 다시 점유한다(§9).
+	WorkerLease time.Duration
+
+	// WorkerBatchSize는 worker가 한 번에 점유하는 최대 job 수이자 동시 처리 수다.
+	WorkerBatchSize int
 
 	// LogLevel은 구조화 로그 수준이다.
 	LogLevel slog.Level
@@ -84,6 +92,8 @@ const (
 	envShutdownTimeout  = "SHUTDOWN_TIMEOUT"
 	envPollInterval     = "POLL_INTERVAL"
 	envLogLevel         = "LOG_LEVEL"
+	envWorkerLease      = "WORKER_LEASE_DURATION"
+	envWorkerBatchSize  = "WORKER_BATCH_SIZE"
 
 	// MigrationDatabaseURLEnv는 마이그레이션 전용 DB 자격이다. §11이 요구하는
 	// 역할 분리를 지키려면 마이그레이션은 DDL 권한이 있는 별도 역할로 실행해야
@@ -113,7 +123,11 @@ func Load(role Role, lookup Lookup) (Config, error) {
 	switch role {
 	case RoleAPI:
 		cfg.HTTPAddr = v.optionalNonEmpty(envHTTPAddr, ":8080")
-	case RoleWorker, RoleScheduler:
+	case RoleWorker:
+		cfg.PollInterval = v.optionalDuration(envPollInterval, 5*time.Second)
+		cfg.WorkerLease = v.optionalDuration(envWorkerLease, time.Minute)
+		cfg.WorkerBatchSize = v.optionalInt(envWorkerBatchSize, 10, 1, 100)
+	case RoleScheduler:
 		cfg.PollInterval = v.optionalDuration(envPollInterval, 5*time.Second)
 	default:
 		v.addf("알 수 없는 실행 역할 %q", role)

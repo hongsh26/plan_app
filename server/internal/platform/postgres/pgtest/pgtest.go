@@ -19,6 +19,10 @@ import (
 // 동작에 기대도 테스트가 통과하고 운영에서야 실패한다.
 const APIRoleURLEnv = "TEST_API_DATABASE_URL"
 
+// WorkerRoleURLEnv는 worker 런타임 역할의 DSN이다. worker와 scheduler 코드의 테스트는
+// 이 역할로 접속한다. api 역할로 접속하면 worker 역할에 빠진 권한이 운영에서야 드러난다.
+const WorkerRoleURLEnv = "TEST_WORKER_DATABASE_URL"
+
 // Pool은 envName의 DSN으로 pool을 연다. 테스트가 끝나면 닫는다.
 func Pool(t *testing.T, envName string) *pgxpool.Pool {
 	t.Helper()
