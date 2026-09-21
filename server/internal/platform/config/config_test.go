@@ -189,6 +189,41 @@ func TestLoadParsesOptionalOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadWorkerOptions(t *testing.T) {
+	cfg, err := Load(RoleWorker, FromMap(validEnv()))
+	if err != nil {
+		t.Fatalf("설정이 거부됐다: %v", err)
+	}
+	if cfg.WorkerLease != time.Minute || cfg.WorkerBatchSize != 10 {
+		t.Errorf("기본값 = (%v, %d), want (1m, 10)", cfg.WorkerLease, cfg.WorkerBatchSize)
+	}
+
+	env := validEnv()
+	env["WORKER_LEASE_DURATION"] = "90s"
+	env["WORKER_BATCH_SIZE"] = "4"
+	cfg, err = Load(RoleWorker, FromMap(env))
+	if err != nil {
+		t.Fatalf("설정이 거부됐다: %v", err)
+	}
+	if cfg.WorkerLease != 90*time.Second || cfg.WorkerBatchSize != 4 {
+		t.Errorf("재정의 = (%v, %d), want (90s, 4)", cfg.WorkerLease, cfg.WorkerBatchSize)
+	}
+
+	env["WORKER_BATCH_SIZE"] = "0"
+	if _, err := Load(RoleWorker, FromMap(env)); err == nil {
+		t.Error("WORKER_BATCH_SIZE=0이 허용됐다")
+	}
+
+	// scheduler는 worker 전용 값을 갖지 않는다.
+	cfg, err = Load(RoleScheduler, FromMap(validEnv()))
+	if err != nil {
+		t.Fatalf("scheduler 설정이 거부됐다: %v", err)
+	}
+	if cfg.WorkerLease != 0 || cfg.WorkerBatchSize != 0 {
+		t.Errorf("scheduler가 worker 값을 가졌다: (%v, %d)", cfg.WorkerLease, cfg.WorkerBatchSize)
+	}
+}
+
 // 마이그레이션 자격은 런타임 자격과 분리돼 있어야 한다 (§11의 DB 역할 분리).
 func TestLoadMigrationSettings(t *testing.T) {
 	const migrationURL = "postgres://migration@localhost:5432/db"
