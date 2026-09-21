@@ -3,15 +3,12 @@ package auth
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
-
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/httpapi"
@@ -199,7 +196,7 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, r *http.Request, acti
 			slog.String("request_id", httpapi.RequestID(r.Context()).String()),
 			slog.String("action", action),
 			slog.String("result", "failure"),
-			slog.String("error_type", errorType(err)),
+			slog.String("error_type", httpapi.ErrorType(err)),
 		)
 		httpapi.WriteError(w, r, http.StatusInternalServerError, httpapi.CodeInternal, "요청을 처리하지 못했다")
 	}
@@ -226,20 +223,4 @@ func NormalizeDisplayName(raw string) (name string, ok bool) {
 		cleaned = strings.TrimSpace(string([]rune(cleaned)[:maxDisplayNameRunes]))
 	}
 	return cleaned, true
-}
-
-// errorType은 로그에 남길 오류 분류다. PostgreSQL 오류는 SQLSTATE만, 그 밖은
-// Go 타입 이름만 남긴다. 메시지 원문에는 SQL, 값, 연결 정보가 섞일 수 있다.
-func errorType(err error) string {
-	var pgErr *pgconn.PgError
-	switch {
-	case errors.As(err, &pgErr):
-		return "postgres_" + pgErr.Code
-	case errors.Is(err, context.Canceled):
-		return "context_canceled"
-	case errors.Is(err, context.DeadlineExceeded):
-		return "context_deadline"
-	default:
-		return fmt.Sprintf("%T", err)
-	}
 }

@@ -44,7 +44,7 @@ func newFixture(t *testing.T) *fixture {
 }
 
 func (f *fixture) req(key string, body string) Request {
-	return Request{UserID: f.user, DeviceID: f.device, Key: key, Hash: RequestHash("PATCH", "PATCH /v1/me", []byte(body))}
+	return Request{UserID: f.user, DeviceID: f.device, Key: key, Hash: RequestHash("PATCH", "/v1/me", []byte(body))}
 }
 
 // bump는 users.version을 올리고 sync 변경 하나를 남기는 도메인 mutation이다.
@@ -121,7 +121,7 @@ func TestRunRejectsSameKeyWithDifferentRequest(t *testing.T) {
 	}
 	// 다른 endpoint에 같은 키와 같은 본문을 쓴 경우도 다른 요청이다.
 	other := f.req("k", `{"a":1}`)
-	other.Hash = RequestHash("DELETE", "DELETE /v1/devices/{id}", []byte(`{"a":1}`))
+	other.Hash = RequestHash("DELETE", "/v1/devices/00000000-0000-0000-0000-000000000001", []byte(`{"a":1}`))
 	if _, err := Run(ctx, f.pool, other, time.Now(), f.bump(&calls)); !errors.Is(err, ErrIdempotencyMismatch) {
 		t.Fatalf("다른 endpoint err = %v, want ErrIdempotencyMismatch", err)
 	}
@@ -344,5 +344,40 @@ func TestCheckVersion(t *testing.T) {
 	var vc *VersionConflictError
 	if err := CheckVersion(2, 3); !errors.As(err, &vc) || vc.Current != 3 {
 		t.Fatalf("err = %v, want VersionConflictError{3}", err)
+	}
+}
+
+// 같은 만료 키로 동시에 두 요청이 오면, 한쪽이 만료 기록을 지우고 새로 만든다.
+// 다른 쪽은 지워진 row를 기다리다 깨어나 아무것도 못 읽게 되는데, 이때 500이
+// 아니라 점유부터 다시 해서 새 결과를 재전송으로 받아야 한다.
+func TestRunConcurrentExpiredKeyDoesNotFail(t *testing.T) {
+	f := newFixture(t)
+	var calls atomic.Int32
+	now := time.Now()
+	if _, err := Run(context.Background(), f.pool, f.req("exp", `{}`), now, f.bump(&calls)); err != nil {
+		t.Fatal(err)
+	}
+	later := now.Add(IdempotencyTTL + time.Minute)
+
+	for range 5 {
+		if _, err := f.pool.Exec(context.Background(),
+			`UPDATE idempotency_keys SET expires_at = $2 WHERE user_id = $1`, f.user, now); err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		errs := make([]error, 4)
+		for i := range errs {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, errs[i] = Run(context.Background(), f.pool, f.req("exp", `{}`), later, f.bump(&calls))
+			}()
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("만료 키 동시 요청 %d 실패: %v", i, err)
+			}
+		}
 	}
 }

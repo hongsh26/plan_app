@@ -37,7 +37,7 @@ func (h *Handler) run(w http.ResponseWriter, r *http.Request, p auth.Principal, 
 		UserID:   p.UserID,
 		DeviceID: p.DeviceID,
 		Key:      prep.Key,
-		Hash:     mutation.RequestHash(r.Method, r.Pattern, prep.Body),
+		Hash:     mutation.RequestHash(r.Method, r.URL.EscapedPath(), prep.Body),
 	}, h.now(), fn)
 	if err == nil {
 		if out.Replayed {
@@ -55,6 +55,7 @@ func (h *Handler) run(w http.ResponseWriter, r *http.Request, p auth.Principal, 
 			slog.String("actor", p.UserID.String()),
 			slog.String("action", action),
 			slog.String("result", "failure"),
+			slog.String("error_type", httpapi.ErrorType(err)),
 		)
 		httpapi.WriteError(w, r, http.StatusInternalServerError, httpapi.CodeInternal, "요청을 처리하지 못했다")
 	}
@@ -86,7 +87,7 @@ func (h *Handler) patchMe(w http.ResponseWriter, r *http.Request) {
 	out, ok := h.run(w, r, p, prep, "account.update_profile", func(ctx context.Context, tx *mutation.Tx) (mutation.Result, error) {
 		var current int64
 		if err := tx.QueryRow(ctx,
-			`SELECT version FROM users WHERE id = $1 FOR UPDATE`, p.UserID).Scan(&current); err != nil {
+			`SELECT version FROM users WHERE id = $1 FOR NO KEY UPDATE`, p.UserID).Scan(&current); err != nil {
 			return mutation.Result{}, err
 		}
 		if err := mutation.CheckVersion(prep.ExpectedVersion, current); err != nil {
@@ -247,11 +248,11 @@ func (h *Handler) putPushToken(w http.ResponseWriter, r *http.Request) {
 		if err := tx.QueryRow(ctx, `
 			UPDATE devices
 			   SET push_token_ciphertext = $2, push_environment = $3, push_authorization = $4,
-			       time_sensitive_setting = $5, last_seen_at = $6,
+			       time_sensitive_setting = $5, last_seen_at = now(),
 			       version = version + 1, updated_at = now()
 			 WHERE id = $1
 			RETURNING version`,
-			target, sealed, req.PushEnvironment, req.PushAuthorization, req.TimeSensitiveSetting, h.now(),
+			target, sealed, req.PushEnvironment, req.PushAuthorization, req.TimeSensitiveSetting,
 		).Scan(&version); err != nil {
 			return mutation.Result{}, err
 		}

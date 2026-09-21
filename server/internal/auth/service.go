@@ -417,10 +417,14 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, requestID uu
 
 // lockOrder: 인증 경로가 여러 테이블의 row를 잠글 때의 순서는
 //
-//	users(FOR SHARE, 삭제·상태 변경은 FOR UPDATE) → devices(FOR UPDATE) → sessions
+//	users(FOR SHARE, 삭제·상태 변경은 FOR NO KEY UPDATE) → devices(FOR NO KEY UPDATE) → sessions
 //
 // 이다. 계정 삭제(§10)를 구현할 때도 이 순서를 따라야 로그인·refresh·로그아웃과
 // 교착하지 않는다.
+//
+// users·devices를 FOR UPDATE로 잠그지 않는다. mutation helper가 먼저
+// idempotency_keys를 INSERT하면서 FK 검사로 두 row에 FOR KEY SHARE를 걸기 때문에,
+// FOR UPDATE로 올리면 동시 요청끼리 교착한다(platform/mutation 패키지 문서).
 //
 // LockUserAndDevice는 앞의 두 단계를 수행한다. 기기를 다루는 다른 패키지의
 // mutation도 이 함수로 잠가 순서를 맞춘다. users를 FOR SHARE로 잡아 계정 삭제·
@@ -429,7 +433,7 @@ func LockUserAndDevice(ctx context.Context, tx pgx.Tx, userID, deviceID uuid.UUI
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, userID); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, `SELECT 1 FROM devices WHERE id = $1 FOR UPDATE`, deviceID)
+	_, err := tx.Exec(ctx, `SELECT 1 FROM devices WHERE id = $1 FOR NO KEY UPDATE`, deviceID)
 	return err
 }
 

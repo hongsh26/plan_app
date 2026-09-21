@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/hex"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"plantogether/server/internal/platform/httpapi"
+	"plantogether/server/internal/platform/mutation"
 )
 
 func (s *stack) syncCount(t *testing.T, userID string, entityType string) int {
@@ -55,6 +58,8 @@ func TestMutationsRequireKeyAndVersion(t *testing.T) {
 		{"PATCH 키 없음", http.MethodPatch, "/v1/me", "", `"1"`, `{"display_name":"x"}`},
 		{"PATCH version 없음", http.MethodPatch, "/v1/me", "k", "", `{"display_name":"x"}`},
 		{"PATCH 약한 ETag", http.MethodPatch, "/v1/me", "k", `W/"1"`, `{"display_name":"x"}`},
+		{"PATCH 따옴표 한쪽", http.MethodPatch, "/v1/me", "k", `"1`, `{"display_name":"x"}`},
+		{"PATCH ETag 목록", http.MethodPatch, "/v1/me", "k", `"1", "2"`, `{"display_name":"x"}`},
 		{"PATCH 빈 이름", http.MethodPatch, "/v1/me", "k", `"1"`, `{"display_name":" ‮ "}`},
 		{"PATCH 키에 공백", http.MethodPatch, "/v1/me", "a b", `"1"`, `{"display_name":"x"}`},
 		{"DELETE 키 없음", http.MethodDelete, "/v1/devices/" + sess.DeviceID, "", `"1"`, ``},
@@ -227,5 +232,72 @@ func TestPutPushToken(t *testing.T) {
 	}
 	if stored != nil || env != nil {
 		t.Errorf("해제 후에도 token=%v env=%v", stored, env)
+	}
+}
+
+// 같은 키를 다른 기기 삭제에 재사용하면 재전송이 아니라 409다. 경로의 {id}가
+// 요청 지문에 들어가지 않으면 두 번째 기기를 지우지 않고 "지웠다"고 답한다.
+func TestDeleteDeviceKeyReuseAcrossTargetsIsMismatch(t *testing.T) {
+	s := newStack(t)
+	sub := "mut." + uuid.NewString()
+	a := s.signIn(t, sub)
+	b := s.signIn(t, sub)
+	c := s.signIn(t, sub)
+
+	if rec := s.mut(t, http.MethodDelete, "/v1/devices/"+b.DeviceID, a.AccessToken, "same", `"1"`, ``); rec.Code != http.StatusNoContent {
+		t.Fatal(rec.Body.String())
+	}
+	assertError(t, s.mut(t, http.MethodDelete, "/v1/devices/"+c.DeviceID, a.AccessToken, "same", `"1"`, ``),
+		http.StatusConflict, httpapi.CodeIdempotencyMismatch)
+	if rec := s.do(t, http.MethodGet, "/v1/me", c.AccessToken, nil); rec.Code != http.StatusOK {
+		t.Fatalf("기기 C 상태가 바뀌었다: %d", rec.Code)
+	}
+}
+
+// idempotency_keys INSERT는 FK 검사로 users·devices row에 KEY SHARE를 건다. 도메인
+// 코드가 같은 row를 FOR UPDATE로 올리면 동시 요청끼리 교착한다. 교착은 재시도로
+// 가려지므로 응답만 보지 않고 재시도 횟수가 늘지 않았는지 본다.
+func TestConcurrentMutationsDoNotDeadlock(t *testing.T) {
+	s := newStack(t)
+	sub := "mut." + uuid.NewString()
+	a := s.signIn(t, sub)
+	b := s.signIn(t, sub)
+	token := hex.EncodeToString(bytes.Repeat([]byte{0xcd}, 32))
+	sandbox := "sandbox"
+	before := mutation.Retries()
+
+	for i := range 10 {
+		var wg sync.WaitGroup
+		codes := make([]int, 4)
+		send := func(idx int, method, path, tok, body string) {
+			defer wg.Done()
+			codes[idx] = s.mut(t, method, path, tok, uuid.NewString(), `"`+strconv.Itoa(i+1)+`"`, body).Code
+		}
+		wg.Add(4)
+		// 두 기기가 같은 사용자 row를 동시에 수정한다.
+		go send(0, http.MethodPatch, "/v1/me", a.AccessToken, `{"display_name":"a"}`)
+		go send(1, http.MethodPatch, "/v1/me", b.AccessToken, `{"display_name":"b"}`)
+		// 한 기기가 자기 기기 row를 서로 다른 키로 동시에 수정한다.
+		pt := "/v1/devices/" + a.DeviceID + "/push-token"
+		go send(2, http.MethodPut, pt, a.AccessToken, pushBody(&token, &sandbox, "authorized", "enabled"))
+		go send(3, http.MethodPut, pt, a.AccessToken, pushBody(&token, &sandbox, "authorized", "enabled"))
+		wg.Wait()
+
+		for j, code := range codes {
+			if code >= 500 {
+				t.Fatalf("반복 %d 요청 %d가 %d로 실패했다", i, j, code)
+			}
+		}
+		// 다음 반복의 If-Match를 맞추기 위해 현재 version으로 되돌릴 수는 없으므로,
+		// 사용자·기기 version을 반복 번호에 맞게 강제로 맞춘다.
+		if _, err := s.pool.Exec(context.Background(), `UPDATE users SET version = $2 WHERE id = $1`, a.UserID, i+2); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.pool.Exec(context.Background(), `UPDATE devices SET version = $2 WHERE id = $1`, a.DeviceID, i+2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := mutation.Retries() - before; got != 0 {
+		t.Fatalf("교착·직렬화 실패로 %d번 재시도했다. 잠금 규칙(FOR NO KEY UPDATE)이 깨졌다", got)
 	}
 }

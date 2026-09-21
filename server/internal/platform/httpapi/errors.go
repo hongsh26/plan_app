@@ -2,10 +2,14 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // 오류 코드. account_backend_design.md §6 오류 코드 표를 그대로 옮긴다.
@@ -93,6 +97,22 @@ func DecodeJSONBytes(body []byte, dst any) error {
 		return errBadJSON
 	}
 	return nil
+}
+
+// ErrorType은 로그에 남길 오류 분류다. PostgreSQL 오류는 SQLSTATE만, 그 밖은
+// Go 타입 이름만 남긴다. 메시지 원문에는 SQL, 값, 연결 정보가 섞일 수 있다.
+func ErrorType(err error) string {
+	var pgErr *pgconn.PgError
+	switch {
+	case errors.As(err, &pgErr):
+		return "postgres_" + pgErr.Code
+	case errors.Is(err, context.Canceled):
+		return "context_canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "context_deadline"
+	default:
+		return fmt.Sprintf("%T", err)
+	}
 }
 
 // WriteVersionConflict는 409 version_conflict와 현재 version을 쓴다(§6, §7.4).

@@ -47,7 +47,10 @@ func ExpectedVersion(r *http.Request) (int64, error) {
 	if v == "" {
 		return 0, errMissingVersion
 	}
-	v = strings.TrimSuffix(strings.TrimPrefix(v, `"`), `"`)
+	// 따옴표는 양쪽 모두 있거나 모두 없어야 한다. 목록("1", "2")은 받지 않는다.
+	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+		v = v[1 : len(v)-1]
+	}
 	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil || n < 1 {
 		return 0, errMissingVersion

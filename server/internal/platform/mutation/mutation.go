@@ -11,13 +11,17 @@
 // EmitChange·Enqueue를 부른다. 함수가 오류를 돌려주면 도메인 변경, sync 변경,
 // outbox job, idempotency 기록이 전부 함께 롤백된다.
 //
-// 잠금 순서: 이 helper는 트랜잭션 맨 앞에서 idempotency_keys row를 잡는다.
-// 인증 경로의 규약(users → devices → sessions, internal/auth lockOrder)과 합치면
-// 전체 순서는
+// 잠금: 이 helper는 트랜잭션 맨 앞에서 idempotency_keys row를 INSERT한다. 이
+// INSERT는 FK 검사 때문에 users row와 요청 기기의 devices row에 FOR KEY SHARE를
+// 건다. 따라서 이후 도메인 코드가 같은 row를 FOR UPDATE로 잡으면 KEY SHARE를
+// 쥔 두 트랜잭션이 서로의 업그레이드를 기다리며 교착한다(40P01).
 //
-//	idempotency_keys → users → devices → sessions → sync_changes·outbox_jobs
+// 규칙: users·devices row는 FOR UPDATE가 아니라 FOR NO KEY UPDATE로 잠근다. 두
+// 표의 키 열(id)은 바뀌지 않으므로 이것으로 충분하고, NO KEY UPDATE는 KEY SHARE와
+// 충돌하지 않는다. 키 열을 바꾸지 않는 일반 UPDATE도 같은 모드를 쓴다.
 //
-// 다. idempotency row는 (user, device, key) 단위라 서로 다른 요청끼리 경합하지 않는다.
+// 그래도 교착이나 직렬화 실패가 나면 Run이 트랜잭션 전체를 제한된 횟수만큼 다시
+// 실행한다. 한 번 롤백된 트랜잭션은 아무것도 남기지 않으므로 다시 실행해도 안전하다.
 package mutation
 
 import (
@@ -26,10 +30,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -58,17 +64,22 @@ type Request struct {
 	Hash []byte
 }
 
-// RequestHash는 method, route 패턴, 원본 본문 바이트로 요청 지문을 만든다.
+// RequestHash는 method, 실제 요청 경로, 원본 본문 바이트로 요청 지문을 만든다.
 //
-// route 패턴을 넣는 이유: 같은 키를 다른 endpoint에 재사용하면 본문이 같아도
-// 다른 요청이다. 원본 바이트를 쓰는 이유: JSON을 정규화하면 키 순서·공백 차이를
-// 흡수할 수 있지만, 정규화 규칙 자체가 계약이 되고 버그 표면이 된다. 클라이언트는
-// 재전송 때 저장해 둔 같은 바이트를 보내면 된다(§7.3 로컬 mutation queue가
-// payload를 보관한다).
-func RequestHash(method, pattern string, body []byte) []byte {
+// route 패턴이 아니라 실제 경로를 쓴다. DELETE /v1/devices/{id}처럼 대상이
+// 경로에만 있고 본문이 비는 요청은, 패턴만 넣으면 같은 키로 다른 기기를 지울 때
+// 지문이 같아져 재전송으로 처리된다. 그러면 지우지 않은 기기를 "지웠다"고 답한다.
+//
+// 원본 바이트를 쓰는 이유: JSON을 정규화하면 키 순서·공백 차이를 흡수할 수 있지만,
+// 정규화 규칙 자체가 계약이 되고 버그 표면이 된다. 클라이언트는 재전송 때 저장해
+// 둔 같은 바이트를 보내면 된다(§7.3 로컬 mutation queue가 payload를 보관한다).
+//
+// If-Match는 넣지 않는다. 같은 키와 본문으로 If-Match만 바꿔 보내면 재전송으로
+// 처리된다. 같은 키는 같은 의도라는 계약이고, 재전송 때 If-Match를 바꿀 이유가 없다.
+func RequestHash(method, path string, body []byte) []byte {
 	h := sha256.New()
 	// 구분자로 길이를 앞에 붙인다. "a"+"bc"와 "ab"+"c"가 같은 해시가 되지 않게 한다.
-	for _, part := range [][]byte{[]byte(method), []byte(pattern), body} {
+	for _, part := range [][]byte{[]byte(method), []byte(path), body} {
 		_, _ = fmt.Fprintf(h, "%d:", len(part))
 		h.Write(part)
 	}
@@ -156,7 +167,7 @@ func (t *Tx) Enqueue(ctx context.Context, j Job) error {
 }
 
 // CheckVersion은 expected와 current가 다르면 VersionConflictError를 돌려준다.
-// 도메인 코드가 row를 FOR UPDATE로 읽은 뒤 부른다.
+// 도메인 코드가 row를 FOR NO KEY UPDATE로 읽은 뒤 부른다(패키지 문서의 잠금 규칙).
 func CheckVersion(expected, current int64) error {
 	if expected != current {
 		return &VersionConflictError{Current: current}
@@ -188,36 +199,46 @@ func Run(ctx context.Context, pool *pgxpool.Pool, req Request, now time.Time, fn
 	if req.Key == "" || len(req.Hash) == 0 {
 		return Outcome{}, errors.New("mutation: Idempotency-Key와 요청 hash가 필요하다")
 	}
+	for attempt := 1; ; attempt++ {
+		out, err := runOnce(ctx, pool, req, now, fn)
+		if err == nil || attempt >= maxAttempts || !retryable(err) {
+			return out, err
+		}
+		retries.Add(1)
+	}
+}
 
+// retries는 교착·직렬화 실패로 다시 실행한 누적 횟수다.
+var retries atomic.Int64
+
+// Retries는 프로세스 시작 이후 교착·직렬화 실패로 트랜잭션을 다시 실행한 횟수다.
+//
+// 재시도는 잠금 규칙 위반을 사용자에게서 숨긴다. 교착이 나도 다음 시도에서
+// 성공하면 응답은 정상이고, 대가는 deadlock_timeout(기본 1초)만큼의 지연뿐이다.
+// 그래서 이 값을 지표로 보고, 0이 아니면 잠금 순서가 깨졌다고 본다. 동시성
+// 회귀 테스트도 이 값이 늘지 않았는지 확인한다.
+func Retries() int64 { return retries.Load() }
+
+// maxAttempts는 교착·직렬화 실패 때 트랜잭션을 다시 실행하는 최대 횟수다.
+const maxAttempts = 3
+
+// retryable은 트랜잭션 전체를 다시 실행하면 성공할 수 있는 오류인지다.
+// 40P01 deadlock_detected, 40001 serialization_failure.
+func retryable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && (pgErr.Code == "40P01" || pgErr.Code == "40001")
+}
+
+func runOnce(ctx context.Context, pool *pgxpool.Pool, req Request, now time.Time, fn Func) (Outcome, error) {
 	var out Outcome
 	err := pgx.BeginFunc(ctx, pool, func(ptx pgx.Tx) error {
-		claimed, err := claim(ctx, ptx, req, now)
+		stored, replay, err := claimOrLoad(ctx, ptx, req, now)
 		if err != nil {
 			return err
 		}
-		if !claimed {
-			stored, err := loadStored(ctx, ptx, req, now)
-			switch {
-			case errors.Is(err, errExpired):
-				// 만료된 기록은 없는 것과 같다. 지우고 다시 점유한다.
-				if _, err := ptx.Exec(ctx, `
-					DELETE FROM idempotency_keys
-					 WHERE user_id = $1 AND device_id = $2 AND key = $3`,
-					req.UserID, req.DeviceID, req.Key); err != nil {
-					return err
-				}
-				if claimed, err = claim(ctx, ptx, req, now); err != nil {
-					return err
-				}
-				if !claimed {
-					return errors.New("mutation: 만료된 idempotency 기록을 교체하지 못했다")
-				}
-			case err != nil:
-				return err
-			default:
-				out = Outcome{Result: stored, Replayed: true}
-				return nil
-			}
+		if replay {
+			out = Outcome{Result: stored, Replayed: true}
+			return nil
 		}
 
 		tx := &Tx{Tx: ptx}
@@ -241,6 +262,38 @@ func Run(ctx context.Context, pool *pgxpool.Pool, req Request, now time.Time, fn
 		return Outcome{}, err
 	}
 	return out, nil
+}
+
+// claimOrLoad는 키를 새로 점유하거나(replay=false) 커밋된 결과를 읽는다(replay=true).
+//
+// 점유에 실패했는데 읽을 row가 없을 수 있다. 같은 만료 키를 다른 트랜잭션이 지우고
+// 다시 만든 경우, 이 트랜잭션의 문장 snapshot에는 새 row가 보이지 않는다. 그때는
+// 점유부터 다시 한다. 만료 기록은 지우고 다시 점유한다.
+func claimOrLoad(ctx context.Context, tx pgx.Tx, req Request, now time.Time) (Result, bool, error) {
+	for range 3 {
+		claimed, err := claim(ctx, tx, req, now)
+		if err != nil || claimed {
+			return Result{}, false, err
+		}
+		stored, err := loadStored(ctx, tx, req, now)
+		switch {
+		case err == nil:
+			return stored, true, nil
+		case errors.Is(err, pgx.ErrNoRows):
+			continue
+		case errors.Is(err, errExpired):
+			if _, err := tx.Exec(ctx, `
+				DELETE FROM idempotency_keys
+				 WHERE user_id = $1 AND device_id = $2 AND key = $3`,
+				req.UserID, req.DeviceID, req.Key); err != nil {
+				return Result{}, false, err
+			}
+			continue
+		default:
+			return Result{}, false, err
+		}
+	}
+	return Result{}, false, errors.New("mutation: idempotency 키 점유 경쟁이 해소되지 않았다")
 }
 
 // claim은 idempotency row를 새로 만들면 true다. 같은 키가 이미 있으면 false다.
