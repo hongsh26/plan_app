@@ -41,3 +41,19 @@ branch protection과 ruleset 어느 쪽으로도 지정할 수 없다.
 필터 제거는 이미 `main`에 들어갔으므로, 1이나 2를 고르면 check 이름 `test`를 등록하기만
 하면 된다. 등록한 뒤에는 `docs/`만 바꾼 임시 PR을 열어
 `gh pr view N --json mergeStateStatus`로 pending이 아닌지 확인한다.
+
+## 후속: public 전환 후 required check 지정 (2026-09-21)
+
+사용자가 저장소를 public으로 바꿨다(선택지 2). 그다음 `main`에 branch protection을 걸었다.
+
+- required status check: `test`, **`app_id` 15368(GitHub Actions)로 고정**. public 저장소에서는
+  다른 GitHub App이 같은 이름의 check를 보고해 조건을 채울 수 있다. 앱을 고정하면 그 경로가 막힌다.
+- `strict: true`: 병합할 커밋이 최신 `main` 위에 있어야 한다. fast-forward 병합 관례와 맞는다.
+- `enforce_admins: true`: 개인 저장소라 소유자가 곧 관리자다. 이 값이 false면 소유자의 push에는
+  보호가 적용되지 않아, 지정해도 아무것도 막지 않는다.
+- force push와 브랜치 삭제는 금지했다. PR 리뷰는 요구하지 않는다. 1인 개발이고, 기능 브랜치에서
+  CI를 통과한 커밋을 `main`으로 fast-forward하는 기존 흐름을 유지하기 위해서다.
+
+**바뀐 작업 흐름:** `main`에 직접 커밋해 push할 수 없다. 문서만 바꾸는 경우도 마찬가지다.
+모든 변경은 `feature/**` 브랜치에 push해 CI가 그 커밋에서 `test`를 통과한 뒤 `main`으로
+fast-forward한다. 같은 SHA이므로 check 결과가 그대로 인정된다.

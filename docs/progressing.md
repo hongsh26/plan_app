@@ -51,7 +51,7 @@
 | L-5 | `Pinger` interface가 소비자(`httpapi`)가 아니라 제공자(`postgres`)에 있다 | 기능 영향 없음. P1 새 코드는 소비자 쪽에 뒀다 |
 
 - **§7.1의 settled horizon 읽기 쿼리는 미구현이다.** sync 변경 유실 방지의 핵심은 읽기 경로에 있으므로, 이것이 구현되기 전까지 개정은 절반만 적용된 상태다. §15의 순서 역전 회귀 테스트와 함께 sync 구현 때 반드시 처리한다.
-- **`server-ci`는 아직 required status check가 아니다.** pending 문제는 `paths` 필터를 없애 해결했다(`56b5a63`). 그러나 private 저장소의 Free 요금제에서는 branch protection과 ruleset이 모두 403이다. Pro 업그레이드, public 전환, 사람이 확인하는 관례 중 하나를 사용자가 정해야 한다. 등록할 check 이름은 `test`다(`docs/rec/2026-09-21_1558_ci_paths_filter_removal.md`)
+- **`main`은 보호 브랜치다.** 저장소를 public으로 바꾼 뒤 required check `test`(GitHub Actions 고정), 관리자 포함 적용, force push 금지를 걸었다. `main`에 직접 커밋해 push할 수 없다. 문서 변경도 `feature/**` 브랜치에서 CI를 통과시킨 뒤 fast-forward한다(`docs/rec/2026-09-21_1558_ci_paths_filter_removal.md`)
 
 ### 최근 결정
 
