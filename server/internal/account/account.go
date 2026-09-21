@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plantogether/server/internal/auth"
+	"plantogether/server/internal/notification"
 	"plantogether/server/internal/platform/httpapi"
 )
 
@@ -37,18 +38,22 @@ const SealPurposePushToken = "devices.push_token"
 
 // Handler는 계정 endpoint다.
 type Handler struct {
-	pool   *pgxpool.Pool
-	logger *slog.Logger
-	sealer Sealer
-	now    func() time.Time
+	pool      *pgxpool.Pool
+	logger    *slog.Logger
+	sealer    Sealer
+	refKeyBox notification.Box
+	now       func() time.Time
 }
 
 // Deps는 Handler의 의존성이다.
 type Deps struct {
 	Pool   *pgxpool.Pool
 	Logger *slog.Logger
+	// Sealer는 push token을 봉인한다.
 	Sealer Sealer
-	Now    func() time.Time
+	// RefKeyBox는 notification_ref_key를 봉인하고 연다.
+	RefKeyBox notification.Box
+	Now       func() time.Time
 }
 
 // NewHandler는 Handler를 만든다.
@@ -56,7 +61,7 @@ func NewHandler(d Deps) *Handler {
 	if d.Now == nil {
 		d.Now = time.Now
 	}
-	return &Handler{pool: d.Pool, logger: d.Logger, sealer: d.Sealer, now: d.Now}
+	return &Handler{pool: d.Pool, logger: d.Logger, sealer: d.Sealer, refKeyBox: d.RefKeyBox, now: d.Now}
 }
 
 // Register는 endpoint를 등록한다. require는 인증 미들웨어다.
@@ -79,6 +84,9 @@ type userResponse struct {
 type meResponse struct {
 	RequestID string       `json:"request_id"`
 	User      userResponse `json:"user"`
+	// NotificationRefKey는 설계 9 §17.2가 /v1/me에 추가한 본인 전용 키다.
+	// bootstrap과 같은 값이다.
+	NotificationRefKey string `json:"notification_ref_key"`
 }
 
 func (h *Handler) getMe(w http.ResponseWriter, r *http.Request) {
@@ -106,10 +114,16 @@ func (h *Handler) writeMe(w http.ResponseWriter, r *http.Request, userID uuid.UU
 	}
 	u.ID = id.String()
 	u.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+	key, err := notification.EnsureRefKey(r.Context(), h.pool, h.refKeyBox, userID)
+	if err != nil {
+		h.internalError(w, r, "account.get_me")
+		return
+	}
 	w.Header().Set("ETag", etag(u.Version))
 	httpapi.WriteJSON(w, status, meResponse{
-		RequestID: httpapi.RequestID(r.Context()).String(),
-		User:      u,
+		RequestID:          httpapi.RequestID(r.Context()).String(),
+		User:               u,
+		NotificationRefKey: notification.EncodeRefKey(key),
 	})
 }
 

@@ -65,7 +65,7 @@ func newStack(t *testing.T) *stack {
 	if err != nil {
 		t.Fatal(err)
 	}
-	NewHandler(Deps{Pool: pool, Logger: logger, Sealer: box}).Register(mux, authHandler.Require)
+	NewHandler(Deps{Pool: pool, Logger: logger, Sealer: box, RefKeyBox: box}).Register(mux, authHandler.Require)
 	return &stack{handler: httpapi.Wrap(logger, mux), pool: pool, logs: &logs}
 }
 

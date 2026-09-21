@@ -3,7 +3,8 @@ openapi: 3.1.0
 # P1 인증 범위까지의 계약을 담는다.
 #
 # 담긴 것: 운영 health endpoint, 인증(§5), 계정·기기 조회와 변경.
-# 아직 없는 것: DELETE /v1/me(삭제 파이프라인과 함께), sync, calendar-write-commands.
+# 아직 없는 것: DELETE /v1/me(삭제 파이프라인과 함께), POST /v1/sync(mutation 배치),
+# calendar-write-commands.
 # 구현보다 계약을 먼저 적으면 handler와 어긋난 채로 남기 쉽다.
 #
 # 모든 mutation은 Idempotency-Key 헤더가 필수다(인증 endpoint 제외). 수정·삭제는
@@ -232,6 +233,72 @@ paths:
                 $ref: "#/components/schemas/DevicesResponse"
         "401":
           $ref: "#/components/responses/InvalidSession"
+        "423":
+          $ref: "#/components/responses/AccountLocked"
+
+  /v1/sync/bootstrap:
+    get:
+      summary: 전체 snapshot과 cursor watermark
+      description: |
+        §7.2. 호출 사용자가 볼 수 있는 전체 상태를 entity 목록으로 준다. 각 entity는
+        증분 변경과 같은 모양이다(operation은 upsert). 클라이언트는 한 로컬 트랜잭션에서
+        기존 서버 투영을 이것으로 바꾸고 cursor를 cursor_watermark로 둔다.
+
+        보장은 "최소 한 번 전달 + version 비교로 한 번 적용"이다. snapshot에 이미 반영된
+        변경이 이후 증분으로 다시 올 수 있다. 클라이언트는 tombstone을 먼저 적용하고
+        version이 더 큰 upsert만 적용한다.
+      operationId: syncBootstrap
+      tags: [sync]
+      responses:
+        "200":
+          description: snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapResponse"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "423":
+          $ref: "#/components/responses/AccountLocked"
+
+  /v1/sync:
+    get:
+      summary: 증분 변경
+      description: |
+        §7.1. cursor 뒤의 변경을 순서대로 준다. 진행 중인 트랜잭션보다 뒤의 변경은 그
+        트랜잭션이 끝날 때까지 보류한다(settled horizon). has_more가 true면 받은 cursor로
+        곧바로 다시 부른다. 변경이 없어도 새 cursor를 주므로 항상 받은 cursor를 저장한다.
+
+        cursor는 opaque 문자열이다. 파싱하거나 만들지 않는다. 29일보다 오래된 cursor는
+        410 sync_cursor_expired이며 bootstrap을 다시 받아야 한다.
+      operationId: syncRead
+      tags: [sync]
+      parameters:
+        - name: cursor
+          in: query
+          required: true
+          schema: {type: string}
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 1000, default: 500}
+      responses:
+        "200":
+          description: 변경 목록.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "410":
+          description: cursor가 보존 기간을 지났다. code는 sync_cursor_expired.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "423":
           $ref: "#/components/responses/AccountLocked"
 
@@ -478,12 +545,14 @@ components:
 
     MeResponse:
       type: object
-      required: [request_id, user]
+      required: [request_id, user, notification_ref_key]
       additionalProperties: false
       properties:
         request_id: {type: string, format: uuid}
         user:
           $ref: "#/components/schemas/User"
+        notification_ref_key:
+          $ref: "#/components/schemas/NotificationRefKey"
 
     Device:
       type: object
@@ -550,3 +619,56 @@ components:
         request_id: {type: string, format: uuid}
         device:
           $ref: "#/components/schemas/Device"
+
+    NotificationRefKey:
+      type: string
+      description: |
+        본인 전용 32바이트 키(base64url, 패딩 없음). 알림 payload의 party_ref·entity_ref를
+        역조회하는 데 쓴다(notification_design.md §4.3). 공유 keychain access group에만
+        저장하고 로그에 남기지 않는다.
+
+    SyncChange:
+      type: object
+      required: [entity_type, entity_id, operation, version, payload]
+      additionalProperties: false
+      properties:
+        entity_type: {type: string, description: "user, device, 이후 도메인이 더한다"}
+        entity_id: {type: string, format: uuid}
+        operation: {type: string, enum: [upsert, tombstone]}
+        version:
+          type: [integer, "null"]
+          format: int64
+          description: upsert에만 있다. tombstone은 null.
+        payload:
+          type: object
+          description: 최소 projection. 캘린더 상세와 token은 담지 않는다.
+
+    SyncResponse:
+      type: object
+      required: [request_id, changes, cursor, has_more, server_time]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        changes:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncChange"
+        cursor: {type: string}
+        has_more: {type: boolean}
+        server_time: {type: string, format: date-time}
+
+    BootstrapResponse:
+      type: object
+      required: [request_id, schema_version, snapshot, cursor_watermark, server_time, notification_ref_key]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        schema_version: {type: integer, enum: [1]}
+        snapshot:
+          type: array
+          items:
+            $ref: "#/components/schemas/SyncChange"
+        cursor_watermark: {type: string}
+        server_time: {type: string, format: date-time}
+        notification_ref_key:
+          $ref: "#/components/schemas/NotificationRefKey"

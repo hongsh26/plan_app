@@ -28,6 +28,7 @@ import (
 	"plantogether/server/internal/platform/httpapi"
 	"plantogether/server/internal/platform/postgres"
 	"plantogether/server/internal/platform/secretbox"
+	"plantogether/server/internal/syncfeed"
 )
 
 func main() {
@@ -100,7 +101,8 @@ func run() error {
 	}
 	mux := httpapi.NewMux(pool, logger)
 	authHandler.Register(mux)
-	account.NewHandler(account.Deps{Pool: pool.Pool(), Logger: logger, Sealer: box}).Register(mux, authHandler.Require)
+	account.NewHandler(account.Deps{Pool: pool.Pool(), Logger: logger, Sealer: box, RefKeyBox: box}).Register(mux, authHandler.Require)
+	syncfeed.NewHandler(syncfeed.Deps{Pool: pool.Pool(), Logger: logger, RefKeyBox: box}).Register(mux, authHandler.Require)
 
 	server := httpapi.NewServer(cfg.HTTPAddr, httpapi.Wrap(logger, mux))
 

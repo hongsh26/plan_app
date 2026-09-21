@@ -1,0 +1,390 @@
+package syncfeed
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"plantogether/server/internal/auth"
+	"plantogether/server/internal/notification"
+	"plantogether/server/internal/platform/httpapi"
+	"plantogether/server/internal/platform/postgres/pgtest"
+	"plantogether/server/internal/platform/secretbox"
+)
+
+func TestCursorRoundTrip(t *testing.T) {
+	c := Cursor{TxID: 1 << 40, Ordinal: -1, IssuedAt: time.Unix(1_800_000_000, 0).UTC()}
+	got, err := DecodeCursor(c.Encode())
+	if err != nil || got != c {
+		t.Fatalf("왕복 결과 %+v, %v, want %+v", got, err, c)
+	}
+}
+
+func TestDecodeCursorRejectsGarbage(t *testing.T) {
+	for _, s := range []string{"", "!!!", "MQ", Cursor{TxID: 1}.Encode()[:3],
+		// 다른 버전, 필드 수, ordinal < -1, 발급 시각 없음
+		b64("2.1.0.1"), b64("1.1.0"), b64("1.1.-2.1"), b64("1.1.0.0"), b64("1.x.0.1")} {
+		if _, err := DecodeCursor(s); !errors.Is(err, ErrBadCursor) {
+			t.Errorf("%q: err = %v, want ErrBadCursor", s, err)
+		}
+	}
+}
+
+func b64(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+
+// ---- PostgreSQL ----
+
+type fx struct {
+	pool *pgxpool.Pool
+	user uuid.UUID
+}
+
+func newFx(t *testing.T) *fx {
+	t.Helper()
+	pool := pgtest.Pool(t, pgtest.APIRoleURLEnv)
+	f := &fx{pool: pool, user: uuid.New()}
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO users (id, display_name) VALUES ($1, 'sync 테스트')`, f.user); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, f.user) })
+	return f
+}
+
+// emit은 q(트랜잭션 또는 pool)로 변경 한 줄을 쓰고 entity_id를 돌려준다. 변경의
+// 순서를 확인하려고 entity_id를 표식으로 쓴다.
+func (f *fx) emit(t *testing.T, q interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	if _, err := q.Exec(context.Background(), `
+		INSERT INTO sync_changes (ordinal, recipient_user_id, entity_type, entity_id, operation, entity_version, payload)
+		VALUES (0, $1, 'test', $2, 'upsert', 1, '{}')`, f.user, id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// drain은 cursor에서 시작해 변경이 기대 개수만큼 모일 때까지 읽는다. 다른 테스트
+// 패키지의 트랜잭션이 horizon을 잠시 붙잡을 수 있으므로 기다린다.
+func (f *fx) drain(t *testing.T, from Cursor, want int) ([]uuid.UUID, Cursor) {
+	t.Helper()
+	var got []uuid.UUID
+	cur := from
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		page, err := Read(context.Background(), f.pool, f.user, cur, 0, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range page.Changes {
+			got = append(got, c.EntityID)
+		}
+		cur = page.Next
+		if len(got) >= want && !page.HasMore {
+			return got, cur
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("10초 안에 변경 %d개를 받지 못했다(받은 것 %d개)", want, len(got))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func (f *fx) watermark(t *testing.T) Cursor {
+	t.Helper()
+	s, err := Bootstrap(context.Background(), f.pool, f.user, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s.Watermark
+}
+
+// §15 순서 역전 회귀 테스트.
+//
+// 트랜잭션 A가 먼저 sync_changes에 쓰고 커밋하지 않은 채, B가 쓰고 커밋한다. 이때
+// 읽으면 B도 전달되지 않아야 한다. A가 horizon을 붙잡고 있기 때문이다. B만 전달하고
+// cursor를 B 뒤로 옮기면, 나중에 A가 커밋해도 A는 cursor 앞에 있어 영구히 유실된다.
+// A 커밋 뒤에는 A, B가 순서대로 정확히 한 번 전달돼야 한다.
+//
+// A와 B는 각각 실제 별도 연결이다. savepoint로는 "진행 중인 다른 트랜잭션"을 만들 수 없다.
+func TestReadWithholdsChangesBehindInFlightTransaction(t *testing.T) {
+	f := newFx(t)
+	ctx := context.Background()
+	start := f.watermark(t)
+
+	connA, err := f.pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connA.Release()
+	txA, err := connA.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = txA.Rollback(ctx) }()
+	// BEGIN만으로는 txid가 배정되지 않는다. 쓰기가 txid를 배정한다.
+	idA := f.emit(t, txA)
+
+	idB := f.emit(t, f.pool) // B: 자동 커밋
+
+	page, err := Read(ctx, f.pool, f.user, start, 0, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range page.Changes {
+		if c.EntityID == idB {
+			t.Fatal("진행 중인 트랜잭션 A보다 뒤에 커밋된 B가 먼저 전달됐다. A가 커밋되면 cursor 앞에 떨어져 유실된다")
+		}
+	}
+
+	if err := txA.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, end := f.drain(t, page.Next, 2)
+	if len(got) != 2 || got[0] != idA || got[1] != idB {
+		t.Fatalf("A 커밋 뒤 전달 = %v, want [A B] 순서로 한 번씩 (A=%s B=%s)", got, idA, idB)
+	}
+
+	// 다시 읽어도 같은 변경이 오지 않는다.
+	again, err := Read(ctx, f.pool, f.user, end, 0, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Changes) != 0 {
+		t.Fatalf("이미 전달한 변경이 다시 왔다: %d개", len(again.Changes))
+	}
+}
+
+func TestReadPaginatesWithoutLossOrDuplicates(t *testing.T) {
+	f := newFx(t)
+	start := f.watermark(t)
+	var want []uuid.UUID
+	// 한 트랜잭션에 여러 변경을 넣어 페이지 경계가 트랜잭션 안에서 갈라지게 한다.
+	err := pgx.BeginFunc(context.Background(), f.pool, func(tx pgx.Tx) error {
+		for i := range 5 {
+			id := uuid.New()
+			if _, err := tx.Exec(context.Background(), `
+				INSERT INTO sync_changes (ordinal, recipient_user_id, entity_type, entity_id, operation, entity_version, payload)
+				VALUES ($1, $2, 'test', $3, 'upsert', 1, '{}')`, i, f.user, id); err != nil {
+				return err
+			}
+			want = append(want, id)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got []uuid.UUID
+	cur := start
+	deadline := time.Now().Add(10 * time.Second)
+	for len(got) < 5 {
+		page, err := Read(context.Background(), f.pool, f.user, cur, 2, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Changes) > 2 {
+			t.Fatalf("limit 2인데 %d개를 돌려줬다", len(page.Changes))
+		}
+		for _, c := range page.Changes {
+			got = append(got, c.EntityID)
+		}
+		cur = page.Next
+		if time.Now().After(deadline) {
+			t.Fatal("시간 안에 모두 받지 못했다")
+		}
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("페이지를 이어 받은 순서 %v, want %v", got, want)
+		}
+	}
+}
+
+// 보존 기간을 넘긴 cursor는 410이다. 그 사이 정리된 변경을 건너뛴 채 이어 받으면
+// 클라이언트는 무언가 빠졌다는 사실조차 모른다.
+func TestReadRejectsExpiredCursor(t *testing.T) {
+	f := newFx(t)
+	old := f.watermark(t)
+	old.IssuedAt = time.Now().Add(-CursorMaxAge - time.Minute)
+	if _, err := Read(context.Background(), f.pool, f.user, old, 0, time.Now()); !errors.Is(err, ErrCursorExpired) {
+		t.Fatalf("err = %v, want ErrCursorExpired", err)
+	}
+	fresh := f.watermark(t)
+	fresh.IssuedAt = time.Now().Add(-CursorMaxAge + time.Hour)
+	if _, err := Read(context.Background(), f.pool, f.user, fresh, 0, time.Now()); err != nil {
+		t.Fatalf("유효 기간 안의 cursor를 거부했다: %v", err)
+	}
+}
+
+// 다른 사용자의 변경은 전달되지 않는다. recipient_user_id가 권한의 전부다.
+func TestReadReturnsOnlyOwnChanges(t *testing.T) {
+	me := newFx(t)
+	other := newFx(t)
+	start := me.watermark(t)
+	other.emit(t, other.pool)
+	mine := me.emit(t, me.pool)
+
+	got, _ := me.drain(t, start, 1)
+	if len(got) != 1 || got[0] != mine {
+		t.Fatalf("전달된 변경 %v, want 내 것 하나 %s", got, mine)
+	}
+}
+
+// 변경이 없을 때도 cursor는 뒤로 가지 않고, 새 발급 시각을 갖는다.
+func TestReadNeverMovesCursorBackward(t *testing.T) {
+	f := newFx(t)
+	start := f.watermark(t)
+	start.IssuedAt = time.Now().Add(-time.Hour)
+	page, err := Read(context.Background(), f.pool, f.user, start, 0, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start.after(page.Next) {
+		t.Fatalf("cursor가 뒤로 갔다: %+v → %+v", start, page.Next)
+	}
+	if !page.Next.IssuedAt.After(start.IssuedAt) {
+		t.Error("변경이 없는 읽기가 발급 시각을 새로 하지 않았다. 오래 조용한 클라이언트가 410을 받게 된다")
+	}
+}
+
+// ---- HTTP ----
+
+func newHandler(t *testing.T, f *fx) http.Handler {
+	t.Helper()
+	box, err := secretbox.NewLocal("local", bytes.Repeat([]byte{5}, secretbox.KeySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	mux := http.NewServeMux()
+	passthrough := func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h.ServeHTTP(w, r.WithContext(auth.WithPrincipal(r.Context(), auth.Principal{UserID: f.user})))
+		})
+	}
+	NewHandler(Deps{Pool: f.pool, Logger: logger, RefKeyBox: box}).Register(mux, passthrough)
+	return httpapi.Wrap(logger, mux)
+}
+
+func get(h http.Handler, path string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	return rec
+}
+
+func TestHTTPBootstrapThenSync(t *testing.T) {
+	f := newFx(t)
+	h := newHandler(t, f)
+
+	rec := get(h, "/v1/sync/bootstrap")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap status %d: %s", rec.Code, rec.Body.String())
+	}
+	var boot bootstrapResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &boot)
+	if boot.SchemaVersion != SchemaVersion || len(boot.Snapshot) != 1 || boot.Snapshot[0].EntityType != "user" {
+		t.Fatalf("bootstrap = %+v", boot)
+	}
+	if len(boot.NotificationRefKey) != 43 { // 32바이트 base64url
+		t.Errorf("notification_ref_key 길이 %d", len(boot.NotificationRefKey))
+	}
+
+	id := f.emit(t, f.pool)
+	var changes []Change
+	cursor := boot.CursorWatermark
+	deadline := time.Now().Add(10 * time.Second)
+	for len(changes) == 0 && time.Now().Before(deadline) {
+		rec = get(h, "/v1/sync?cursor="+cursor)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("sync status %d: %s", rec.Code, rec.Body.String())
+		}
+		var page readResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &page)
+		changes, cursor = page.Changes, page.Cursor
+	}
+	if len(changes) != 1 || changes[0].EntityID != id {
+		t.Fatalf("bootstrap 뒤의 변경이 전달되지 않았다: %+v", changes)
+	}
+
+	// 같은 키를 다시 받는다.
+	rec = get(h, "/v1/sync/bootstrap")
+	var again bootstrapResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &again)
+	if again.NotificationRefKey != boot.NotificationRefKey {
+		t.Error("bootstrap마다 notification_ref_key가 바뀐다")
+	}
+}
+
+func TestHTTPSyncErrors(t *testing.T) {
+	f := newFx(t)
+	h := newHandler(t, f)
+	expired := Cursor{TxID: 1, Ordinal: -1, IssuedAt: time.Now().Add(-CursorMaxAge - time.Hour)}.Encode()
+	for _, tc := range []struct {
+		path   string
+		status int
+		code   string
+	}{
+		{"/v1/sync", 400, httpapi.CodeInvalidRequest},
+		{"/v1/sync?cursor=garbage", 400, httpapi.CodeInvalidRequest},
+		{"/v1/sync?cursor=" + Cursor{TxID: 1, IssuedAt: time.Now()}.Encode() + "&limit=0", 400, httpapi.CodeInvalidRequest},
+		{"/v1/sync?cursor=" + expired, 410, httpapi.CodeSyncCursorExpired},
+	} {
+		rec := get(h, tc.path)
+		var e httpapi.ErrorResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &e)
+		if rec.Code != tc.status || e.Code != tc.code {
+			t.Errorf("%s: %d %s, want %d %s", tc.path, rec.Code, e.Code, tc.status, tc.code)
+		}
+	}
+}
+
+// 처음 받는 요청이 동시에 여러 번 와도 키는 하나다. 기기마다 다른 키를 받으면 한쪽의
+// 알림 역조회가 영원히 실패한다.
+func TestEnsureRefKeyConcurrentFirstUse(t *testing.T) {
+	f := newFx(t)
+	box, _ := secretbox.NewLocal("local", bytes.Repeat([]byte{5}, secretbox.KeySize))
+	const n = 8
+	keys := make([][]byte, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			keys[i], errs[i] = notification.EnsureRefKey(context.Background(), f.pool, box, f.user)
+		}()
+	}
+	wg.Wait()
+	for i := range n {
+		if errs[i] != nil {
+			t.Fatalf("요청 %d 실패: %v", i, errs[i])
+		}
+		if !bytes.Equal(keys[i], keys[0]) {
+			t.Fatal("동시 첫 요청이 서로 다른 키를 받았다")
+		}
+	}
+	var stored []byte
+	_ = f.pool.QueryRow(context.Background(),
+		`SELECT ref_key_ciphertext FROM notification_ref_keys WHERE user_id = $1`, f.user).Scan(&stored)
+	if bytes.Contains(stored, keys[0]) {
+		t.Fatal("참조 키가 평문으로 저장됐다")
+	}
+}
