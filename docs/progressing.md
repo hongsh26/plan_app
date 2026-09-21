@@ -28,7 +28,7 @@
 
 - 구현: `POST /v1/auth/apple|refresh|logout`, 인증 미들웨어, `GET /v1/me`, `GET /v1/devices`, `request_id` 미들웨어(L-6), §6 오류 응답, DB 역할 분리 자동 테스트, README Go 버전 표기(L-4)
 - 통합 테스트는 api 런타임 역할로 접속한다. 원격 CI: 리뷰 전 `db04442` run `35572217145` PASS 152·SKIP 0, 리뷰 반영 `2d2ef70` run `35572702395` PASS 166·SKIP 0(KMS 기동 거부 스텝 포함)
-- **잠금 규약: `users` → `devices` → `sessions`, 그리고 `users`·`devices` row는 `FOR UPDATE`가 아니라 `FOR NO KEY UPDATE`로 잠근다.** mutation helper의 `idempotency_keys` INSERT가 FK 검사로 두 row에 KEY SHARE를 먼저 걸기 때문이다(`docs/rec/2026-09-21_1651_mutation_helper.md`). 계정 삭제도 이 규약을 따라야 한다
+- **잠금 규약: `users` → `devices` → `sessions`, 그리고 `users`·`devices` row에는 `FOR UPDATE`를 쓰지 않는다(읽기 잠금은 `FOR SHARE`, 수정 잠금은 `FOR NO KEY UPDATE`).** mutation helper의 `idempotency_keys` INSERT가 FK 검사로 두 row에 KEY SHARE를 먼저 걸기 때문이다(`docs/rec/2026-09-21_1651_mutation_helper.md`). 계정 삭제도 이 규약을 따라야 한다
 
 **P1에서 의도적으로 미룬 것 (잊으면 안 되는 것):**
 

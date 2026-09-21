@@ -49,8 +49,9 @@ SHARE**를 먼저 건다. 그 뒤 도메인 코드가 같은 row를 `FOR UPDATE`
 - 재현: 한 사용자의 두 기기가 서로 다른 키로 동시에 `PATCH /v1/me`하면 거의 매번 한쪽이
   1초(deadlock_timeout) 뒤 500이었다. 한 기기가 서로 다른 키로 push token을 동시에 두 번 보내면
   30회 중 29회 500이었다(리뷰어 실측).
-- **규칙: `users`·`devices` row는 `FOR NO KEY UPDATE`로 잠근다.** 두 표의 키 열은 바뀌지 않으므로
-  충분하고, NO KEY UPDATE는 KEY SHARE와 충돌하지 않는다. `auth.LockUserAndDevice`도 바꿨다.
+- **규칙: `users`·`devices` row에는 `FOR UPDATE`를 쓰지 않는다.** 읽기 잠금은 `FOR SHARE`, 수정
+  잠금은 `FOR NO KEY UPDATE`다. 두 표의 키 열은 바뀌지 않으므로 충분하고, 둘 다 KEY SHARE와 충돌하지
+  않는다. `auth.LockUserAndDevice`는 users를 `FOR SHARE`, devices를 `FOR NO KEY UPDATE`로 잡는다.
 - **교착·직렬화 실패(40P01, 40001)는 트랜잭션 전체를 최대 3회 다시 실행한다.** 롤백된
   트랜잭션은 아무것도 남기지 않으므로 안전하다.
 - 재시도는 규칙 위반을 숨긴다. 교착이 나도 다음 시도에서 성공하면 응답은 정상이고 1초 늦을
@@ -92,10 +93,13 @@ index에서 직렬화되므로 교착이 날 수 없다. 키 재사용 테스트
 
 - 로컬 `go test -race ./...`, `REQUIRE_DB_TESTS=1`: 전부 통과, skip 0
 - 원격 CI(리뷰 전 `1818528`, run `35574529111`): PASS 195, SKIP 0. 00002가 CI에서 적용됐다
+- 원격 CI(리뷰 반영 `1f290cf`, run `35574934529`, 문서 `40acc33`, run `35574996432`): PASS 200, SKIP 0
 - 원자성: 도메인 쓰기, sync 변경, outbox job을 모두 쓴 뒤 실패를 주입해 넷(도메인, sync, outbox,
   idempotency) 모두 남지 않는 것을 확인한다
 - 독립 리뷰(code-reviewer, opus): High 2건(위 두 건), Medium 2건(만료 키 동시 교체의 500, 오류 로그
-  분류 누락), Low 3건. 모두 `1f290cf`에서 반영했다
+  분류 누락)을 `1f290cf`에서 고쳤다. Low 3건 중 느슨한 If-Match 파싱과 `last_seen_at`의 시계 혼용
+  (앱 시계 → DB `now()`)은 고쳤고, "If-Match가 지문에 없다"는 의도로 판단해 위 계약에 적었다
+- 재검증(verifier, opus): MERGE-READY. 두 High 회귀 실험을 직접 재현했다
 
 ## 남은 것
 
