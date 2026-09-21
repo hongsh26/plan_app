@@ -5,40 +5,22 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-// 보존 기간(§7.1). sync_changes row는 created_at 기준 Retention이 지나면 정리 대상이다.
-// 정리 작업은 아직 없다(scheduler).
-const Retention = 30 * 24 * time.Hour
-
-// CursorMaxAge는 cursor가 유효한 최대 나이다. 이보다 오래된 cursor는 410
-// sync_cursor_expired로 전체 재동기화를 요구한다.
-//
-// Retention보다 하루 짧은 이유: cursor 발급 시점에 아직 커밋되지 않은 트랜잭션의
-// row는 그 cursor 뒤에 나타나는데, 그 row의 created_at은 트랜잭션 시작 시각이라
-// 발급 시각보다 이를 수 있다(created_at 순서와 txid 순서는 일치하지 않는다).
-// 정리 작업이 "created_at < now - Retention"으로 지우면, 발급 시각이 now - 29일보다
-// 늦은 cursor 뒤의 row는 트랜잭션이 하루 넘게 열려 있지 않은 한 지워지지 않는다.
-//
-// 이 계산은 두 조건에 기댄다. 정리 작업을 만들 때 둘 다 지켜야 한다.
-//  1. 정리는 created_at < now - Retention인 row만 지운다.
-//  2. 어떤 트랜잭션도 하루(Retention - CursorMaxAge) 넘게 열려 있지 않다. DB의
-//     idle_in_transaction_session_timeout과 statement_timeout으로 강제한다.
-const CursorMaxAge = Retention - 24*time.Hour
 
 const (
 	defaultLimit = 500
 	maxLimit     = 1000
 )
 
-var (
-	// ErrCursorExpired는 §7.1의 410 sync_cursor_expired다.
-	ErrCursorExpired = errors.New("syncfeed: cursor가 보존 기간을 지났다")
-)
+// ErrCursorExpired는 §7.1의 410 sync_cursor_expired다. 두 경우다.
+//   - cursor가 정리 워터마크 이하다. 그 뒤의 변경 일부가 이미 지워졌을 수 있다.
+//   - cursor를 발급한 클러스터 세대가 지금과 다르다(epoch.go).
+//
+// 어느 경우든 이어 받으면 무언가 빠졌다는 사실조차 모르게 되므로 전체 재동기화를 요구한다.
+var ErrCursorExpired = errors.New("syncfeed: cursor를 이어 쓸 수 없다")
 
 // Change는 클라이언트에 전달하는 변경 하나다. 스냅샷 entity도 같은 모양이다.
 type Change struct {
@@ -67,21 +49,25 @@ type Page struct {
 // horizon을 같은 문장 안에서 구한다. 따로 구하면 두 문장 사이에 snapshot이 달라진다.
 //
 // recipient_user_id 조건이 권한의 전부다. handler에서 거르지 않는다.
-func Read(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, from Cursor, limit int, now time.Time) (Page, error) {
-	if now.Sub(from.IssuedAt) > CursorMaxAge {
-		return Page{}, ErrCursorExpired
-	}
+func Read(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, from Cursor, limit int) (Page, error) {
 	if limit <= 0 || limit > maxLimit {
 		limit = defaultLimit
 	}
 
-	// LEFT JOIN LATERAL: 변경이 하나도 없어도 horizon 한 줄은 돌려받는다.
+	// 한 문장에서 horizon, 세대, 정리 워터마크 판정, 변경을 함께 읽는다. 정리는
+	// 삭제와 워터마크 갱신을 한 트랜잭션에서 하므로, 한 snapshot 안에서는 "워터마크는
+	// 옛날인데 row는 지워진" 상태가 보이지 않는다.
+	//
+	// LEFT JOIN LATERAL: 변경이 하나도 없어도 첫 줄(horizon 등)은 돌려받는다.
 	// LIMIT은 한 줄 더 읽어 다음 페이지 유무를 판단한다.
 	rows, err := pool.Query(ctx, `
-		WITH h AS (SELECT pg_snapshot_xmin(pg_current_snapshot()) AS x)
-		SELECT h.x::text, c.txid::text, c.ordinal, c.entity_type, c.entity_id,
+		WITH h AS (SELECT pg_snapshot_xmin(pg_current_snapshot()) AS x),
+		     p AS (SELECT pruned_through_txid AS t, pruned_through_ordinal AS o FROM sync_prune_state)
+		SELECT h.x::text, `+epochSQL+`,
+		       ($2::text::xid8, $3::int) <= (p.t, p.o),
+		       c.txid::text, c.ordinal, c.entity_type, c.entity_id,
 		       c.operation, c.entity_version, c.payload
-		  FROM h
+		  FROM h CROSS JOIN p
 		  LEFT JOIN LATERAL (
 		        SELECT txid, ordinal, entity_type, entity_id, operation, entity_version, payload
 		          FROM sync_changes
@@ -97,27 +83,31 @@ func Read(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, from Cursor
 	}
 	defer rows.Close()
 
-	var horizon uint64
-	var changes []Change
-	var positions []Cursor // changes[i]의 위치
+	var (
+		horizon   uint64
+		epoch     Epoch
+		pruned    bool
+		changes   []Change
+		positions []Cursor // changes[i]의 위치
+	)
 	for rows.Next() {
 		var (
-			hx      string
-			txid    *string
-			ordinal *int32
-			ch      Change
-			etype   *string
-			eid     *uuid.UUID
-			op      *string
+			hx, sysid, tli string
+			txid           *string
+			ordinal        *int32
+			ch             Change
+			etype          *string
+			eid            *uuid.UUID
+			op             *string
 		)
-		if err := rows.Scan(&hx, &txid, &ordinal, &etype, &eid, &op, &ch.Version, &ch.Payload); err != nil {
+		if err := rows.Scan(&hx, &sysid, &tli, &pruned, &txid, &ordinal, &etype, &eid, &op, &ch.Version, &ch.Payload); err != nil {
 			return Page{}, err
 		}
-		if horizon, err = strconv.ParseUint(hx, 10, 64); err != nil {
+		if horizon, epoch, err = parseHead(hx, sysid, tli); err != nil {
 			return Page{}, err
 		}
 		if txid == nil {
-			continue // 변경이 없는 경우의 horizon 줄
+			continue // 변경이 없는 경우의 첫 줄
 		}
 		t, err := strconv.ParseUint(*txid, 10, 64)
 		if err != nil {
@@ -129,6 +119,9 @@ func Read(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, from Cursor
 	}
 	if err := rows.Err(); err != nil {
 		return Page{}, err
+	}
+	if pruned || epoch != from.Epoch {
+		return Page{}, ErrCursorExpired
 	}
 
 	page := Page{Changes: changes}
@@ -152,6 +145,22 @@ func Read(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, from Cursor
 			page.Next = h
 		}
 	}
-	page.Next.IssuedAt = now
+	page.Next.Epoch = epoch
 	return page, nil
+}
+
+func parseHead(hx, sysid, tli string) (uint64, Epoch, error) {
+	h, err := strconv.ParseUint(hx, 10, 64)
+	if err != nil {
+		return 0, Epoch{}, err
+	}
+	s, err := strconv.ParseUint(sysid, 10, 64)
+	if err != nil {
+		return 0, Epoch{}, err
+	}
+	t, err := strconv.ParseUint(tli, 10, 32)
+	if err != nil {
+		return 0, Epoch{}, err
+	}
+	return h, Epoch{SystemID: s, Timeline: uint32(t)}, nil
 }

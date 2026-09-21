@@ -14,7 +14,6 @@ import (
 	"errors"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // Cursor는 클라이언트에 주는 opaque cursor의 내부 표현이다(§7.1).
@@ -24,12 +23,15 @@ import (
 // 계속 읽어야 한다. 그래서 첫 필드에 버전을 둔다.
 //
 // 담는 것:
+//   - Epoch: 발급한 DB 클러스터의 세대. 장애 전환이나 시점 복구로 트랜잭션 ID
+//     이력이 되감기면 세대가 바뀐다. 세대가 다른 cursor는 410이다(epoch.go).
 //   - (TxID, Ordinal): 마지막으로 전달한 위치. 다음 읽기는 이보다 뒤만 반환한다.
-//   - IssuedAt: 서버가 이 cursor를 발급한 시각. 보존 기간 판정(410)에 쓴다.
+//
+// 발급 시각은 담지 않는다. 보존 기간 판정은 시각이 아니라 정리 워터마크로 한다(prune.go).
 type Cursor struct {
-	TxID     uint64
-	Ordinal  int32
-	IssuedAt time.Time
+	Epoch   Epoch
+	TxID    uint64
+	Ordinal int32
 }
 
 const cursorVersion = "1"
@@ -44,9 +46,10 @@ var ErrBadCursor = errors.New("syncfeed: cursor를 해석할 수 없다")
 func (c Cursor) Encode() string {
 	raw := strings.Join([]string{
 		cursorVersion,
+		strconv.FormatUint(c.Epoch.SystemID, 10),
+		strconv.FormatUint(uint64(c.Epoch.Timeline), 10),
 		strconv.FormatUint(c.TxID, 10),
 		strconv.FormatInt(int64(c.Ordinal), 10),
-		strconv.FormatInt(c.IssuedAt.Unix(), 10),
 	}, ".")
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
@@ -58,17 +61,18 @@ func DecodeCursor(s string) (Cursor, error) {
 		return Cursor{}, ErrBadCursor
 	}
 	parts := strings.Split(string(b), ".")
-	if len(parts) != 4 || parts[0] != cursorVersion {
+	if len(parts) != 5 || parts[0] != cursorVersion {
 		return Cursor{}, ErrBadCursor
 	}
-	txid, err1 := strconv.ParseUint(parts[1], 10, 64)
-	ord, err2 := strconv.ParseInt(parts[2], 10, 32)
-	issued, err3 := strconv.ParseInt(parts[3], 10, 64)
+	sysid, err1 := strconv.ParseUint(parts[1], 10, 64)
+	tli, err2 := strconv.ParseUint(parts[2], 10, 32)
+	txid, err3 := strconv.ParseUint(parts[3], 10, 64)
+	ord, err4 := strconv.ParseInt(parts[4], 10, 32)
 	// ordinal은 -1(해당 txid의 처음 앞)부터 가능하다.
-	if err1 != nil || err2 != nil || err3 != nil || ord < -1 || issued <= 0 {
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil || ord < -1 || sysid == 0 || tli == 0 {
 		return Cursor{}, ErrBadCursor
 	}
-	return Cursor{TxID: txid, Ordinal: int32(ord), IssuedAt: time.Unix(issued, 0).UTC()}, nil
+	return Cursor{Epoch: Epoch{SystemID: sysid, Timeline: uint32(tli)}, TxID: txid, Ordinal: int32(ord)}, nil
 }
 
 // after는 (TxID, Ordinal) 위치가 o보다 뒤인지다.

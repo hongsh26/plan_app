@@ -204,9 +204,10 @@ Party, 공개 설정, 제안 API는 후속 설계에서 추가하되 공통 멱�
 - **클라이언트 cursor는 서버가 발급한 opaque 문자열이다.** 클라이언트는 받은 값을 그대로 돌려줄 뿐 파싱하거나 비교하거나 직접 만들지 않는다. 내부 표현은 `(txid, ordinal)`이지만 계약이 아니다.
 - **읽기는 settled horizon 아래만 반환한다.** 조회 트랜잭션은 `horizon = pg_snapshot_xmin(pg_current_snapshot())`을 구하고 `WHERE recipient_user_id = $1 AND (txid, ordinal) > cursor AND txid < horizon ORDER BY txid, ordinal`로 읽는다. `horizon` 미만의 트랜잭션은 전부 종료(커밋 또는 abort)되었으므로 아직 진행 중인 트랜잭션의 변경이 cursor 뒤에 나타날 수 없다.
 - `ordinal`은 트랜잭션 내부 counter이며 §5의 mutation transaction helper가 단독으로 발급한다. 개별 call site가 직접 세지 않는다.
-- 변경 payload는 전체 객체가 아닌 type, id, operation, version과 최소 projection을 포함한다.
+- 변경 payload는 type, id, operation, version과 entity의 **전체 투영**을 포함한다. 투영은 캘린더 상세와 token을 뺀 최소 필드 집합이지만, 같은 entity에 대해서는 bootstrap snapshot과 증분 변경이 언제나 같은 모양의 전체 투영을 싣는다. 바뀐 필드만 보내면 클라이언트에 병합 규칙이 필요하고, 로컬에 없는 entity의 일부 필드 upsert를 채울 수 없다. 클라이언트는 version이 더 큰 upsert를 받으면 payload로 로컬 entity를 통째로 바꾼다(2026-09-21 개정).
 - 삭제와 탈퇴는 tombstone으로 전달한다.
-- 변경 피드는 기본 30일 보존한다. 보존 하한은 `txid` 자체가 아니라 row의 `created_at`으로 판정하며, cursor가 가리키는 위치가 보존 하한보다 오래되었으면 `410 sync_cursor_expired`를 반환해 전체 재동기화를 요구한다. `410`을 쓰는 다른 코드와 구별되도록 클라이언트는 상태 코드가 아니라 `code` 값으로 분기한다.
+- 변경 피드는 기본 30일 보존한다. **정리 대상은 row의 `created_at`으로 고르지만, 410 판정은 시각이 아니라 위치로 한다.** 정리 작업은 지운 row 중 가장 뒤의 `(txid, ordinal)`을 같은 트랜잭션에서 정리 워터마크(`sync_prune_state`)로 기록하고, cursor가 워터마크 이하이면 `410 sync_cursor_expired`로 전체 재동기화를 요구한다. `created_at`은 트랜잭션 시작 시각이고 `txid`는 첫 쓰기 때 배정되어 두 순서가 어긋나므로, 시각으로 판정하면 "오래 열린 트랜잭션이 없다"는 가정이 필요하다. 위치로 판정하면 가정이 없다(2026-09-21 개정). `410`을 쓰는 다른 코드와 구별되도록 클라이언트는 상태 코드가 아니라 `code` 값으로 분기한다.
+- **cursor는 발급한 DB 클러스터의 세대(`system_identifier`, timeline)를 담는다.** 비동기 복제본 장애 전환이나 시점 복구로 txid 이력이 되감기면 옛 cursor 뒤에는 새 변경이 영원히 오지 않는다. 세대가 다르면 `410 sync_cursor_expired`다. sync 읽기는 primary에서 한다(2026-09-21 개정).
 
 #### 순서 키를 `BIGSERIAL`로 두지 않는 이유
 
@@ -219,7 +220,7 @@ Party, 공개 설정, 제안 API는 후속 설계에서 추가하되 공통 멱�
 ### 7.2 Bootstrap
 
 - `/v1/sync/bootstrap`은 `schema_version`, `snapshot`, `cursor_watermark`, `server_time`, `notification_ref_key`를 반환한다. `GET /v1/me`도 `notification_ref_key`를 같은 의미로 반환한다(설계 9 §17.2).
-- `cursor_watermark`는 §7.1과 같은 형식의 opaque cursor 문자열이다. snapshot을 만든 트랜잭션이 자신의 `horizon`을 구해 그 직전 위치를 인코딩하며, snapshot에 이미 반영된 변경을 증분으로 다시 받지 않으면서 진행 중이던 트랜잭션의 변경은 빠짐없이 받도록 한다.
+- `cursor_watermark`는 §7.1과 같은 형식의 opaque cursor 문자열이다. snapshot을 만든 트랜잭션이 자신의 `horizon`을 구해 그 직전 위치를 인코딩한다. 진행 중이던 트랜잭션의 변경은 빠짐없이 증분으로 받는다. **대신 horizon 이상이지만 snapshot 시점에 이미 커밋된 트랜잭션의 변경은 snapshot에도 있고 증분으로도 다시 온다.** `(txid, ordinal)` 순서 키만으로는 이 중복을 없앨 수 없으므로, 보장은 "최소 한 번 전달 + version 비교로 한 번 적용"이다(2026-09-21 개정).
 - snapshot은 호출 사용자가 현재 볼 수 있는 사용자, Party, 멤버십, 공개 설정, 제안, 확정 이벤트와 캘린더 명령만 포함한다.
 - iOS는 한 개의 SwiftData transaction에서 기존 서버 투영을 snapshot으로 교체하고 cursor를 watermark로 설정한다.
 - 아직 전송하지 않은 로컬 mutation은 별도 queue에 보존하고 snapshot 반영 후 의존 entity/version을 다시 확인해 재전송하거나 conflict로 표시한다.

@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"plantogether/server/internal/account"
 	"plantogether/server/internal/auth"
 	"plantogether/server/internal/notification"
 	"plantogether/server/internal/platform/httpapi"
@@ -27,7 +28,7 @@ import (
 )
 
 func TestCursorRoundTrip(t *testing.T) {
-	c := Cursor{TxID: 1 << 40, Ordinal: -1, IssuedAt: time.Unix(1_800_000_000, 0).UTC()}
+	c := Cursor{Epoch: Epoch{SystemID: 7687170298575188004, Timeline: 3}, TxID: 1 << 40, Ordinal: -1}
 	got, err := DecodeCursor(c.Encode())
 	if err != nil || got != c {
 		t.Fatalf("왕복 결과 %+v, %v, want %+v", got, err, c)
@@ -36,8 +37,8 @@ func TestCursorRoundTrip(t *testing.T) {
 
 func TestDecodeCursorRejectsGarbage(t *testing.T) {
 	for _, s := range []string{"", "!!!", "MQ", Cursor{TxID: 1}.Encode()[:3],
-		// 다른 버전, 필드 수, ordinal < -1, 발급 시각 없음
-		b64("2.1.0.1"), b64("1.1.0"), b64("1.1.-2.1"), b64("1.1.0.0"), b64("1.x.0.1")} {
+		// 다른 버전, 필드 수, ordinal < -1, 세대 없음, 숫자 아님
+		b64("2.9.1.1.0"), b64("1.9.1.1"), b64("1.9.1.1.-2"), b64("1.0.1.1.0"), b64("1.9.0.1.0"), b64("1.9.1.x.0")} {
 		if _, err := DecodeCursor(s); !errors.Is(err, ErrBadCursor) {
 			t.Errorf("%q: err = %v, want ErrBadCursor", s, err)
 		}
@@ -88,7 +89,7 @@ func (f *fx) drain(t *testing.T, from Cursor, want int) ([]uuid.UUID, Cursor) {
 	cur := from
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		page, err := Read(context.Background(), f.pool, f.user, cur, 0, time.Now())
+		page, err := Read(context.Background(), f.pool, f.user, cur, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -108,7 +109,7 @@ func (f *fx) drain(t *testing.T, from Cursor, want int) ([]uuid.UUID, Cursor) {
 
 func (f *fx) watermark(t *testing.T) Cursor {
 	t.Helper()
-	s, err := Bootstrap(context.Background(), f.pool, f.user, time.Now())
+	s, err := Bootstrap(context.Background(), f.pool, f.user)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +144,7 @@ func TestReadWithholdsChangesBehindInFlightTransaction(t *testing.T) {
 
 	idB := f.emit(t, f.pool) // B: 자동 커밋
 
-	page, err := Read(ctx, f.pool, f.user, start, 0, time.Now())
+	page, err := Read(ctx, f.pool, f.user, start, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +163,7 @@ func TestReadWithholdsChangesBehindInFlightTransaction(t *testing.T) {
 	}
 
 	// 다시 읽어도 같은 변경이 오지 않는다.
-	again, err := Read(ctx, f.pool, f.user, end, 0, time.Now())
+	again, err := Read(ctx, f.pool, f.user, end, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +197,7 @@ func TestReadPaginatesWithoutLossOrDuplicates(t *testing.T) {
 	cur := start
 	deadline := time.Now().Add(10 * time.Second)
 	for len(got) < 5 {
-		page, err := Read(context.Background(), f.pool, f.user, cur, 2, time.Now())
+		page, err := Read(context.Background(), f.pool, f.user, cur, 2)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -218,19 +219,100 @@ func TestReadPaginatesWithoutLossOrDuplicates(t *testing.T) {
 	}
 }
 
-// 보존 기간을 넘긴 cursor는 410이다. 그 사이 정리된 변경을 건너뛴 채 이어 받으면
-// 클라이언트는 무언가 빠졌다는 사실조차 모른다.
-func TestReadRejectsExpiredCursor(t *testing.T) {
+// 정리 워터마크 이하의 cursor는 410이다. 그 뒤의 변경 일부가 이미 지워졌을 수
+// 있으므로 이어 받으면 무언가 빠졌다는 사실조차 모르게 된다. 워터마크 뒤의 cursor는
+// 영향이 없다.
+func TestReadRejectsCursorAtOrBeforePruneWatermark(t *testing.T) {
 	f := newFx(t)
-	old := f.watermark(t)
-	old.IssuedAt = time.Now().Add(-CursorMaxAge - time.Minute)
-	if _, err := Read(context.Background(), f.pool, f.user, old, 0, time.Now()); !errors.Is(err, ErrCursorExpired) {
-		t.Fatalf("err = %v, want ErrCursorExpired", err)
+	ctx := context.Background()
+	before := f.watermark(t)
+	old := f.emit(t, f.pool)
+	if _, err := f.pool.Exec(ctx,
+		`UPDATE sync_changes SET created_at = now() - interval '40 days' WHERE entity_id = $1`, old); err != nil {
+		t.Fatal(err)
 	}
-	fresh := f.watermark(t)
-	fresh.IssuedAt = time.Now().Add(-CursorMaxAge + time.Hour)
-	if _, err := Read(context.Background(), f.pool, f.user, fresh, 0, time.Now()); err != nil {
-		t.Fatalf("유효 기간 안의 cursor를 거부했다: %v", err)
+	// 정리 후 새 변경. 이것은 지워지지 않는다.
+	var afterOld Cursor
+	got, afterOld := f.drain(t, before, 1)
+	if len(got) != 1 || got[0] != old {
+		t.Fatalf("정리 전 전달 = %v", got)
+	}
+	fresh := f.emit(t, f.pool)
+
+	n, err := Prune(ctx, f.pool, time.Now().Add(-Retention))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n < 1 {
+		t.Fatalf("정리가 지운 개수 %d, want >= 1", n)
+	}
+
+	if _, err := Read(ctx, f.pool, f.user, before, 0); !errors.Is(err, ErrCursorExpired) {
+		t.Fatalf("정리된 변경 앞의 cursor err = %v, want ErrCursorExpired", err)
+	}
+	got, _ = f.drain(t, afterOld, 1)
+	if len(got) != 1 || got[0] != fresh {
+		t.Fatalf("정리 워터마크 뒤의 cursor가 새 변경을 받지 못했다: %v", got)
+	}
+
+	// 지울 것이 없는 정리는 워터마크를 내리지 않는다.
+	if _, err := Prune(ctx, f.pool, time.Now().Add(-Retention)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Read(ctx, f.pool, f.user, before, 0); !errors.Is(err, ErrCursorExpired) {
+		t.Fatalf("두 번째 정리 뒤 워터마크가 내려갔다: err = %v", err)
+	}
+}
+
+// 다른 클러스터 세대에서 발급한 cursor는 410이다. 장애 전환이나 시점 복구로 txid
+// 이력이 되감기면, 옛 cursor 뒤에는 새 변경이 오지 않는다.
+func TestReadRejectsCursorFromAnotherEpoch(t *testing.T) {
+	f := newFx(t)
+	c := f.watermark(t)
+	for _, other := range []Epoch{
+		{SystemID: c.Epoch.SystemID, Timeline: c.Epoch.Timeline + 1},
+		{SystemID: c.Epoch.SystemID + 1, Timeline: c.Epoch.Timeline},
+	} {
+		stale := c
+		stale.Epoch = other
+		if _, err := Read(context.Background(), f.pool, f.user, stale, 0); !errors.Is(err, ErrCursorExpired) {
+			t.Errorf("세대 %+v의 cursor err = %v, want ErrCursorExpired", other, err)
+		}
+	}
+	if _, err := Read(context.Background(), f.pool, f.user, c, 0); err != nil {
+		t.Fatalf("같은 세대의 cursor를 거부했다: %v", err)
+	}
+}
+
+// bootstrap 시점에 진행 중이던 트랜잭션의 변경은 snapshot에 없고, 이후 증분으로
+// 빠짐없이 와야 한다. watermark를 horizon이 아니라 더 뒤(xmax 등)로 두거나 horizon을
+// 다른 트랜잭션에서 구하면 이 변경을 잃는다.
+func TestBootstrapWatermarkKeepsInFlightChanges(t *testing.T) {
+	f := newFx(t)
+	ctx := context.Background()
+	connA, err := f.pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connA.Release()
+	txA, err := connA.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = txA.Rollback(ctx) }()
+	idA := f.emit(t, txA)
+
+	wm := f.watermark(t)
+	if err := txA.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := f.drain(t, wm, 1)
+	found := false
+	for _, id := range got {
+		found = found || id == idA
+	}
+	if !found {
+		t.Fatalf("bootstrap 중 진행 중이던 변경 %s가 전달되지 않았다: %v", idA, got)
 	}
 }
 
@@ -248,20 +330,19 @@ func TestReadReturnsOnlyOwnChanges(t *testing.T) {
 	}
 }
 
-// 변경이 없을 때도 cursor는 뒤로 가지 않고, 새 발급 시각을 갖는다.
+// 변경이 없을 때도 cursor는 뒤로 가지 않는다.
 func TestReadNeverMovesCursorBackward(t *testing.T) {
 	f := newFx(t)
 	start := f.watermark(t)
-	start.IssuedAt = time.Now().Add(-time.Hour)
-	page, err := Read(context.Background(), f.pool, f.user, start, 0, time.Now())
+	page, err := Read(context.Background(), f.pool, f.user, start, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if start.after(page.Next) {
 		t.Fatalf("cursor가 뒤로 갔다: %+v → %+v", start, page.Next)
 	}
-	if !page.Next.IssuedAt.After(start.IssuedAt) {
-		t.Error("변경이 없는 읽기가 발급 시각을 새로 하지 않았다. 오래 조용한 클라이언트가 410을 받게 된다")
+	if page.Next.Epoch != start.Epoch {
+		t.Errorf("세대가 바뀌었다: %+v → %+v", start.Epoch, page.Next.Epoch)
 	}
 }
 
@@ -336,7 +417,10 @@ func TestHTTPBootstrapThenSync(t *testing.T) {
 func TestHTTPSyncErrors(t *testing.T) {
 	f := newFx(t)
 	h := newHandler(t, f)
-	expired := Cursor{TxID: 1, Ordinal: -1, IssuedAt: time.Now().Add(-CursorMaxAge - time.Hour)}.Encode()
+	wm := f.watermark(t)
+	stale := wm
+	stale.Epoch.Timeline++
+	expired := stale.Encode()
 	for _, tc := range []struct {
 		path   string
 		status int
@@ -344,7 +428,7 @@ func TestHTTPSyncErrors(t *testing.T) {
 	}{
 		{"/v1/sync", 400, httpapi.CodeInvalidRequest},
 		{"/v1/sync?cursor=garbage", 400, httpapi.CodeInvalidRequest},
-		{"/v1/sync?cursor=" + Cursor{TxID: 1, IssuedAt: time.Now()}.Encode() + "&limit=0", 400, httpapi.CodeInvalidRequest},
+		{"/v1/sync?cursor=" + wm.Encode() + "&limit=0", 400, httpapi.CodeInvalidRequest},
 		{"/v1/sync?cursor=" + expired, 410, httpapi.CodeSyncCursorExpired},
 	} {
 		rec := get(h, tc.path)
@@ -386,5 +470,48 @@ func TestEnsureRefKeyConcurrentFirstUse(t *testing.T) {
 		`SELECT ref_key_ciphertext FROM notification_ref_keys WHERE user_id = $1`, f.user).Scan(&stored)
 	if bytes.Contains(stored, keys[0]) {
 		t.Fatal("참조 키가 평문으로 저장됐다")
+	}
+}
+
+// 증분 변경은 bootstrap과 같은 전체 투영을 싣는다. 일부 필드만 실으면 클라이언트는
+// 병합 규칙을 알아야 하고, 로컬에 없는 entity의 upsert를 채울 수 없다.
+func TestIncrementalPayloadIsFullProjection(t *testing.T) {
+	f := newFx(t)
+	ctx := context.Background()
+	boot, err := Bootstrap(ctx, f.pool, f.user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapUser map[string]any
+	_ = json.Unmarshal(boot.Entities[0].Payload, &snapUser)
+
+	// 표시 이름만 바꾸는 mutation과 같은 경로로 변경을 남긴다.
+	err = pgx.BeginFunc(ctx, f.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE users SET display_name = '바뀐 이름', version = version + 1 WHERE id = $1`, f.user); err != nil {
+			return err
+		}
+		pr, err := account.UserProjection(ctx, tx, f.user)
+		if err != nil {
+			return err
+		}
+		b, _ := json.Marshal(pr.Payload)
+		_, err = tx.Exec(ctx, `
+			INSERT INTO sync_changes (ordinal, recipient_user_id, entity_type, entity_id, operation, entity_version, payload)
+			VALUES (0, $1, 'user', $1, 'upsert', $2, $3)`, f.user, pr.Version, b)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := Read(ctx, f.pool, f.user, boot.Watermark, 0)
+	if err != nil || len(page.Changes) == 0 {
+		t.Fatalf("변경을 받지 못했다: %v", err)
+	}
+	var inc map[string]any
+	_ = json.Unmarshal(page.Changes[len(page.Changes)-1].Payload, &inc)
+	for k := range snapUser {
+		if _, ok := inc[k]; !ok {
+			t.Errorf("증분 payload에 snapshot 필드 %q가 없다: %v", k, inc)
+		}
 	}
 }

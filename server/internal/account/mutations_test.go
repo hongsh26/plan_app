@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -299,5 +300,38 @@ func TestConcurrentMutationsDoNotDeadlock(t *testing.T) {
 	}
 	if got := mutation.Retries() - before; got != 0 {
 		t.Fatalf("교착·직렬화 실패로 %d번 재시도했다. 잠금 규칙(FOR NO KEY UPDATE)이 깨졌다", got)
+	}
+}
+
+// /v1/me의 notification_ref_key는 매번 같고, 기기 폐기의 sync 변경은 전체 투영이다.
+func TestMeRefKeyStableAndDeviceChangeIsFullProjection(t *testing.T) {
+	s := newStack(t)
+	sub := "mut." + uuid.NewString()
+	a := s.signIn(t, sub)
+	b := s.signIn(t, sub)
+
+	k1 := decode[meResponse](t, s.do(t, http.MethodGet, "/v1/me", a.AccessToken, nil)).NotificationRefKey
+	k2 := decode[meResponse](t, s.do(t, http.MethodGet, "/v1/me", b.AccessToken, nil)).NotificationRefKey
+	if len(k1) != 43 || k1 != k2 {
+		t.Fatalf("기기마다 다른 키이거나 형식이 틀렸다: %q, %q", k1, k2)
+	}
+
+	if rec := s.mut(t, http.MethodDelete, "/v1/devices/"+b.DeviceID, a.AccessToken, "k", `"1"`, ``); rec.Code != http.StatusNoContent {
+		t.Fatal(rec.Body.String())
+	}
+	var payload map[string]any
+	var raw []byte
+	if err := s.pool.QueryRow(context.Background(), `
+		SELECT payload FROM sync_changes WHERE recipient_user_id = $1 AND entity_id = $2`, a.UserID, b.DeviceID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	_ = json.Unmarshal(raw, &payload)
+	for _, k := range []string{"platform", "push_authorization", "time_sensitive_setting", "has_push_token", "revoked", "last_seen_at"} {
+		if _, ok := payload[k]; !ok {
+			t.Errorf("기기 변경 payload에 %q가 없다: %v", k, payload)
+		}
+	}
+	if payload["revoked"] != true {
+		t.Errorf("revoked = %v", payload["revoked"])
 	}
 }

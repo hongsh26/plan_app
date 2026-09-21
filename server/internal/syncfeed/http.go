@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plantogether/server/internal/auth"
@@ -78,10 +79,10 @@ func (h *Handler) read(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := h.now()
-	page, err := Read(r.Context(), h.pool, p.UserID, cur, limit, now)
+	page, err := Read(r.Context(), h.pool, p.UserID, cur, limit)
 	if errors.Is(err, ErrCursorExpired) {
 		httpapi.WriteError(w, r, http.StatusGone, httpapi.CodeSyncCursorExpired,
-			"cursor가 보존 기간을 지났다. /v1/sync/bootstrap으로 다시 받아야 한다")
+			"cursor를 이어 쓸 수 없다. /v1/sync/bootstrap으로 다시 받아야 한다")
 		return
 	}
 	if err != nil {
@@ -113,7 +114,12 @@ type bootstrapResponse struct {
 func (h *Handler) bootstrap(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.PrincipalFrom(r.Context())
 	now := h.now()
-	snap, err := Bootstrap(r.Context(), h.pool, p.UserID, now)
+	snap, err := Bootstrap(r.Context(), h.pool, p.UserID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// 인증 직후 사용자 row가 사라졌다. 삭제 파이프라인의 물리 삭제뿐이다.
+		httpapi.WriteError(w, r, http.StatusUnauthorized, httpapi.CodeInvalidSession, "세션이 유효하지 않다")
+		return
+	}
 	if err != nil {
 		h.internalError(w, r, "sync.bootstrap", err)
 		return

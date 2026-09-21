@@ -47,7 +47,15 @@
 - `internal/platform/mutation`: 멱등성(키 선점, 지문 = method + 실제 경로 + 원본 본문), version 충돌 409, sync 변경 ordinal 발급, outbox. 교착·직렬화 실패는 최대 3회 재시도하고 `mutation.Retries()`로 노출한다. **0이 아니면 잠금 규약이 깨진 것이다**
 - `PATCH /v1/me`, `DELETE /v1/devices/{id}`, `PUT /v1/devices/{id}/push-token`
 - 00002: push token과 APNs environment 짝 제약
-- **sync 변경은 쓰기만 있고 읽는 곳이 없다.** settled horizon 읽기와 §15 순서 역전 회귀 테스트는 sync 구현 때 반드시 함께 한다
+
+### sync 읽기 경로 진행 상황
+
+`feature/sync-read`에서 구현했다. 상세는 `docs/rec/2026-09-21_1742_sync_read_path.md`에 있다. **설계 §7.1·§7.2를 개정했다**(전체 투영, 위치 기반 410, cursor 세대, 최소 한 번 전달).
+
+- `GET /v1/sync`(settled horizon), `GET /v1/sync/bootstrap`, `notification_ref_key`(bootstrap·`/v1/me`)
+- **§15 순서 역전 회귀 테스트가 들어갔다.** horizon 조건을 지우면 실패한다
+- 정리 워터마크(00004)와 `Prune` 함수. **scheduler에 아직 연결하지 않았다**
+- sync 읽기는 primary에서 해야 한다. 같은 timeline 안의 파일시스템 스냅샷 복구는 cursor 세대로 감지되지 않으므로 운영 절차로 전체 재동기화를 강제한다
 
 ### P0에서 남은 것
 
@@ -59,7 +67,6 @@
 | L-3 | goose `StatementBegin/End`가 308줄 마이그레이션 전체를 한 문장으로 감싼다 | 진단 비용 |
 | L-5 | `Pinger` interface가 소비자(`httpapi`)가 아니라 제공자(`postgres`)에 있다 | 기능 영향 없음. P1 새 코드는 소비자 쪽에 뒀다 |
 
-- **§7.1의 settled horizon 읽기 쿼리는 미구현이다.** sync 변경 유실 방지의 핵심은 읽기 경로에 있으므로, 이것이 구현되기 전까지 개정은 절반만 적용된 상태다. §15의 순서 역전 회귀 테스트와 함께 sync 구현 때 반드시 처리한다.
 - **`main`은 보호 브랜치다.** 저장소를 public으로 바꾼 뒤 required check `test`(GitHub Actions 고정), 관리자 포함 적용, force push 금지를 걸었다. `main`에 직접 커밋해 push할 수 없다. 문서 변경도 `feature/**` 브랜치에서 CI를 통과시킨 뒤 fast-forward한다(`docs/rec/2026-09-21_1558_ci_paths_filter_removal.md`)
 
 ### 최근 결정
@@ -70,7 +77,7 @@
 
 ## 다음 작업
 
-1. sync 읽기 경로(`GET /v1/sync`, bootstrap, settled horizon, 구현 계획 6단계)와 worker 골격(7단계). 그 다음 의존성 순서대로 기능별 브랜치에서 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
+1. worker·scheduler 골격(구현 계획 7단계): outbox 소비(lease, 재시도, dead), `Prune` 정기 실행, 세션·idempotency 정리. 그 위에 계정 삭제(`DELETE /v1/me`와 §10 파이프라인). 그 다음 의존성 순서대로 기능별 브랜치에서 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
 2. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.
 
 ## 유의 사항

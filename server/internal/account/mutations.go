@@ -101,9 +101,8 @@ func (h *Handler) patchMe(w http.ResponseWriter, r *http.Request) {
 		}
 		// 표시 이름은 앞으로 Party 멤버에게도 전파된다. 지금은 Party가 없으므로
 		// 본인의 다른 기기만 받는다.
-		if err := tx.EmitChange(ctx, mutation.Change{
-			Recipient: p.UserID, EntityType: entityUser, EntityID: p.UserID, Version: &version,
-			Payload: map[string]any{"display_name": name},
+		if err := emitProjection(ctx, tx, p.UserID, func() (Projection, error) {
+			return UserProjection(ctx, tx, p.UserID)
 		}); err != nil {
 			return mutation.Result{}, err
 		}
@@ -115,14 +114,26 @@ func (h *Handler) patchMe(w http.ResponseWriter, r *http.Request) {
 	h.writeMe(w, r, out.ResourceID, out.StatusCode)
 }
 
+// emitProjection은 방금 바뀐 entity의 전체 투영을 sync 변경으로 남긴다. 같은
+// 트랜잭션에서 다시 읽으므로 투영은 이 mutation의 결과를 반영한다.
+func emitProjection(ctx context.Context, tx *mutation.Tx, recipient uuid.UUID, load func() (Projection, error)) error {
+	pr, err := load()
+	if err != nil {
+		return err
+	}
+	return tx.EmitChange(ctx, mutation.Change{
+		Recipient: recipient, EntityType: pr.EntityType, EntityID: pr.ID, Version: &pr.Version, Payload: pr.Payload,
+	})
+}
+
 // deleteDevice는 기기와 그 세션을 폐기한다(§5.2 "다른 기기 세션을 조회하고 폐기").
 //
 // 같은 사용자의 어느 기기든 지정할 수 있다. 남의 기기는 존재 여부를 드러내지
 // 않도록 404다. 현재 기기를 지정하면 로그아웃과 같다.
 //
-// sync에는 tombstone이 아니라 revoked를 담은 upsert로 보낸다. row는 남고 version이
-// 오르며, 스키마 CHECK상 tombstone은 version을 가질 수 없다. 클라이언트는
-// revoked=true를 보고 목록에서 뺀다.
+// sync에는 tombstone이 아니라 revoked=true인 전체 투영을 upsert로 보낸다. row는
+// 남고 version이 오르며, 스키마 CHECK상 tombstone은 version을 가질 수 없다.
+// 클라이언트는 revoked=true를 보고 목록에서 뺀다.
 func (h *Handler) deleteDevice(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.PrincipalFrom(r.Context())
 	target, err := uuid.Parse(r.PathValue("id"))
@@ -151,9 +162,8 @@ func (h *Handler) deleteDevice(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return mutation.Result{}, err
 		}
-		if err := tx.EmitChange(ctx, mutation.Change{
-			Recipient: p.UserID, EntityType: entityDevice, EntityID: target, Version: &version,
-			Payload: map[string]any{"revoked": true},
+		if err := emitProjection(ctx, tx, p.UserID, func() (Projection, error) {
+			return DeviceProjection(ctx, tx, target)
 		}); err != nil {
 			return mutation.Result{}, err
 		}
@@ -256,15 +266,8 @@ func (h *Handler) putPushToken(w http.ResponseWriter, r *http.Request) {
 		).Scan(&version); err != nil {
 			return mutation.Result{}, err
 		}
-		// token 자체는 암호문이라도 sync로 보내지 않는다. 다른 기기가 알아야 할 것은
-		// 알림을 받을 수 있는 상태인지뿐이다.
-		if err := tx.EmitChange(ctx, mutation.Change{
-			Recipient: p.UserID, EntityType: entityDevice, EntityID: target, Version: &version,
-			Payload: map[string]any{
-				"push_authorization":     req.PushAuthorization,
-				"time_sensitive_setting": req.TimeSensitiveSetting,
-				"has_push_token":         token != nil,
-			},
+		if err := emitProjection(ctx, tx, p.UserID, func() (Projection, error) {
+			return DeviceProjection(ctx, tx, target)
 		}); err != nil {
 			return mutation.Result{}, err
 		}
