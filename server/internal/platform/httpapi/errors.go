@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -64,7 +65,26 @@ var errBadJSON = errors.New("요청 본문이 올바른 JSON이 아니다")
 // DecodeJSON은 요청 본문을 dst로 읽는다. 알 수 없는 필드와 두 번째 JSON 값을
 // 거부한다. 필드 이름 오타가 조용히 무시되면 클라이언트는 값이 전달된 줄 안다.
 func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody))
+	body, err := ReadBody(w, r)
+	if err != nil {
+		return err
+	}
+	return DecodeJSONBytes(body, dst)
+}
+
+// ReadBody는 요청 본문을 상한까지 읽는다. mutation은 원본 바이트로 요청 지문을
+// 만들어야 하므로 본문을 한 번 읽어 두고 DecodeJSONBytes로 해석한다.
+func ReadBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
+	if err != nil {
+		return nil, errBadJSON
+	}
+	return b, nil
+}
+
+// DecodeJSONBytes는 DecodeJSON과 같은 규칙으로 바이트를 해석한다.
+func DecodeJSONBytes(body []byte, dst any) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		return errBadJSON
@@ -73,4 +93,14 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 		return errBadJSON
 	}
 	return nil
+}
+
+// WriteVersionConflict는 409 version_conflict와 현재 version을 쓴다(§6, §7.4).
+func WriteVersionConflict(w http.ResponseWriter, r *http.Request, current int64) {
+	WriteJSON(w, http.StatusConflict, ErrorResponse{
+		Code:           CodeVersionConflict,
+		Message:        "다른 변경이 먼저 반영됐다. 현재 상태를 다시 받아야 한다",
+		RequestID:      RequestID(r.Context()).String(),
+		CurrentVersion: &current,
+	})
 }

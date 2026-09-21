@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plantogether/server/internal/platform/appleid"
+	"plantogether/server/internal/platform/audit"
 )
 
 var (
@@ -173,7 +174,10 @@ func (s *Service) SignInWithApple(ctx context.Context, in SignInInput) (Session,
 		}
 	}
 
-	displayName := normalizeDisplayName(in.DisplayName)
+	displayName, ok := NormalizeDisplayName(in.DisplayName)
+	if !ok {
+		displayName = defaultDisplayName
+	}
 
 	// 같은 subject의 최초 로그인이 동시에 두 번 오면 한쪽의 identity INSERT가
 	// unique index에서 기다렸다가 DO NOTHING이 된다. 그 트랜잭션을 버리고 처음부터
@@ -259,7 +263,8 @@ func (s *Service) signInTx(ctx context.Context, subject, displayName string, sea
 			return err
 		}
 		sess.NewUser = newUser
-		return audit(ctx, tx, &userID, "auth.apple_sign_in", "user", &userID, "success", requestID)
+		return audit.Record(ctx, tx, audit.Event{Actor: &userID, Action: "auth.apple_sign_in",
+			TargetType: "user", TargetID: &userID, Result: "success", RequestID: requestID})
 	})
 	if errors.Is(err, errRollback) {
 		return Session{}, retry, nil
@@ -336,7 +341,7 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, requestID uu
 		if err != nil {
 			return err
 		}
-		if err := lockUserAndDevice(ctx, tx, ownerUser, ownerDevice); err != nil {
+		if err := LockUserAndDevice(ctx, tx, ownerUser, ownerDevice); err != nil {
 			return err
 		}
 
@@ -374,11 +379,12 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, requestID uu
 			// token family는 기기 하나 안에서만 생긴다(로그인이 새 기기와 새 family를
 			// 함께 만들고 refresh는 기기를 바꾸지 않는다). 그래서 기기 폐기가 family
 			// 전체 폐기를 포함한다.
-			if err := revokeDevice(ctx, tx, deviceID); err != nil {
+			if _, _, err := RevokeDevice(ctx, tx, deviceID); err != nil {
 				return err
 			}
 			outcome = ErrInvalidCredential
-			return audit(ctx, tx, &userID, "auth.refresh_reuse_detected", "device", &deviceID, "failure", requestID)
+			return audit.Record(ctx, tx, audit.Event{Actor: &userID, Action: "auth.refresh_reuse_detected",
+				TargetType: "device", TargetID: &deviceID, Result: "failure", RequestID: requestID})
 		}
 		if revokedAt != nil || deviceRevokedAt != nil || !now.Before(expiresAt) {
 			outcome = ErrInvalidCredential
@@ -416,9 +422,10 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, requestID uu
 // 이다. 계정 삭제(§10)를 구현할 때도 이 순서를 따라야 로그인·refresh·로그아웃과
 // 교착하지 않는다.
 //
-// lockUserAndDevice는 앞의 두 단계를 수행한다. users를 FOR SHARE로 잡아 계정 삭제·
+// LockUserAndDevice는 앞의 두 단계를 수행한다. 기기를 다루는 다른 패키지의
+// mutation도 이 함수로 잠가 순서를 맞춘다. users를 FOR SHARE로 잡아 계정 삭제·
 // 잠금과 겹칠 때 어느 쪽이 먼저 커밋하든 상태를 일관되게 보게 한다.
-func lockUserAndDevice(ctx context.Context, tx pgx.Tx, userID, deviceID uuid.UUID) error {
+func LockUserAndDevice(ctx context.Context, tx pgx.Tx, userID, deviceID uuid.UUID) error {
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, userID); err != nil {
 		return err
 	}
@@ -426,21 +433,30 @@ func lockUserAndDevice(ctx context.Context, tx pgx.Tx, userID, deviceID uuid.UUI
 	return err
 }
 
-// revokeDevice는 기기와 그 기기의 모든 세션을 폐기한다.
+// RevokeDevice는 기기와 그 기기의 모든 세션을 폐기하고 기기의 새 version을
+// 돌려준다. 이미 폐기된 기기면 revoked가 false이고 version은 그대로다.
+// 호출자는 LockUserAndDevice로 먼저 잠가야 한다.
 //
 // 기기 row의 version을 올린다. devices는 클라이언트가 expected_version으로
 // 수정하는 대상이므로(§6), 서버 쪽 상태 변경도 version을 올려야 클라이언트의
 // 낡은 수정이 version_conflict로 걸린다.
-func revokeDevice(ctx context.Context, tx pgx.Tx, deviceID uuid.UUID) error {
+func RevokeDevice(ctx context.Context, tx pgx.Tx, deviceID uuid.UUID) (version int64, revoked bool, err error) {
 	if _, err := tx.Exec(ctx, `
 		UPDATE sessions SET revoked_at = now(), updated_at = now()
 		 WHERE device_id = $1 AND revoked_at IS NULL`, deviceID); err != nil {
-		return err
+		return 0, false, err
 	}
-	_, err := tx.Exec(ctx, `
+	err = tx.QueryRow(ctx, `
 		UPDATE devices SET revoked_at = now(), version = version + 1, updated_at = now()
-		 WHERE id = $1 AND revoked_at IS NULL`, deviceID)
-	return err
+		 WHERE id = $1 AND revoked_at IS NULL
+		RETURNING version`, deviceID).Scan(&version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return version, true, nil
 }
 
 // Logout은 현재 기기의 세션을 폐기한다(§5.2). 다른 기기의 세션은 그대로다.
@@ -452,13 +468,14 @@ func revokeDevice(ctx context.Context, tx pgx.Tx, deviceID uuid.UUID) error {
 // 이미 폐기된 기기에 다시 호출해도 성공한다.
 func (s *Service) Logout(ctx context.Context, p Principal, requestID uuid.UUID) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if err := lockUserAndDevice(ctx, tx, p.UserID, p.DeviceID); err != nil {
+		if err := LockUserAndDevice(ctx, tx, p.UserID, p.DeviceID); err != nil {
 			return err
 		}
-		if err := revokeDevice(ctx, tx, p.DeviceID); err != nil {
+		if _, _, err := RevokeDevice(ctx, tx, p.DeviceID); err != nil {
 			return err
 		}
-		return audit(ctx, tx, &p.UserID, "auth.logout", "device", &p.DeviceID, "success", requestID)
+		return audit.Record(ctx, tx, audit.Event{Actor: &p.UserID, Action: "auth.logout",
+			TargetType: "device", TargetID: &p.DeviceID, Result: "success", RequestID: requestID})
 	})
 }
 
@@ -494,28 +511,9 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 	return p, nil
 }
 
-// audit는 보안 audit 이벤트를 같은 트랜잭션에 남긴다. §11에 따라 token,
-// Apple credential을 넣지 않는다.
-func audit(ctx context.Context, tx pgx.Tx, actor *uuid.UUID, action, targetType string, targetID *uuid.UUID, result string, requestID uuid.UUID) error {
-	_, err := tx.Exec(ctx, `
-		INSERT INTO audit_events (id, actor_user_id, action, target_type, target_id, result, request_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		uuid.New(), actor, action, targetType, targetID, result, nullableUUID(requestID))
-	return err
-}
-
 // auditFailure는 행위자를 모르는 실패를 남긴다(audit_events 스키마 주석 참고).
 // 로그인 실패가 audit 기록 실패 때문에 다른 오류로 바뀌면 안 되므로 결과를
 // 무시한다.
 func (s *Service) auditFailure(ctx context.Context, action string, requestID uuid.UUID) {
-	_, _ = s.pool.Exec(ctx, `
-		INSERT INTO audit_events (id, action, result, request_id)
-		VALUES ($1, $2, 'failure', $3)`, uuid.New(), action, nullableUUID(requestID))
-}
-
-func nullableUUID(id uuid.UUID) *uuid.UUID {
-	if id == uuid.Nil {
-		return nil
-	}
-	return &id
+	_ = audit.Record(ctx, s.pool, audit.Event{Action: action, Result: "failure", RequestID: requestID})
 }

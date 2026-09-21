@@ -2,12 +2,13 @@ openapi: 3.1.0
 
 # P1 인증 범위까지의 계약을 담는다.
 #
-# 담긴 것: 운영 health endpoint, 인증(§5), 계정·기기 조회.
-# 아직 없는 것: PATCH/DELETE /v1/me, DELETE /v1/devices/{id},
-# PUT /v1/devices/{id}/push-token, sync, calendar-write-commands.
-# mutation은 Idempotency-Key와 expected_version을 한 곳에서 강제하는 mutation
-# transaction helper와 함께 추가한다. 구현보다 계약을 먼저 적으면 handler와
-# 어긋난 채로 남기 쉽다.
+# 담긴 것: 운영 health endpoint, 인증(§5), 계정·기기 조회와 변경.
+# 아직 없는 것: DELETE /v1/me(삭제 파이프라인과 함께), sync, calendar-write-commands.
+# 구현보다 계약을 먼저 적으면 handler와 어긋난 채로 남기 쉽다.
+#
+# 모든 mutation은 Idempotency-Key 헤더가 필수다(인증 endpoint 제외). 수정·삭제는
+# If-Match 헤더에 현재 version을 강한 ETag로 싣는다(예: If-Match: "3"). 조회와 변경
+# 응답의 ETag 헤더 값을 그대로 쓰면 된다.
 #
 # health endpoint는 /v1 아래에 두지 않는다. API 버전 계약의 일부가 아니라
 # 인프라(load balancer, 오케스트레이터)가 보는 운영 endpoint이기 때문이다.
@@ -171,13 +172,47 @@ paths:
       tags: [account]
       responses:
         "200":
-          description: 계정 정보.
+          description: 계정 정보. ETag에 version이 있다.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/MeResponse"
         "401":
           $ref: "#/components/responses/InvalidSession"
+        "423":
+          $ref: "#/components/responses/AccountLocked"
+    patch:
+      summary: 프로필 수정
+      description: |
+        현재 바꿀 수 있는 것은 표시 이름뿐이다. 제어 문자와 bidi override 같은 서식
+        문자를 지우고 50자로 자른다. 남는 것이 없으면 400이다.
+      operationId: updateMe
+      tags: [account]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateMeRequest"
+      responses:
+        "200":
+          description: 수정됨. 재전송이면 Idempotent-Replayed 헤더가 있고 본문은 현재 상태다.
+          headers:
+            Idempotent-Replayed:
+              $ref: "#/components/headers/IdempotentReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "423":
           $ref: "#/components/responses/AccountLocked"
 
@@ -200,7 +235,106 @@ paths:
         "423":
           $ref: "#/components/responses/AccountLocked"
 
+  /v1/devices/{id}:
+    delete:
+      summary: 기기 폐기
+      description: |
+        §5.2. 같은 사용자의 어느 기기든 폐기할 수 있다. 기기와 그 세션이 즉시
+        무효가 된다. 현재 기기를 지정하면 로그아웃과 같다. 다른 사용자의 기기와
+        이미 폐기된 기기는 404다. 본문을 보내지 않는다.
+      operationId: revokeDevice
+      tags: [account]
+      parameters:
+        - $ref: "#/components/parameters/DeviceID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "204":
+          description: 폐기됨. 재전송이면 Idempotent-Replayed 헤더가 있다.
+          headers:
+            Idempotent-Replayed:
+              $ref: "#/components/headers/IdempotentReplayed"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "423":
+          $ref: "#/components/responses/AccountLocked"
+
+  /v1/devices/{id}/push-token:
+    put:
+      summary: APNs token과 알림 권한 상태 등록
+      description: |
+        {id}는 요청한 기기 자신이어야 한다(access token의 기기). 아니면 403이다.
+        push_token과 push_environment는 함께 보내거나 함께 null이다. null이면 저장된
+        token을 지운다. token은 서버에서 암호화해 저장하고 어떤 응답에도 돌려주지 않는다.
+      operationId: putPushToken
+      tags: [account]
+      parameters:
+        - $ref: "#/components/parameters/DeviceID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PushTokenRequest"
+      responses:
+        "200":
+          description: 등록됨.
+          headers:
+            Idempotent-Replayed:
+              $ref: "#/components/headers/IdempotentReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "423":
+          $ref: "#/components/responses/AccountLocked"
+
 components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        1~128자의 출력 가능한 ASCII. 클라이언트는 UUID를 쓴다. (사용자, 기기, 키) 단위로
+        30일간 결과를 보존한다. 같은 키로 같은 요청(method, route, 본문 바이트)을 다시
+        보내면 원래 결과를 돌려주고, 다른 요청이면 409 idempotency_mismatch다.
+      schema: {type: string, minLength: 1, maxLength: 128}
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: 현재 version을 강한 ETag로 싣는다. 예 "3". 약한 ETag와 *는 받지 않는다.
+      schema: {type: string}
+    DeviceID:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+
+  headers:
+    IdempotentReplayed:
+      description: 저장된 결과를 돌려준 재전송이면 "true". 본문은 현재 리소스 상태다.
+      schema: {type: string, enum: ["true"]}
+
   securitySchemes:
     bearerAuth:
       type: http
@@ -208,6 +342,26 @@ components:
       description: 15분 수명의 access token. 서명 외에 기기 폐기와 계정 상태를 매 요청 DB에서 확인한다.
 
   responses:
+    Conflict:
+      description: |
+        version_conflict(낡은 If-Match, current_version 포함) 또는
+        idempotency_mismatch(같은 키를 다른 요청에 재사용).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: 인증됐지만 대상 권한이 없다.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: 없거나 이 사용자가 볼 수 없는 대상. 둘을 구분하지 않는다.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     InvalidRequest:
       description: 형식 또는 필드 검증 실패.
       content:
@@ -362,3 +516,37 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Device"
+
+    UpdateMeRequest:
+      type: object
+      required: [display_name]
+      additionalProperties: false
+      properties:
+        display_name: {type: string}
+
+    PushTokenRequest:
+      type: object
+      required: [push_token, push_environment, push_authorization, time_sensitive_setting]
+      additionalProperties: false
+      properties:
+        push_token:
+          type: [string, "null"]
+          description: APNs device token의 hex 문자열(32~100바이트). null이면 저장된 token을 지운다.
+        push_environment:
+          type: [string, "null"]
+          enum: [sandbox, production, null]
+        push_authorization:
+          type: string
+          enum: [unknown, authorized, provisional, denied]
+        time_sensitive_setting:
+          type: string
+          enum: [enabled, disabled, not_supported]
+
+    DeviceResponse:
+      type: object
+      required: [request_id, device]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        device:
+          $ref: "#/components/schemas/Device"

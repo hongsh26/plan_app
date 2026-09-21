@@ -4,8 +4,10 @@ Go + PostgreSQL 모듈러 모놀리스. 기준 설계는 [`docs/account_backend_
 
 현재 구현 범위는 **P1 인증**까지다. P0 서버 골격(세 진입점, 설정 검증,
 health/readiness, 8개 테이블 마이그레이션) 위에 Apple 로그인, 세션 회전,
-로그아웃, 계정·기기 조회를 올렸다. 계정 수정·삭제와 기기 mutation은
-Idempotency-Key를 강제하는 mutation helper와 함께 들어온다.
+로그아웃, 계정·기기 조회를 올렸고, 공통 mutation helper(Idempotency-Key,
+If-Match, sync 변경 피드, outbox를 한 트랜잭션에서 강제) 위에 프로필 수정, 기기
+폐기, push token 등록을 구현했다. 계정 삭제 요청은 삭제 파이프라인(worker)과 함께
+들어온다.
 
 ## 구성
 
@@ -17,9 +19,11 @@ Idempotency-Key를 강제하는 mutation helper와 함께 들어온다.
 | `internal/platform/config/` | 환경 변수 로드와 기동 시 검증 |
 | `internal/platform/postgres/` | pgx 연결 pool과 goose 마이그레이션 러너 |
 | `internal/auth/` | Apple 로그인, refresh 회전·재사용 탐지, 로그아웃, 인증 미들웨어 (§5) |
-| `internal/account/` | `GET /v1/me`, `GET /v1/devices` |
+| `internal/account/` | `GET/PATCH /v1/me`, `GET /v1/devices`, `DELETE /v1/devices/{id}`, `PUT /v1/devices/{id}/push-token` |
+| `internal/platform/mutation/` | 모든 mutation의 공통 트랜잭션. 멱등성, version 충돌, sync 변경(ordinal 발급), outbox |
+| `internal/platform/audit/` | 보안 audit 기록 |
 | `internal/platform/appleid/` | Apple identity token 검증(JWKS), code 교환, revoke |
-| `internal/platform/secretbox/` | Apple refresh token 암호화. 로컬 전용 AES-GCM만 있고 KMS 구현은 아직 없다 |
+| `internal/platform/secretbox/` | Apple refresh token과 push token 암호화. 로컬 전용 AES-GCM만 있고 KMS 구현은 아직 없다 |
 | `internal/platform/httpapi/` | `net/http` 서버 골격, request_id·access log 미들웨어, §6 오류 응답, health/readiness |
 | `migrations/` | SQL 마이그레이션. 바이너리에 embed된다 |
 | `openapi/` | API 계약. health, 인증, 계정 조회 |
@@ -69,8 +73,8 @@ cp .env.example .env
 set -a && . ./.env && set +a
 ```
 
-api는 `ACCESS_TOKEN_SIGNING_KEY`와 `APPLE_CLIENT_ID`가 없으면 기동하지 않는다.
-서명 키는 `openssl rand -base64 32`로 만든다. Apple code 교환 자격
+api는 `ACCESS_TOKEN_SIGNING_KEY`, `APPLE_CLIENT_ID`, `TOKEN_ENCRYPTION_KEY`가 없으면
+기동하지 않는다. 두 키는 `openssl rand -base64 32`로 만든다. Apple code 교환 자격
 (`APPLE_TEAM_ID`, `APPLE_KEY_ID`, `APPLE_PRIVATE_KEY`)은 로컬에서 선택이다.
 없으면 교환을 건너뛰고 기동 로그에 경고를 남긴다.
 

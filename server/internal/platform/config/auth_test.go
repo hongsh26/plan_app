@@ -13,6 +13,7 @@ func authEnv() map[string]string {
 	return map[string]string{
 		"ACCESS_TOKEN_SIGNING_KEY": b64(32),
 		"APPLE_CLIENT_ID":          "com.example.plantogether",
+		"TOKEN_ENCRYPTION_KEY":     b64(32),
 	}
 }
 
@@ -21,8 +22,11 @@ func TestLoadAuthMinimalLocalSkipsCodeExchange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("최소 로컬 설정을 거부했다: %v", err)
 	}
-	if s.AppleCodeExchange != nil || s.TokenEncryptionKey != nil {
+	if s.AppleCodeExchange != nil {
 		t.Error("Apple 자격이 없는데 code 교환이 켜졌다")
+	}
+	if len(s.TokenEncryptionKey) != 32 {
+		t.Error("암호화 키가 읽히지 않았다")
 	}
 	if len(s.AccessTokenSigningKey) != 32 || s.AppleClientID != "com.example.plantogether" {
 		t.Errorf("설정 값이 잘못 읽혔다: %+v", s)
@@ -47,7 +51,7 @@ func TestLoadAuthRequiresSigningKeyAndClientID(t *testing.T) {
 	if err == nil {
 		t.Fatal("필수 값 없이 통과했다")
 	}
-	for _, want := range []string{"ACCESS_TOKEN_SIGNING_KEY", "APPLE_CLIENT_ID"} {
+	for _, want := range []string{"ACCESS_TOKEN_SIGNING_KEY", "APPLE_CLIENT_ID", "TOKEN_ENCRYPTION_KEY"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("오류가 %s를 지목하지 않는다: %v", want, err)
 		}
@@ -81,12 +85,16 @@ func TestLoadAuthRejectsPartialAppleCredentials(t *testing.T) {
 	}
 }
 
-func TestLoadAuthRequiresEncryptionKeyWithAppleCredentials(t *testing.T) {
+// push token과 Apple refresh token은 암호화해서만 저장한다. 키는 Apple 자격
+// 유무와 무관하게 필수다.
+func TestLoadAuthRequiresEncryptionKey(t *testing.T) {
 	env := authEnv()
-	env["APPLE_TEAM_ID"], env["APPLE_KEY_ID"], env["APPLE_PRIVATE_KEY"] = "TEAM", "KEY", "-----BEGIN PRIVATE KEY-----"
+	delete(env, "TOKEN_ENCRYPTION_KEY")
 	if _, err := LoadAuth(EnvLocal, FromMap(env)); err == nil || !strings.Contains(err.Error(), "TOKEN_ENCRYPTION_KEY") {
-		t.Fatalf("암호화 키 없이 code 교환이 켜졌다: %v", err)
+		t.Fatalf("암호화 키 없이 통과했다: %v", err)
 	}
+
+	env["APPLE_TEAM_ID"], env["APPLE_KEY_ID"], env["APPLE_PRIVATE_KEY"] = "TEAM", "KEY", "-----BEGIN PRIVATE KEY-----"
 
 	env["TOKEN_ENCRYPTION_KEY"] = b64(16)
 	if _, err := LoadAuth(EnvLocal, FromMap(env)); err == nil {

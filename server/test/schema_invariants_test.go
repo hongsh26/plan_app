@@ -555,3 +555,46 @@ func TestDeletedAccountReleasesAppleSubjectForResignup(t *testing.T) {
 		t.Fatalf("삭제된 사용자에게 identity가 %d건 남아 있다", remaining)
 	}
 }
+
+// push token과 APNs 환경은 함께 있거나 함께 없다(00002). token만 있으면 worker가
+// sandbox와 production 중 어디로 보낼지 알 수 없다.
+func TestDevicePushTokenRequiresEnvironment(t *testing.T) {
+	conn := connect(t)
+	tx := begin(t, conn)
+	ctx := context.Background()
+	userID := insertUser(t, tx)
+	deviceID := insertDevice(t, tx, userID)
+
+	cases := []struct {
+		name  string
+		token []byte
+		env   *string
+		ok    bool
+	}{
+		{"둘 다 없음", nil, nil, true},
+		{"둘 다 있음", []byte{1}, ptr("sandbox"), true},
+		{"token만 있음", []byte{1}, nil, false},
+		{"environment만 있음", nil, ptr("production"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sp, err := tx.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = sp.Rollback(ctx) }()
+			_, err = sp.Exec(ctx,
+				`UPDATE devices SET push_token_ciphertext = $2, push_environment = $3 WHERE id = $1`,
+				deviceID, tc.token, tc.env)
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("허용돼야 하는 조합이 거부됐다: %v", err)
+				}
+				return
+			}
+			assertCheckViolation(t, err, "devices_push_token_environment_pairing_check")
+		})
+	}
+}
+
+func ptr(s string) *string { return &s }

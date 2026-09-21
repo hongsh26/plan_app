@@ -18,6 +18,7 @@ import (
 	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/httpapi"
 	"plantogether/server/internal/platform/postgres/pgtest"
+	"plantogether/server/internal/platform/secretbox"
 )
 
 // HTTP 경계 전체(request_id → access log → 라우팅 → 인증 → 핸들러)를 실제
@@ -60,7 +61,11 @@ func newStack(t *testing.T) *stack {
 
 	mux := http.NewServeMux()
 	authHandler.Register(mux)
-	NewHandler(pool, logger).Register(mux, authHandler.Require)
+	box, err := secretbox.NewLocal("local", bytes.Repeat([]byte{9}, secretbox.KeySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	NewHandler(Deps{Pool: pool, Logger: logger, Sealer: box}).Register(mux, authHandler.Require)
 	return &stack{handler: httpapi.Wrap(logger, mux), pool: pool, logs: &logs}
 }
 
@@ -74,6 +79,22 @@ func (s *stack) do(t *testing.T, method, path, token string, body any) *httptest
 	req := httptest.NewRequest(method, path, r)
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	s.handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// mut은 mutation 요청을 보낸다. key나 ifMatch가 비면 해당 헤더를 넣지 않는다.
+func (s *stack) mut(t *testing.T, method, path, token, key, ifMatch string, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	if key != "" {
+		req.Header.Set("Idempotency-Key", key)
+	}
+	if ifMatch != "" {
+		req.Header.Set("If-Match", ifMatch)
 	}
 	rec := httptest.NewRecorder()
 	s.handler.ServeHTTP(rec, req)

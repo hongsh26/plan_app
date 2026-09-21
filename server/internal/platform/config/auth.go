@@ -28,7 +28,8 @@ type AuthSettings struct {
 	// nil은 APP_ENV=local에서만 가능하다.
 	AppleCodeExchange *AppleCodeExchangeSettings
 
-	// TokenEncryptionKey는 로컬 암호화 키다. AppleCodeExchange가 있을 때만 채워진다.
+	// TokenEncryptionKey는 로컬 암호화 키다. Apple refresh token과 push token을
+	// 봉인한다(§11). 항상 필수다.
 	TokenEncryptionKey []byte
 }
 
@@ -53,7 +54,7 @@ var ErrKMSNotImplemented = errors.New(
 //   - APPLE_TEAM_ID, APPLE_KEY_ID, APPLE_PRIVATE_KEY는 모두 있거나 모두 없어야 한다.
 //     일부만 있으면 오타일 가능성이 높으므로 조용히 교환을 끄지 않고 거부한다.
 //   - 셋이 없으면 code 교환을 건너뛴다. local에서만 허용한다.
-//   - 셋이 있으면 TOKEN_ENCRYPTION_KEY가 필수다. 교환한 token을 평문으로 둘 수 없다.
+//   - TOKEN_ENCRYPTION_KEY는 항상 필수다. push token도 암호화해서만 저장한다.
 //   - local이 아니면 거부한다(ErrKMSNotImplemented).
 func LoadAuth(env string, lookup Lookup) (AuthSettings, error) {
 	if lookup == nil {
@@ -67,6 +68,7 @@ func LoadAuth(env string, lookup Lookup) (AuthSettings, error) {
 	s := AuthSettings{
 		AccessTokenSigningKey: v.requiredBase64Key(envAccessTokenSigningKey, 32, 0),
 		AppleClientID:         v.requiredNonEmpty(envAppleClientID),
+		TokenEncryptionKey:    v.requiredBase64Key(envTokenEncryptionKey, 32, 32),
 	}
 
 	teamID, hasTeam := nonEmpty(lookup, envAppleTeamID)
@@ -75,7 +77,6 @@ func LoadAuth(env string, lookup Lookup) (AuthSettings, error) {
 	switch {
 	case hasTeam && hasKey && hasPEM:
 		s.AppleCodeExchange = &AppleCodeExchangeSettings{TeamID: teamID, KeyID: keyID, PrivateKeyPEM: []byte(pemRaw)}
-		s.TokenEncryptionKey = v.requiredBase64Key(envTokenEncryptionKey, 32, 32)
 	case hasTeam || hasKey || hasPEM:
 		v.addf("%s, %s, %s는 모두 설정하거나 모두 비워야 한다", envAppleTeamID, envAppleKeyID, envApplePrivateKey)
 	}

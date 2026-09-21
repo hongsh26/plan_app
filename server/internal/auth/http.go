@@ -205,25 +205,27 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, r *http.Request, acti
 	}
 }
 
-// normalizeDisplayName은 클라이언트가 보낸 표시 이름을 저장 가능한 형태로 만든다.
-// 제어 문자와 서식 문자(Cf)를 지우고 앞뒤 공백을 자르며 길이를 제한한다. 비면
-// 기본값이다. Cf에는 U+202E 같은 bidi override가 있어, 남기면 다른 멤버 화면에서
-// 이름 뒤의 텍스트 방향을 뒤집을 수 있다. 이모지 결합에 쓰는 ZWJ(U+200D)만 남긴다.
-func normalizeDisplayName(raw string) string {
+// NormalizeDisplayName은 클라이언트가 보낸 표시 이름을 저장 가능한 형태로 만든다.
+// 제어 문자와 서식 문자(Cf)를 지우고 앞뒤 공백을 자르며 길이를 제한한다. 남는
+// 것이 없으면 ok가 false다. 가입은 기본 이름으로 대신하고, 이름 변경은 거부한다.
+//
+// Cf에는 U+202E 같은 bidi override가 있어, 남기면 다른 멤버 화면에서 이름 뒤의
+// 텍스트 방향을 뒤집을 수 있다. 이모지 결합에 쓰는 ZWJ(U+200D)만 남긴다.
+func NormalizeDisplayName(raw string) (name string, ok bool) {
 	cleaned := strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || (unicode.Is(unicode.Cf, r) && r != '\u200d') {
 			return -1
 		}
 		return r
-	}, raw)
+	}, strings.ToValidUTF8(raw, ""))
 	cleaned = strings.TrimSpace(cleaned)
-	if !utf8.ValidString(cleaned) || cleaned == "" {
-		return defaultDisplayName
+	if cleaned == "" {
+		return "", false
 	}
 	if utf8.RuneCountInString(cleaned) > maxDisplayNameRunes {
-		cleaned = string([]rune(cleaned)[:maxDisplayNameRunes])
+		cleaned = strings.TrimSpace(string([]rune(cleaned)[:maxDisplayNameRunes]))
 	}
-	return cleaned
+	return cleaned, true
 }
 
 // errorType은 로그에 남길 오류 분류다. PostgreSQL 오류는 SQLSTATE만, 그 밖은
