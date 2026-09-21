@@ -360,6 +360,12 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, requestID uu
 			   FOR UPDATE OF s`, hash).Scan(
 			&sessionID, &userID, &deviceID, &familyID, &expiresAt,
 			&usedAt, &revokedAt, &deviceRevokedAt, &status)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// 먼저 읽은 뒤 잠그기 전에 세션이 사라졌다(기기·사용자 삭제의 cascade나
+			// 세션 정리). 없는 세션이므로 무효 자격이다.
+			outcome = ErrInvalidCredential
+			return nil
+		}
 		if err != nil {
 			return err
 		}

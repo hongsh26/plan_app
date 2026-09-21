@@ -208,7 +208,7 @@ func (v *Verifier) keyFor(ctx context.Context, t *jwt.Token) (any, error) {
 //
 // 락을 쥔 채 네트워크를 기다리므로 동시 요청이 줄을 선다. 의도한 것이다.
 // 캐시가 비었을 때 동시 요청마다 따로 Apple을 부르는 것보다 낫고, 대기는
-// httpClient timeout으로 제한된다.
+// fetchTimeout으로 제한된다. 실패 뒤에는 keyFor의 간격 제한이 줄을 끊는다.
 func (v *Verifier) refreshLocked(ctx context.Context, now time.Time) error {
 	v.lastAttempt = now
 

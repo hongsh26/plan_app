@@ -397,9 +397,9 @@ func TestRefreshReuseRevokesWholeFamily(t *testing.T) {
 	}
 }
 
-// 같은 token으로 동시에 refresh하면 많아야 하나만 성공한다. 둘 다 성공하면
+// 같은 token으로 동시에 refresh하면 정확히 하나만 성공한다. 둘 다 성공하면
 // 한 token에서 두 갈래 세션이 생긴다.
-func TestRefreshConcurrentUseYieldsAtMostOneSuccess(t *testing.T) {
+func TestRefreshConcurrentUseYieldsExactlyOneSuccess(t *testing.T) {
 	e := newEnv(t)
 	s := e.signIn(t, e.subject(t))
 

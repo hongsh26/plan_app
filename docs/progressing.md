@@ -24,7 +24,7 @@
 
 ### P1 인증 진행 상황
 
-`feature/auth`에서 구현했고 독립 리뷰 1회를 받아 반영했다(`2d2ef70`). 상세와 확정한 방향은 `docs/rec/2026-09-21_1618_p1_auth.md`에 있다. **아직 `main`에 병합하지 않았다.**
+`feature/auth`에서 구현했다. 독립 리뷰 1회를 받아 반영했고(`2d2ef70`), 재검증에서 MERGE-READY를 받은 뒤 `main`에 fast-forward로 병합했다. 상세와 확정한 방향은 `docs/rec/2026-09-21_1618_p1_auth.md`에 있다.
 
 - 구현: `POST /v1/auth/apple|refresh|logout`, 인증 미들웨어, `GET /v1/me`, `GET /v1/devices`, `request_id` 미들웨어(L-6), §6 오류 응답, DB 역할 분리 자동 테스트, README Go 버전 표기(L-4)
 - 통합 테스트는 api 런타임 역할로 접속한다. 원격 CI: 리뷰 전 `db04442` run `35572217145` PASS 152·SKIP 0, 리뷰 반영 `2d2ef70` run `35572702395` PASS 166·SKIP 0(KMS 기동 거부 스텝 포함)
@@ -38,6 +38,7 @@
 - 만료·폐기된 `sessions` row 정리 (scheduler)
 - OpenAPI 스키마와 실제 응답의 자동 대조 (§15 API 계약 테스트)
 - 로그인·refresh와 계정 상태 변경의 동시성 테스트(`FOR SHARE OF u` 회귀 감지). 계정 삭제와 함께
+- Apple 서버 쪽 오류(`invalid_client` 등)가 HTTP 500과 `apple_error` 로그 필드로 나가는지 보는 HTTP 계층 테스트. 서비스 계층 테스트만 있다
 
 ### P0에서 남은 것
 
@@ -60,9 +61,8 @@
 
 ## 다음 작업
 
-1. **`feature/auth`를 원격 CI 확인과 재검증 후 `main`에 병합한다.**
-2. 계정 mutation과 mutation transaction helper(구현 계획 5단계). 그 다음 의존성 순서대로 기능별 브랜치에서 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
-3. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.
+1. 계정 mutation과 mutation transaction helper(구현 계획 5단계). 그 다음 의존성 순서대로 기능별 브랜치에서 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
+2. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.
 
 ## 유의 사항
 
