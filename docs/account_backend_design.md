@@ -205,7 +205,7 @@ Party, 공개 설정, 제안 API는 후속 설계에서 추가하되 공통 멱�
 - **읽기는 settled horizon 아래만 반환한다.** 조회 트랜잭션은 `horizon = pg_snapshot_xmin(pg_current_snapshot())`을 구하고 `WHERE recipient_user_id = $1 AND (txid, ordinal) > cursor AND txid < horizon ORDER BY txid, ordinal`로 읽는다. `horizon` 미만의 트랜잭션은 전부 종료(커밋 또는 abort)되었으므로 아직 진행 중인 트랜잭션의 변경이 cursor 뒤에 나타날 수 없다.
 - `ordinal`은 트랜잭션 내부 counter이며 §5의 mutation transaction helper가 단독으로 발급한다. 개별 call site가 직접 세지 않는다.
 - 변경 payload는 type, id, operation, version과 entity의 **전체 투영**을 포함한다. 투영은 캘린더 상세와 token을 뺀 최소 필드 집합이지만, 같은 entity에 대해서는 bootstrap snapshot과 증분 변경이 언제나 같은 모양의 전체 투영을 싣는다. 바뀐 필드만 보내면 클라이언트에 병합 규칙이 필요하고, 로컬에 없는 entity의 일부 필드 upsert를 채울 수 없다. 클라이언트는 version이 더 큰 upsert를 받으면 payload로 로컬 entity를 통째로 바꾼다(2026-09-21 개정).
-- 삭제와 탈퇴는 tombstone으로 전달한다.
+- 삭제와 탈퇴는 tombstone으로 전달한다. 단 row가 남고 version이 오르는 상태 전이(예: 기기 폐기)는 `revoked` 같은 상태 필드를 담은 upsert로 전달한다. 스키마상 tombstone은 version을 가질 수 없어 version 비교로 순서를 정할 수 없기 때문이다(2026-09-21).
 - 변경 피드는 기본 30일 보존한다. **정리 대상은 row의 `created_at`으로 고르지만, 410 판정은 시각이 아니라 위치로 한다.** 정리 작업은 지운 row 중 가장 뒤의 `(txid, ordinal)`을 같은 트랜잭션에서 정리 워터마크(`sync_prune_state`)로 기록하고, cursor가 워터마크 이하이면 `410 sync_cursor_expired`로 전체 재동기화를 요구한다. `created_at`은 트랜잭션 시작 시각이고 `txid`는 첫 쓰기 때 배정되어 두 순서가 어긋나므로, 시각으로 판정하면 "오래 열린 트랜잭션이 없다"는 가정이 필요하다. 위치로 판정하면 가정이 없다(2026-09-21 개정). `410`을 쓰는 다른 코드와 구별되도록 클라이언트는 상태 코드가 아니라 `code` 값으로 분기한다.
 - **cursor는 발급한 DB 클러스터의 세대(`system_identifier`, timeline)를 담는다.** 비동기 복제본 장애 전환이나 시점 복구로 txid 이력이 되감기면 옛 cursor 뒤에는 새 변경이 영원히 오지 않는다. 세대가 다르면 `410 sync_cursor_expired`다. sync 읽기는 primary에서 한다(2026-09-21 개정).
 

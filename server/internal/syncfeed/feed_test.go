@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -513,5 +514,47 @@ func TestIncrementalPayloadIsFullProjection(t *testing.T) {
 		if _, ok := inc[k]; !ok {
 			t.Errorf("증분 payload에 snapshot 필드 %q가 없다: %v", k, inc)
 		}
+	}
+}
+
+// 정리 워터마크는 내려가지 않는다. created_at 순서와 txid 순서가 어긋나므로, 나중
+// 정리가 워터마크보다 앞(작은 txid)의 row를 지울 수 있다. 그때 워터마크를 그 위치로
+// 덮으면 이미 410이어야 할 cursor가 되살아나 첫 정리에서 지운 row를 건너뛴다.
+func TestPruneWatermarkNeverMovesBackward(t *testing.T) {
+	f := newFx(t)
+	ctx := context.Background()
+	older := f.emit(t, f.pool) // B: 작은 txid
+	newer := f.emit(t, f.pool) // A: 큰 txid
+
+	var txNewer string
+	if err := f.pool.QueryRow(ctx, `SELECT txid::text FROM sync_changes WHERE entity_id = $1`, newer).Scan(&txNewer); err != nil {
+		t.Fatal(err)
+	}
+	backdate := func(id uuid.UUID) {
+		if _, err := f.pool.Exec(ctx,
+			`UPDATE sync_changes SET created_at = now() - interval '40 days' WHERE entity_id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	backdate(newer)
+	if _, err := Prune(ctx, f.pool, time.Now().Add(-Retention)); err != nil {
+		t.Fatal(err)
+	}
+	backdate(older)
+	if _, err := Prune(ctx, f.pool, time.Now().Add(-Retention)); err != nil {
+		t.Fatal(err)
+	}
+
+	// B보다 뒤, A 이하의 위치. 워터마크가 A에 머물렀으면 410이다. B로 내려갔으면 통과해
+	// 첫 정리에서 지운 A를 조용히 건너뛴다.
+	txid, err := strconv.ParseUint(txNewer, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	between := f.watermark(t)
+	between.TxID, between.Ordinal = txid, -1
+	if _, err := Read(ctx, f.pool, f.user, between, 0); !errors.Is(err, ErrCursorExpired) {
+		t.Fatalf("워터마크가 내려갔다: A 앞의 cursor err = %v, want ErrCursorExpired", err)
 	}
 }
