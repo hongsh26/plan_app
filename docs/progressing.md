@@ -28,17 +28,26 @@
 
 - 구현: `POST /v1/auth/apple|refresh|logout`, 인증 미들웨어, `GET /v1/me`, `GET /v1/devices`, `request_id` 미들웨어(L-6), §6 오류 응답, DB 역할 분리 자동 테스트, README Go 버전 표기(L-4)
 - 통합 테스트는 api 런타임 역할로 접속한다. 원격 CI: 리뷰 전 `db04442` run `35572217145` PASS 152·SKIP 0, 리뷰 반영 `2d2ef70` run `35572702395` PASS 166·SKIP 0(KMS 기동 거부 스텝 포함)
-- **잠금 순서 규약: `users` → `devices` → `sessions`.** 계정 삭제도 이 순서를 따라야 한다
+- **잠금 규약: `users` → `devices` → `sessions`, 그리고 `users`·`devices` row는 `FOR UPDATE`가 아니라 `FOR NO KEY UPDATE`로 잠근다.** mutation helper의 `idempotency_keys` INSERT가 FK 검사로 두 row에 KEY SHARE를 먼저 걸기 때문이다(`docs/rec/2026-09-21_1651_mutation_helper.md`). 계정 삭제도 이 규약을 따라야 한다
 
 **P1에서 의도적으로 미룬 것 (잊으면 안 되는 것):**
 
 - **KMS 구현.** 이것이 없으면 api는 `APP_ENV=local`이 아닐 때 기동을 거부한다. 스테이징·프로덕션 배포는 여기에 막혀 있다. 구현할 때 api 역할은 암호화 권한만 갖고, 복호화는 삭제 worker만 할 수 있어야 한다(§11)
-- 계정 mutation(`PATCH/DELETE /v1/me`, 기기 폐기, push token 등록). mutation transaction helper와 함께 한다. 계정 삭제는 위 잠금 순서를 지키고, 상태 변경과 세션 전체 폐기를 한 트랜잭션에서 한다
+- 계정 삭제 요청(`DELETE /v1/me`)과 §10 삭제 파이프라인. worker 없이 넣으면 계정이 `deletion_requested`에 갇힌다. 위 잠금 규약을 지키고, 상태 변경과 세션 전체 폐기를 한 트랜잭션에서 한다
 - 인증 rate limit (§11). 인증 없는 로그인 실패마다 `audit_events`가 쌓이는 문제도 여기서 막는다
-- 만료·폐기된 `sessions` row 정리 (scheduler)
+- 만료·폐기된 `sessions` row와 만료된 `idempotency_keys` row 정리 (scheduler)
 - OpenAPI 스키마와 실제 응답의 자동 대조 (§15 API 계약 테스트)
 - 로그인·refresh와 계정 상태 변경의 동시성 테스트(`FOR SHARE OF u` 회귀 감지). 계정 삭제와 함께
 - Apple 서버 쪽 오류(`invalid_client` 등)가 HTTP 500과 `apple_error` 로그 필드로 나가는지 보는 HTTP 계층 테스트. 서비스 계층 테스트만 있다
+
+### mutation helper 진행 상황
+
+`feature/mutation-helper`에서 구현했다. 상세는 `docs/rec/2026-09-21_1651_mutation_helper.md`에 있다.
+
+- `internal/platform/mutation`: 멱등성(키 선점, 지문 = method + 실제 경로 + 원본 본문), version 충돌 409, sync 변경 ordinal 발급, outbox. 교착·직렬화 실패는 최대 3회 재시도하고 `mutation.Retries()`로 노출한다. **0이 아니면 잠금 규약이 깨진 것이다**
+- `PATCH /v1/me`, `DELETE /v1/devices/{id}`, `PUT /v1/devices/{id}/push-token`
+- 00002: push token과 APNs environment 짝 제약
+- **sync 변경은 쓰기만 있고 읽는 곳이 없다.** settled horizon 읽기와 §15 순서 역전 회귀 테스트는 sync 구현 때 반드시 함께 한다
 
 ### P0에서 남은 것
 
@@ -61,7 +70,7 @@
 
 ## 다음 작업
 
-1. 계정 mutation과 mutation transaction helper(구현 계획 5단계). 그 다음 의존성 순서대로 기능별 브랜치에서 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
+1. sync 읽기 경로(`GET /v1/sync`, bootstrap, settled horizon, 구현 계획 6단계)와 worker 골격(7단계). 그 다음 의존성 순서대로 기능별 브랜치에서 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
 2. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.
 
 ## 유의 사항
