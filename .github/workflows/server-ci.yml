@@ -149,6 +149,30 @@ jobs:
           fi
           echo "APP_ENV=production에서 reset이 가드에 의해 거부됐다."
 
+      - name: api가 로컬 밖에서 기동을 거부하는지 확인
+        # KMS가 없어 Apple refresh token을 배포 환경에서 암호화할 수 없다.
+        # config.LoadAuth가 거부하는지는 단위 테스트가 보지만, 진입점이 실제로
+        # 그 함수를 부르는지는 여기서만 확인된다. 메시지까지 확인해야 다른 설정
+        # 오류로 죽은 것을 통과로 오해하지 않는다. 필수 인증 변수는 모두 채워
+        # KMS 가드 외의 이유로 실패하지 않게 한다.
+        env:
+          APP_ENV: production
+          DATABASE_URL: postgres://unused@localhost:5432/unused
+          ACCESS_TOKEN_SIGNING_KEY: MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=
+          APPLE_CLIENT_ID: com.example.ci
+        run: |
+          if out="$(timeout 20 go run ./cmd/api 2>&1)"; then
+            echo "APP_ENV=production에서 api가 기동했다. KMS 가드가 연결되지 않았다."
+            echo "$out"
+            exit 1
+          fi
+          if ! echo "$out" | grep -q "KMS"; then
+            echo "api가 실패하긴 했으나 KMS 가드 때문이 아니다:"
+            echo "$out"
+            exit 1
+          fi
+          echo "APP_ENV=production에서 api가 KMS 가드로 기동을 거부했다."
+
       - name: PostgreSQL 종료
         if: always()
         run: docker compose down -v

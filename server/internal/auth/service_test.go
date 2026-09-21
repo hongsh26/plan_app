@@ -40,14 +40,17 @@ type fakeExchanger struct {
 	mu    sync.Mutex
 }
 
-func (f *fakeExchanger) ExchangeCode(_ context.Context, code string) (string, error) {
+// ExchangeCode는 code를 그 code를 받은 Apple 사용자의 subject로 취급한다.
+// 테스트는 보통 code에 identity token과 같은 subject를 넣고, 남의 code를 흉내 낼
+// 때만 다른 값을 넣는다.
+func (f *fakeExchanger) ExchangeCode(_ context.Context, code string) (appleid.Exchange, error) {
 	f.mu.Lock()
 	f.calls++
 	f.mu.Unlock()
 	if f.err != nil {
-		return "", f.err
+		return appleid.Exchange{}, f.err
 	}
-	return "apple-refresh-for-" + code, nil
+	return appleid.Exchange{RefreshToken: "apple-refresh-for-" + code, Subject: code}, nil
 }
 
 // fakeSealer는 평문이 그대로 저장되지 않았는지 확인할 수 있게 뒤집어 저장한다.
@@ -129,7 +132,7 @@ func (e *env) trackUser(t *testing.T, id uuid.UUID) {
 func (e *env) signIn(t *testing.T, subject string) Session {
 	t.Helper()
 	s, err := e.svc.SignInWithApple(context.Background(), SignInInput{
-		IdentityToken: subject, AuthorizationCode: "code", RawNonce: "nonce", DisplayName: "홍길동",
+		IdentityToken: subject, AuthorizationCode: subject, RawNonce: "nonce", DisplayName: "홍길동",
 	})
 	if err != nil {
 		t.Fatalf("로그인 실패: %v", err)
@@ -185,7 +188,7 @@ func TestSignInConcurrentFirstLoginCreatesOneUser(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			s, err := e.svc.SignInWithApple(context.Background(), SignInInput{
-				IdentityToken: sub, AuthorizationCode: "c", RawNonce: "n"})
+				IdentityToken: sub, AuthorizationCode: sub, RawNonce: "n"})
 			ids[i], errs[i] = s.UserID, err
 		}()
 	}
@@ -219,7 +222,7 @@ func TestSignInRejectedForLockedAccounts(t *testing.T) {
 			e.setStatus(t, s.UserID, status)
 
 			_, err := e.svc.SignInWithApple(context.Background(), SignInInput{
-				IdentityToken: sub, AuthorizationCode: "c", RawNonce: "n"})
+				IdentityToken: sub, AuthorizationCode: sub, RawNonce: "n"})
 			if !errors.Is(err, ErrAccountLocked) {
 				t.Fatalf("err = %v, want ErrAccountLocked", err)
 			}
@@ -271,8 +274,9 @@ func TestSignInReportsAppleOutageAsUnavailable(t *testing.T) {
 	}
 
 	e.ex.err = appleid.ErrUnavailable
+	sub := e.subject(t)
 	_, err = e.svc.SignInWithApple(context.Background(), SignInInput{
-		IdentityToken: e.subject(t), AuthorizationCode: "c", RawNonce: "n"})
+		IdentityToken: sub, AuthorizationCode: sub, RawNonce: "n"})
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("code 교환 장애 err = %v, want ErrUnavailable", err)
 	}
@@ -286,7 +290,7 @@ func TestSignInDoesNotCreateUserWhenCodeExchangeRejected(t *testing.T) {
 	e.ex.err = &appleid.APIError{Status: 400, Code: "invalid_grant"}
 
 	_, err := e.svc.SignInWithApple(context.Background(), SignInInput{
-		IdentityToken: sub, AuthorizationCode: "used-code", RawNonce: "n"})
+		IdentityToken: sub, AuthorizationCode: sub, RawNonce: "n"})
 	if !errors.Is(err, ErrInvalidCredential) {
 		t.Fatalf("err = %v, want ErrInvalidCredential", err)
 	}
@@ -311,7 +315,7 @@ func TestSignInStoresOnlySealedAppleToken(t *testing.T) {
 	if len(stored) == 0 {
 		t.Fatal("Apple refresh token 암호문이 저장되지 않았다")
 	}
-	if bytes.Contains(stored, []byte("apple-refresh-for-code")) {
+	if bytes.Contains(stored, []byte("apple-refresh-for-"+sub)) {
 		t.Fatal("Apple refresh token이 평문으로 저장됐다")
 	}
 	if !bytes.HasPrefix(stored, []byte(SealPurposeAppleRefreshToken+"|")) {
@@ -415,8 +419,10 @@ func TestRefreshConcurrentUseYieldsAtMostOneSuccess(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if ok > 1 {
-		t.Fatalf("같은 refresh token으로 %d번 성공했다", ok)
+	// 정확히 하나다. 0이면 정상 회전까지 막힌 것이고, 2 이상이면 한 token에서
+	// 두 갈래 세션이 생긴 것이다.
+	if ok != 1 {
+		t.Fatalf("같은 refresh token으로 %d번 성공했다, want 1", ok)
 	}
 }
 
@@ -510,5 +516,75 @@ func TestAuthenticateRejectsExpiredAndForeignTokens(t *testing.T) {
 	e.clock.advance(AccessTokenTTL + time.Second)
 	if _, err := e.svc.Authenticate(ctx, s.AccessToken); !errors.Is(err, ErrInvalidCredential) {
 		t.Errorf("만료된 access token err = %v", err)
+	}
+}
+
+// 남의 authorization code를 자기 identity token과 함께 내면 거부한다. 받아들이면
+// 남의 Apple grant가 내 계정에 저장되고 §10 삭제 때 엉뚱한 grant를 revoke한다.
+func TestSignInRejectsCodeOfAnotherAppleUser(t *testing.T) {
+	e := newEnv(t)
+	mine := e.subject(t)
+	_, err := e.svc.SignInWithApple(context.Background(), SignInInput{
+		IdentityToken: mine, AuthorizationCode: "someone-else", RawNonce: "n"})
+	if !errors.Is(err, ErrInvalidCredential) {
+		t.Fatalf("err = %v, want ErrInvalidCredential", err)
+	}
+	var n int
+	_ = e.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM auth_identities WHERE provider_subject = $1`, mine).Scan(&n)
+	if n != 0 {
+		t.Fatalf("subject가 다른 code로 계정 %d개가 만들어졌다", n)
+	}
+}
+
+// invalid_client 같은 Apple 오류는 서버 자격 문제다. 사용자 자격 오류(401)로
+// 바꾸면 모든 로그인이 "다시 로그인하라"로 보이고 운영자는 원인을 모른다.
+func TestSignInDistinguishesServerSideAppleErrors(t *testing.T) {
+	for code, wantUserError := range map[string]bool{
+		"invalid_grant": true, "invalid_client": false, "unauthorized_client": false, "unsupported_grant_type": false,
+	} {
+		t.Run(code, func(t *testing.T) {
+			e := newEnv(t)
+			sub := e.subject(t)
+			e.ex.err = &appleid.APIError{Status: 400, Code: code}
+			_, err := e.svc.SignInWithApple(context.Background(), SignInInput{
+				IdentityToken: sub, AuthorizationCode: sub, RawNonce: "n"})
+			if got := errors.Is(err, ErrInvalidCredential); got != wantUserError {
+				t.Fatalf("err = %v, 사용자 오류로 취급 = %v, want %v", err, got, wantUserError)
+			}
+			var apiErr *appleid.APIError
+			if !wantUserError && (!errors.As(err, &apiErr) || apiErr.Code != code) {
+				t.Errorf("서버 쪽 오류가 Apple code를 잃었다: %v", err)
+			}
+		})
+	}
+}
+
+// 로그아웃과 refresh가 같은 기기에서 동시에 일어나도 교착(40P01)으로 500이
+// 나지 않는다. 두 경로 모두 users → devices → sessions 순으로 잠근다.
+func TestConcurrentRefreshAndLogoutDoNotDeadlock(t *testing.T) {
+	e := newEnv(t)
+	sub := e.subject(t)
+	for range 10 {
+		s := e.signIn(t, sub)
+		r, err := e.svc.Refresh(context.Background(), s.RefreshToken, uuid.Nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		errs := make([]error, 3)
+		wg.Add(3)
+		go func() { defer wg.Done(); _, errs[0] = e.svc.Refresh(context.Background(), s.RefreshToken, uuid.Nil) }()
+		go func() { defer wg.Done(); _, errs[1] = e.svc.Refresh(context.Background(), r.RefreshToken, uuid.Nil) }()
+		go func() {
+			defer wg.Done()
+			errs[2] = e.svc.Logout(context.Background(), Principal{UserID: s.UserID, DeviceID: s.DeviceID}, uuid.Nil)
+		}()
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil && !errors.Is(err, ErrInvalidCredential) {
+				t.Fatalf("동시 실행 %d에서 예상 밖 오류: %v", i, err)
+			}
+		}
 	}
 }

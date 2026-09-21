@@ -46,7 +46,7 @@ type AppleVerifier interface {
 
 // AppleCodeExchanger는 authorization code 교환이다. appleid.Client가 구현한다.
 type AppleCodeExchanger interface {
-	ExchangeCode(ctx context.Context, code string) (refreshToken string, err error)
+	ExchangeCode(ctx context.Context, code string) (appleid.Exchange, error)
 }
 
 // Sealer는 DB에 저장할 비밀 값의 암호화다. secretbox가 구현한다.
@@ -140,18 +140,34 @@ func (s *Service) SignInWithApple(ctx context.Context, in SignInInput) (Session,
 	// code는 1회용이고 5분 유효이므로 DB 트랜잭션 전에 즉시 교환한다. 교환이
 	// 실패하면 로그인도 실패시킨다. 교환 없이 가입시키면 §10 3단계의 revoke에
 	// 쓸 token이 없는 계정이 생긴다.
+	//
+	// 계정이 잠겨 있어도 교환은 먼저 일어난다. 상태는 DB 트랜잭션 안에서만 확정할
+	// 수 있고, 교환은 트랜잭션 밖에서 해야 하기 때문이다(외부 호출 동안 행 잠금을
+	// 쥐지 않는다). 그 경우 받은 Apple token은 저장하지 않고 버린다.
 	var sealedAppleToken []byte
 	if s.code != nil {
-		appleRefresh, err := s.code.ExchangeCode(ctx, in.AuthorizationCode)
+		ex, err := s.code.ExchangeCode(ctx, in.AuthorizationCode)
 		if err != nil {
 			var apiErr *appleid.APIError
 			if errors.As(err, &apiErr) {
-				s.auditFailure(ctx, "auth.apple_code_exchange", in.RequestID)
-				return Session{}, ErrInvalidCredential
+				if apiErr.IsUserError() {
+					s.auditFailure(ctx, "auth.apple_code_exchange", in.RequestID)
+					return Session{}, ErrInvalidCredential
+				}
+				// invalid_client 등은 서버 자격 문제다. 사용자에게 다시 로그인하라고
+				// 답하면 모든 로그인이 401로 보이고 운영자는 원인을 모른다.
+				return Session{}, fmt.Errorf("auth: Apple이 서버 자격을 거부했다: %w", apiErr)
 			}
 			return Session{}, ErrUnavailable
 		}
-		sealedAppleToken, err = s.sealer.Seal([]byte(appleRefresh), SealPurposeAppleRefreshToken)
+		// code는 identity token과 따로 제출된다. 남의 code를 자기 identity token과
+		// 함께 내면 남의 Apple grant가 내 계정에 저장되고, §10 삭제 때 엉뚱한
+		// grant를 revoke하게 된다.
+		if ex.Subject != identity.Subject {
+			s.auditFailure(ctx, "auth.apple_code_subject_mismatch", in.RequestID)
+			return Session{}, ErrInvalidCredential
+		}
+		sealedAppleToken, err = s.sealer.Seal([]byte(ex.RefreshToken), SealPurposeAppleRefreshToken)
 		if err != nil {
 			return Session{}, fmt.Errorf("auth: Apple refresh token을 암호화할 수 없다: %w", err)
 		}
@@ -307,6 +323,23 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, requestID uu
 	var result Session
 	var outcome error
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		// 잠금 순서는 모든 인증 경로에서 users → devices → sessions다(lockOrder 참고).
+		// 세션 row를 먼저 잠그면 같은 기기의 로그아웃이나 계정 삭제와 교착한다.
+		// 그래서 잠그지 않고 소유자를 먼저 읽은 뒤, 순서대로 잠그고 다시 읽는다.
+		var ownerUser, ownerDevice uuid.UUID
+		err := tx.QueryRow(ctx,
+			`SELECT user_id, device_id FROM sessions WHERE refresh_token_hash = $1`, hash).Scan(&ownerUser, &ownerDevice)
+		if errors.Is(err, pgx.ErrNoRows) {
+			outcome = ErrInvalidCredential
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := lockUserAndDevice(ctx, tx, ownerUser, ownerDevice); err != nil {
+			return err
+		}
+
 		var (
 			sessionID, userID, deviceID, familyID uuid.UUID
 			expiresAt                             time.Time
@@ -315,28 +348,27 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, requestID uu
 		)
 		// FOR UPDATE OF s: 같은 token으로 동시에 두 요청이 오면 뒤의 요청은 앞의
 		// 커밋을 기다렸다가 used_at을 보고 재사용으로 판정된다. 둘 다 새 token을
-		// 받는 경로가 없다.
-		err := tx.QueryRow(ctx, `
+		// 받는 경로가 없다. 기기 잠금이 이미 직렬화하지만, 세션 row 자체의 잠금을
+		// 기기 잠금의 부수 효과에 맡기지 않는다.
+		err = tx.QueryRow(ctx, `
 			SELECT s.id, s.user_id, s.device_id, s.token_family_id, s.expires_at,
 			       s.used_at, s.revoked_at, d.revoked_at, u.status
 			  FROM sessions s
 			  JOIN devices d ON d.id = s.device_id
 			  JOIN users u ON u.id = s.user_id
 			 WHERE s.refresh_token_hash = $1
-			   FOR UPDATE OF s
-			   FOR SHARE OF u`, hash).Scan(
+			   FOR UPDATE OF s`, hash).Scan(
 			&sessionID, &userID, &deviceID, &familyID, &expiresAt,
 			&usedAt, &revokedAt, &deviceRevokedAt, &status)
-		if errors.Is(err, pgx.ErrNoRows) {
-			outcome = ErrInvalidCredential
-			return nil
-		}
 		if err != nil {
 			return err
 		}
 
 		if usedAt != nil {
-			if err := revokeFamilyAndDevice(ctx, tx, familyID, deviceID); err != nil {
+			// token family는 기기 하나 안에서만 생긴다(로그인이 새 기기와 새 family를
+			// 함께 만들고 refresh는 기기를 바꾸지 않는다). 그래서 기기 폐기가 family
+			// 전체 폐기를 포함한다.
+			if err := revokeDevice(ctx, tx, deviceID); err != nil {
 				return err
 			}
 			outcome = ErrInvalidCredential
@@ -371,13 +403,21 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, requestID uu
 	return result, nil
 }
 
-func revokeFamilyAndDevice(ctx context.Context, tx pgx.Tx, familyID, deviceID uuid.UUID) error {
-	if _, err := tx.Exec(ctx, `
-		UPDATE sessions SET revoked_at = now(), updated_at = now()
-		 WHERE token_family_id = $1 AND revoked_at IS NULL`, familyID); err != nil {
+// lockOrder: 인증 경로가 여러 테이블의 row를 잠글 때의 순서는
+//
+//	users(FOR SHARE, 삭제·상태 변경은 FOR UPDATE) → devices(FOR UPDATE) → sessions
+//
+// 이다. 계정 삭제(§10)를 구현할 때도 이 순서를 따라야 로그인·refresh·로그아웃과
+// 교착하지 않는다.
+//
+// lockUserAndDevice는 앞의 두 단계를 수행한다. users를 FOR SHARE로 잡아 계정 삭제·
+// 잠금과 겹칠 때 어느 쪽이 먼저 커밋하든 상태를 일관되게 보게 한다.
+func lockUserAndDevice(ctx context.Context, tx pgx.Tx, userID, deviceID uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, userID); err != nil {
 		return err
 	}
-	return revokeDevice(ctx, tx, deviceID)
+	_, err := tx.Exec(ctx, `SELECT 1 FROM devices WHERE id = $1 FOR UPDATE`, deviceID)
+	return err
 }
 
 // revokeDevice는 기기와 그 기기의 모든 세션을 폐기한다.
@@ -406,6 +446,9 @@ func revokeDevice(ctx context.Context, tx pgx.Tx, deviceID uuid.UUID) error {
 // 이미 폐기된 기기에 다시 호출해도 성공한다.
 func (s *Service) Logout(ctx context.Context, p Principal, requestID uuid.UUID) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := lockUserAndDevice(ctx, tx, p.UserID, p.DeviceID); err != nil {
+			return err
+		}
 		if err := revokeDevice(ctx, tx, p.DeviceID); err != nil {
 			return err
 		}

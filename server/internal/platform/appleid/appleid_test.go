@@ -346,7 +346,8 @@ func TestExchangeCodeSendsAppleContract(t *testing.T) {
 		_ = r.ParseForm()
 		form = r.PostForm
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "a", "expires_in": 3600, "id_token": "x", "refresh_token": "apple-refresh", "token_type": "Bearer",
+			"access_token": "a", "expires_in": 3600, "id_token": fakeIDToken(t, "apple-sub-1"),
+			"refresh_token": "apple-refresh", "token_type": "Bearer",
 		})
 	}))
 	defer srv.Close()
@@ -355,12 +356,12 @@ func TestExchangeCodeSendsAppleContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt, err := c.ExchangeCode(context.Background(), "auth-code")
+	ex, err := c.ExchangeCode(context.Background(), "auth-code")
 	if err != nil {
 		t.Fatalf("교환 실패: %v", err)
 	}
-	if rt != "apple-refresh" {
-		t.Errorf("refresh token = %q", rt)
+	if ex.RefreshToken != "apple-refresh" || ex.Subject != "apple-sub-1" {
+		t.Errorf("교환 결과 = %+v", ex)
 	}
 
 	if got := form["grant_type"]; len(got) != 1 || got[0] != "authorization_code" {
@@ -409,6 +410,8 @@ func TestExchangeCodeClassifiesAppleErrors(t *testing.T) {
 		{"문서에 없는 error 값은 옮기지 않는다", 400, `{"error":"Bearer secret-looking-thing"}`, "unknown", nil},
 		{"Apple 장애", 503, `oops`, "", ErrUnavailable},
 		{"200인데 refresh token 없음", 200, `{"access_token":"a"}`, "", ErrUnavailable},
+		{"200인데 id_token 없음", 200, `{"refresh_token":"r"}`, "", ErrUnavailable},
+		{"200인데 id_token이 JWT가 아님", 200, `{"refresh_token":"r","id_token":"garbage"}`, "", ErrUnavailable},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -460,5 +463,92 @@ func TestNewClientRequiresAllCredentials(t *testing.T) {
 	creds.KeyID = ""
 	if _, err := NewClient(creds, "", "", nil, nil); err == nil {
 		t.Fatal("key ID 없이 Client가 만들어졌다")
+	}
+}
+
+// fakeIDToken은 교환 응답의 id_token을 흉내 낸다. 서버는 이 token의 서명을
+// 검증하지 않으므로(TLS로 Apple에서 직접 받는다) 임의 키로 서명한다.
+func fakeIDToken(t *testing.T, sub string) string {
+	t.Helper()
+	s, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"sub": sub, "iss": Issuer}).
+		SignedString([]byte("irrelevant"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestAPIErrorIsUserErrorOnlyForInvalidGrant(t *testing.T) {
+	for code, want := range map[string]bool{
+		"invalid_grant": true, "invalid_client": false, "unauthorized_client": false,
+		"invalid_request": false, "unsupported_grant_type": false, "unknown": false,
+	} {
+		if got := (&APIError{Code: code}).IsUserError(); got != want {
+			t.Errorf("%s: IsUserError = %v, want %v", code, got, want)
+		}
+	}
+}
+
+// 키가 최대 수명을 넘겼는데 Apple이 죽어 있으면, 모든 로그인이 락 뒤에서 각자
+// Apple timeout을 기다리지 않고 즉시 실패해야 한다.
+func TestVerifyDoesNotHammerAppleWhenStaleKeysCannotBeRefreshed(t *testing.T) {
+	f := newFakeApple(t)
+	key := f.addKey(t, "k1")
+	c := &clock{t: time.Now()}
+	v := newTestVerifier(t, f, c)
+
+	if _, err := v.Verify(context.Background(), sign(t, key, "k1", validClaims(c.now(), "raw")), "raw"); err != nil {
+		t.Fatal(err)
+	}
+	c.advance(keysMaxAge + time.Minute)
+	f.setDown(true)
+	before := f.fetches.Load()
+
+	for range 20 {
+		_, err := v.Verify(context.Background(), sign(t, key, "k1", validClaims(c.now(), "raw")), "raw")
+		if !errors.Is(err, ErrKeysUnavailable) {
+			t.Fatalf("err = %v, want ErrKeysUnavailable", err)
+		}
+	}
+	if got := f.fetches.Load() - before; got != 1 {
+		t.Fatalf("장애 중 로그인 20건에 JWKS를 %d회 요청했다, want 1", got)
+	}
+
+	// 간격이 지나고 Apple이 돌아오면 회복한다.
+	c.advance(2 * unknownKidRefetchInterval)
+	f.setDown(false)
+	if _, err := v.Verify(context.Background(), sign(t, key, "k1", validClaims(c.now(), "raw")), "raw"); err != nil {
+		t.Fatalf("Apple 복구 후에도 실패한다: %v", err)
+	}
+}
+
+// 클라이언트가 연결을 끊어 요청 context가 취소돼도 JWKS 받기는 끝까지 간다.
+// 그러지 않으면 그 실패가 재시도 간격에 걸려 다른 사용자의 로그인까지 막힌다.
+func TestVerifyFetchSurvivesCallerCancellation(t *testing.T) {
+	f := newFakeApple(t)
+	key := f.addKey(t, "k1")
+	c := &clock{t: time.Now()}
+	v := newTestVerifier(t, f, c)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _ = v.Verify(ctx, sign(t, key, "k1", validClaims(c.now(), "raw")), "raw")
+
+	if _, err := v.Verify(context.Background(), sign(t, key, "k1", validClaims(c.now(), "raw")), "raw"); err != nil {
+		t.Fatalf("취소된 요청 뒤의 정상 요청이 실패했다: %v", err)
+	}
+}
+
+// 서버 시계가 Apple보다 조금 늦어도 방금 발급된 token을 받아들인다.
+func TestVerifyToleratesSmallClockSkew(t *testing.T) {
+	f := newFakeApple(t)
+	key := f.addKey(t, "k1")
+	c := &clock{t: time.Now()}
+	v := newTestVerifier(t, f, c)
+
+	claims := validClaims(c.now(), "raw")
+	claims["iat"] = c.now().Add(10 * time.Second).Unix()
+	if _, err := v.Verify(context.Background(), sign(t, key, "k1", claims), "raw"); err != nil {
+		t.Fatalf("10초 앞선 iat를 거부했다: %v", err)
 	}
 }

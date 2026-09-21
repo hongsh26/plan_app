@@ -64,6 +64,8 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 // AccessLogMiddleware는 요청 하나당 로그 한 줄을 남긴다.
 //
 // §11의 허용 필드(request_id, actor 내부 ID, action, result, latency)만 기록한다.
+// status는 result의 세부 값(HTTP 상태 코드)으로 본다. 사용자 데이터를 담지 않고,
+// 401과 423과 503을 구분하지 못하면 장애 대응이 불가능하다.
 // action에는 원본 URL이 아니라 ServeMux가 매칭한 route 패턴을 쓴다. 원본 경로와
 // query에는 sync cursor, 기기 ID처럼 로그에 남길 이유가 없는 값이 섞인다.
 // actor는 인증 미들웨어가 context에 넣은 뒤에야 알 수 있으므로 여기서 남기지

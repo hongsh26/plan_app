@@ -27,8 +27,11 @@ import (
 type subjectApple struct{}
 
 func (subjectApple) Verify(_ context.Context, idToken, _ string) (appleid.Identity, error) {
-	if idToken == "bad" {
+	switch idToken {
+	case "bad":
 		return appleid.Identity{}, appleid.ErrNonceMismatch
+	case "down":
+		return appleid.Identity{}, appleid.ErrKeysUnavailable
 	}
 	return appleid.Identity{Subject: idToken}, nil
 }
@@ -236,16 +239,50 @@ func TestListDevicesShowsLiveDevicesAndMarksCurrent(t *testing.T) {
 	}
 }
 
-// 인증 요청의 로그에 token이 남지 않는다(§11).
-func TestLogsNeverContainTokens(t *testing.T) {
+// Apple 장애는 503이다. 401로 답하면 클라이언트가 사용자를 로그아웃시킨다.
+func TestAppleOutageGets503(t *testing.T) {
 	s := newStack(t)
-	sess := s.signIn(t, "http."+uuid.NewString())
+	assertError(t, s.do(t, http.MethodPost, "/v1/auth/apple", "", map[string]string{
+		"identity_token": "down", "authorization_code": "c", "raw_nonce": "n"}),
+		http.StatusServiceUnavailable, httpapi.CodeInternal)
+}
+
+// 인증 요청의 로그에 자격이 남지 않는다(§11). 성공 경로와 실패 경로를 모두 돈다.
+func TestLogsNeverContainCredentials(t *testing.T) {
+	s := newStack(t)
+	subject := "http." + uuid.NewString()
+	code := "code-" + uuid.NewString()
+	nonce := "nonce-" + uuid.NewString()
+
+	rec := s.do(t, http.MethodPost, "/v1/auth/apple", "", map[string]string{
+		"identity_token": subject, "authorization_code": code, "raw_nonce": nonce})
+	if rec.Code != http.StatusOK {
+		t.Fatal(rec.Body.String())
+	}
+	sess := decode[sessionBody](t, rec)
+	uid := uuid.MustParse(sess.UserID)
+	t.Cleanup(func() {
+		_, _ = s.pool.Exec(context.Background(), `DELETE FROM audit_events WHERE actor_user_id = $1`, uid)
+		_, _ = s.pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, uid)
+	})
+
 	s.do(t, http.MethodGet, "/v1/me", sess.AccessToken, nil)
 	s.do(t, http.MethodPost, "/v1/auth/refresh", "", map[string]string{"refresh_token": sess.RefreshToken})
+	// 재사용 탐지(실패 경로)
 	s.do(t, http.MethodPost, "/v1/auth/refresh", "", map[string]string{"refresh_token": sess.RefreshToken})
+	// 폐기된 access token(실패 경로)
+	s.do(t, http.MethodGet, "/v1/me", sess.AccessToken, nil)
+	// 검증 실패와 Apple 장애(실패 경로)
+	s.do(t, http.MethodPost, "/v1/auth/apple", "", map[string]string{
+		"identity_token": "bad", "authorization_code": code, "raw_nonce": nonce})
+	s.do(t, http.MethodPost, "/v1/auth/apple", "", map[string]string{
+		"identity_token": "down", "authorization_code": code, "raw_nonce": nonce})
 
 	logs := s.logs.String()
-	for name, secret := range map[string]string{"access token": sess.AccessToken, "refresh token": sess.RefreshToken} {
+	for name, secret := range map[string]string{
+		"access token": sess.AccessToken, "refresh token": sess.RefreshToken,
+		"Apple subject(identity token)": subject, "authorization code": code, "raw nonce": nonce,
+	} {
 		if strings.Contains(logs, secret) {
 			t.Errorf("로그에 %s가 남았다", name)
 		}

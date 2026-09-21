@@ -71,9 +71,15 @@ var (
 //   - unknownKidRefetchInterval: 모르는 kid가 오면 키 교체로 보고 다시 받되,
 //     이 간격 안에서는 한 번만 받는다. 임의 kid를 담은 token을 반복해 보내
 //     Apple endpoint를 두드리게 만드는 경로를 막는다.
+//   - 두 경우 모두 마지막 시도(성공·실패 무관) 뒤 unknownKidRefetchInterval 안에는
+//     다시 받지 않는다.
 const (
 	keysMaxAge                = 24 * time.Hour
 	unknownKidRefetchInterval = time.Minute
+	fetchTimeout              = 5 * time.Second
+	// clockLeeway는 exp·iat 판정의 허용 오차다. 서버 시계가 Apple보다 조금
+	// 늦으면 방금 발급된 token의 iat가 미래로 보여 거부된다.
+	clockLeeway = 30 * time.Second
 )
 
 // Verifier는 Apple identity token을 검증한다. 동시에 여러 요청이 써도 안전하다.
@@ -133,6 +139,7 @@ func (v *Verifier) Verify(ctx context.Context, idToken, rawNonce string) (Identi
 		jwt.WithAudience(v.clientID),
 		jwt.WithExpirationRequired(),
 		jwt.WithIssuedAt(),
+		jwt.WithLeeway(clockLeeway),
 		jwt.WithTimeFunc(v.now),
 	)
 	if err != nil {
@@ -170,6 +177,11 @@ func (v *Verifier) keyFor(ctx context.Context, t *jwt.Token) (any, error) {
 
 	now := v.now()
 	if v.keys == nil || now.Sub(v.fetchedAt) > keysMaxAge {
+		// 방금 받기에 실패했다면 다시 시도하지 않고 즉시 실패한다. 그러지 않으면
+		// Apple 장애 중 모든 로그인이 이 락 뒤에 줄을 서서 각자 timeout을 기다린다.
+		if now.Sub(v.lastAttempt) < unknownKidRefetchInterval {
+			return nil, ErrKeysUnavailable
+		}
 		if err := v.refreshLocked(ctx, now); err != nil {
 			return nil, err
 		}
@@ -200,6 +212,11 @@ func (v *Verifier) keyFor(ctx context.Context, t *jwt.Token) (any, error) {
 func (v *Verifier) refreshLocked(ctx context.Context, now time.Time) error {
 	v.lastAttempt = now
 
+	// 호출자 context를 끊어서 쓴다. 클라이언트가 중간에 연결을 끊으면 받기가
+	// 취소되는데, 그 실패도 lastAttempt 간격에 들어가 다른 사용자의 로그인까지
+	// 1분간 막힌다. 한도는 fetchTimeout이 정한다.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fetchTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.keysURL, nil)
 	if err != nil {
 		return ErrKeysUnavailable

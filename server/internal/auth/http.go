@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/httpapi"
 )
 
@@ -170,13 +171,28 @@ func bearerToken(r *http.Request) (string, bool) {
 // writeServiceError는 서비스 오류를 §6 오류 응답으로 바꾼다. 예상하지 못한
 // 오류의 원문은 로그에만 남기고 응답에는 넣지 않는다(§11).
 func (h *Handler) writeServiceError(w http.ResponseWriter, r *http.Request, action string, err error) {
+	var appleErr *appleid.APIError
 	switch {
 	case errors.Is(err, ErrInvalidCredential):
 		httpapi.WriteError(w, r, http.StatusUnauthorized, httpapi.CodeInvalidSession, "세션이 유효하지 않다. 다시 로그인해야 한다")
 	case errors.Is(err, ErrAccountLocked):
 		httpapi.WriteError(w, r, http.StatusLocked, httpapi.CodeAccountLocked, "계정을 사용할 수 없는 상태다")
 	case errors.Is(err, ErrUnavailable):
+		h.logger.WarnContext(r.Context(), "외부 인증 서비스 장애",
+			slog.String("request_id", httpapi.RequestID(r.Context()).String()),
+			slog.String("action", action),
+			slog.String("result", "failure"),
+		)
 		httpapi.WriteError(w, r, http.StatusServiceUnavailable, httpapi.CodeInternal, "인증 서비스를 일시적으로 사용할 수 없다")
+	case errors.As(err, &appleErr):
+		// Apple이 서버 자격을 거부했다. code는 Apple 문서의 고정 값이라 남겨도 된다.
+		h.logger.ErrorContext(r.Context(), "Apple이 서버 자격을 거부했다. APPLE_TEAM_ID, APPLE_KEY_ID, APPLE_PRIVATE_KEY를 확인해야 한다",
+			slog.String("request_id", httpapi.RequestID(r.Context()).String()),
+			slog.String("action", action),
+			slog.String("result", "failure"),
+			slog.String("apple_error", appleErr.Code),
+		)
+		httpapi.WriteError(w, r, http.StatusInternalServerError, httpapi.CodeInternal, "요청을 처리하지 못했다")
 	default:
 		// pgx 오류 원문은 SQL과 값 일부를 담을 수 있다. 오류 "종류"만 남긴다.
 		h.logger.ErrorContext(r.Context(), "인증 처리 실패",
@@ -190,10 +206,12 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, r *http.Request, acti
 }
 
 // normalizeDisplayName은 클라이언트가 보낸 표시 이름을 저장 가능한 형태로 만든다.
-// 제어 문자를 지우고 앞뒤 공백을 자르며 길이를 제한한다. 비면 기본값이다.
+// 제어 문자와 서식 문자(Cf)를 지우고 앞뒤 공백을 자르며 길이를 제한한다. 비면
+// 기본값이다. Cf에는 U+202E 같은 bidi override가 있어, 남기면 다른 멤버 화면에서
+// 이름 뒤의 텍스트 방향을 뒤집을 수 있다. 이모지 결합에 쓰는 ZWJ(U+200D)만 남긴다.
 func normalizeDisplayName(raw string) string {
 	cleaned := strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || (unicode.Is(unicode.Cf, r) && r != '\u200d') {
 			return -1
 		}
 		return r

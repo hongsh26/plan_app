@@ -103,20 +103,37 @@ var knownErrorCodes = map[string]bool{
 	"unauthorized_client": true, "unsupported_grant_type": true, "invalid_scope": true,
 }
 
+// IsUserError는 Apple 오류가 사용자가 제출한 code 때문인지다. invalid_grant만
+// 그렇다(만료, 재사용, 다른 앱의 code). 나머지(invalid_client, unauthorized_client
+// 등)는 서버 자격이나 설정 문제이므로 사용자에게 "다시 로그인하라"고 답하면 안 된다.
+func (e *APIError) IsUserError() bool { return e.Code == "invalid_grant" }
+
 // ErrUnavailable은 네트워크 오류나 5xx처럼 Apple 쪽 장애로 결과를 모를 때다.
 var ErrUnavailable = errors.New("appleid: Apple token endpoint를 사용할 수 없다")
+
+// Exchange는 code 교환 결과다.
+type Exchange struct {
+	RefreshToken string
+	// Subject는 교환 응답의 id_token에 담긴 sub다. 호출자는 이 값이 검증한
+	// identity token의 sub와 같은지 확인해야 한다. 같지 않으면 남의 code를
+	// 자기 identity token과 함께 제출한 것이다.
+	Subject string
+}
 
 // ExchangeCode는 iOS가 받은 authorization code를 Apple refresh token으로
 // 교환한다. code는 1회용이고 5분간 유효하므로 로그인 요청 안에서 즉시 호출한다.
 //
 // 네이티브 iOS 로그인은 redirect_uri를 쓰지 않으므로 보내지 않는다.
-func (c *Client) ExchangeCode(ctx context.Context, code string) (refreshToken string, err error) {
+//
+// 응답의 id_token은 서명을 다시 검증하지 않고 sub만 읽는다. 이 token은 클라이언트가
+// 아니라 Apple token endpoint가 TLS로 직접 준 것이므로 출처가 이미 보장된다.
+func (c *Client) ExchangeCode(ctx context.Context, code string) (Exchange, error) {
 	if code == "" {
-		return "", &APIError{Status: http.StatusBadRequest, Code: "invalid_request"}
+		return Exchange{}, &APIError{Status: http.StatusBadRequest, Code: "invalid_request"}
 	}
 	secret, err := c.clientSecret()
 	if err != nil {
-		return "", err
+		return Exchange{}, err
 	}
 	form := url.Values{
 		"client_id":     {c.creds.ClientID},
@@ -127,15 +144,20 @@ func (c *Client) ExchangeCode(ctx context.Context, code string) (refreshToken st
 
 	body, err := c.post(ctx, c.tokenURL, form)
 	if err != nil {
-		return "", err
+		return Exchange{}, err
 	}
 	var tok struct {
 		RefreshToken string `json:"refresh_token"`
+		IDToken      string `json:"id_token"`
 	}
-	if err := json.Unmarshal(body, &tok); err != nil || tok.RefreshToken == "" {
-		return "", ErrUnavailable
+	if err := json.Unmarshal(body, &tok); err != nil || tok.RefreshToken == "" || tok.IDToken == "" {
+		return Exchange{}, ErrUnavailable
 	}
-	return tok.RefreshToken, nil
+	var claims jwt.RegisteredClaims
+	if _, _, err := jwt.NewParser().ParseUnverified(tok.IDToken, &claims); err != nil || claims.Subject == "" {
+		return Exchange{}, ErrUnavailable
+	}
+	return Exchange{RefreshToken: tok.RefreshToken, Subject: claims.Subject}, nil
 }
 
 // Revoke는 Apple refresh token을 폐기한다. §10 3단계에서 삭제 worker가 부른다.
