@@ -52,6 +52,12 @@ jobs:
       # 않는다. 스테이징·프로덕션 자격은 §12에 따라 분리한다.
       MIGRATION_DATABASE_URL: postgres://plantogether_migration:local_migration_password@localhost:5432/plantogether?sslmode=disable
       TEST_DATABASE_URL: postgres://plantogether_migration:local_migration_password@localhost:5432/plantogether?sslmode=disable
+      # DB 역할 분리 테스트(test/role_separation_test.go)가 각 런타임 역할 자격으로
+      # 접속해 DDL과 쓰기가 막히는지 본다. 위의 두 URL은 DDL 권한이 있는 migration
+      # 역할이라, 이 셋이 없으면 01-roles.sql이 회귀해도 CI가 초록이다.
+      TEST_API_DATABASE_URL: postgres://plantogether_api:local_api_password@localhost:5432/plantogether?sslmode=disable
+      TEST_WORKER_DATABASE_URL: postgres://plantogether_worker:local_worker_password@localhost:5432/plantogether?sslmode=disable
+      TEST_READONLY_DATABASE_URL: postgres://plantogether_readonly:local_readonly_password@localhost:5432/plantogether?sslmode=disable
 
       # 이 워크플로의 존재 이유다. skip을 실패로 바꾼다.
       REQUIRE_DB_TESTS: "1"

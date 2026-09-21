@@ -5,7 +5,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
@@ -29,7 +28,7 @@ type healthResponse struct {
 // 처리할 수 있으면 200이다.
 func NewLivenessHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
+		WriteJSON(w, http.StatusOK, healthResponse{Status: "ok"})
 	})
 }
 
@@ -46,23 +45,16 @@ func NewReadinessHandler(pinger postgres.Pinger, logger *slog.Logger) http.Handl
 		if err := pinger.Ping(ctx); err != nil {
 			// 오류 원문은 로그에만 남긴다. 응답에는 넣지 않는다 (§11).
 			logger.WarnContext(ctx, "readiness 검사 실패",
+				slog.String("request_id", RequestID(ctx).String()),
 				slog.String("action", "readiness_check"),
 				slog.String("result", "failure"),
 				slog.String("error", err.Error()),
 			)
-			writeJSON(w, http.StatusServiceUnavailable, healthResponse{Status: "unavailable"})
+			WriteJSON(w, http.StatusServiceUnavailable, healthResponse{Status: "unavailable"})
 			return
 		}
-		writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
+		WriteJSON(w, http.StatusOK, healthResponse{Status: "ok"})
 	})
-}
-
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	// health 응답은 캐시되면 의미가 없다.
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
 }
 
 // NewMux는 P0 범위의 라우트를 등록한다. Go 1.22+ ServeMux의 메서드 포함
