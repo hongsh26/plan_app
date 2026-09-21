@@ -45,7 +45,7 @@
 - **§7.1의 settled horizon 읽기 쿼리는 미구현이다.** P0은 쓰기 쪽 스키마만 다뤘다. sync 변경 유실 방지의 핵심은 읽기 경로에 있으므로, 이것이 구현되기 전까지 개정은 절반만 적용된 상태다. §15의 순서 역전 회귀 테스트와 함께 **P6**에서 반드시 처리한다.
 - KMS envelope encryption 미적용 (로컬에 KMS 없음, ciphertext 열만 비워둠)
 - **DB 역할 분리에 자동 커버리지가 없다.** `plantogether_api`의 DDL 거부와 `plantogether_readonly`의 DELETE 거부는 `ccc0b1b`에서 사람이 한 번 확인했을 뿐이다. 모든 통합 테스트가 DDL 권한이 있는 `plantogether_migration`으로 접속하므로 `01-roles.sql`의 `ALTER DEFAULT PRIVILEGES`가 회귀해도 CI는 초록이다. P1에서 각 역할 자격으로 `CREATE TABLE`·`DELETE`를 시도해 SQLSTATE `42501`로 거부되는지 보는 통합 테스트를 추가한다.
-- **`server-ci`는 아직 required status check가 아니다.** 지정한다면 `paths` 필터 때문에 `docs/`만 바꾼 PR이 pending 상태로 계속 남는 문제를 함께 처리한다(필터 제거 또는 같은 이름의 skip job). 저장소 설정이라 사용자 결정 사항이다
+- **`server-ci`는 아직 required status check가 아니다.** pending 문제는 `paths` 필터를 없애 해결했다(`56b5a63`). 그러나 private 저장소의 Free 요금제에서는 branch protection과 ruleset이 모두 403이다. Pro 업그레이드, public 전환, 사람이 확인하는 관례 중 하나를 사용자가 정해야 한다. 등록할 check 이름은 `test`다(`docs/rec/2026-09-21_1558_ci_paths_filter_removal.md`)
 
 ### 최근 결정
 
