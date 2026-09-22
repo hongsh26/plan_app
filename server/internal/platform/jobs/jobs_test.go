@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"plantogether/server/internal/platform/config"
 	"plantogether/server/internal/platform/postgres/pgtest"
 )
 
@@ -415,7 +416,7 @@ func TestShutdownLetsInFlightHandlerFinish(t *testing.T) {
 		<-finish
 		return nil
 	}})
-	r.ShutdownTimeout = 5 * time.Second
+	r.ShutdownTimeout = finishTimeout + 5*time.Second
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()
@@ -433,23 +434,36 @@ func TestShutdownLetsInFlightHandlerFinish(t *testing.T) {
 
 func TestStalledCountAndPruneSucceeded(t *testing.T) {
 	f := newFx(t)
-	ids := f.insert(t, 3)
 	ctx := context.Background()
 
-	// 0: 오래 밀린 pending, 1: 오래전에 끝난 succeeded, 2: 방금 끝난 succeeded
-	if _, err := f.pool.Exec(ctx, `UPDATE outbox_jobs SET next_run_at = now() - interval '1 hour' WHERE id = $1`, ids[0]); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.pool.Exec(ctx, `UPDATE outbox_jobs SET status = 'succeeded', updated_at = now() - interval '30 days' WHERE id = $1`, ids[1]); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.pool.Exec(ctx, `UPDATE outbox_jobs SET status = 'succeeded' WHERE id = $1`, ids[2]); err != nil {
+	// 다른 테스트의 job이 섞이지 않도록 전후 차이로 센다.
+	before, err := StalledCount(ctx, f.pool, 15*time.Minute)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	n, err := StalledCount(ctx, f.pool, 15*time.Minute)
-	if err != nil || n < 1 {
-		t.Fatalf("StalledCount = %d, %v, want >= 1", n, err)
+	// 0: 오래 밀린 pending, 1: 오래전에 끝난 succeeded, 2: 방금 끝난 succeeded,
+	// 3: 오래 밀렸지만 lease가 살아 있는 running(처리 중이므로 정체가 아니다),
+	// 4: 미래에 실행할 retryable_failed, 5: 오래 밀렸고 lease가 지난 running(worker가 죽었다),
+	// 6: 오래전에 dead(정체 감시 대상이 아니다)
+	ids := f.insert(t, 7)
+	for i, q := range []string{
+		`UPDATE outbox_jobs SET next_run_at = now() - interval '1 hour' WHERE id = $1`,
+		`UPDATE outbox_jobs SET status = 'succeeded', updated_at = now() - interval '30 days' WHERE id = $1`,
+		`UPDATE outbox_jobs SET status = 'succeeded' WHERE id = $1`,
+		`UPDATE outbox_jobs SET status = 'running', next_run_at = now() - interval '1 hour', locked_until = now() + interval '1 minute' WHERE id = $1`,
+		`UPDATE outbox_jobs SET status = 'retryable_failed', next_run_at = now() + interval '1 hour' WHERE id = $1`,
+		`UPDATE outbox_jobs SET status = 'running', next_run_at = now() - interval '1 hour', locked_until = now() - interval '1 second' WHERE id = $1`,
+		`UPDATE outbox_jobs SET status = 'dead', next_run_at = now() - interval '1 hour' WHERE id = $1`,
+	} {
+		if _, err := f.pool.Exec(ctx, q, ids[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	after, err := StalledCount(ctx, f.pool, 15*time.Minute)
+	if err != nil || after-before != 2 {
+		t.Fatalf("StalledCount 증가 = %d, %v, want 2(밀린 pending과 lease가 지난 running)", after-before, err)
 	}
 
 	if _, err := PruneSucceeded(ctx, f.pool, time.Now().Add(-7*24*time.Hour), 1); err != nil {
@@ -461,7 +475,7 @@ func TestStalledCountAndPruneSucceeded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(left) != 2 {
+	if len(left) != len(ids)-1 {
 		t.Fatalf("남은 job %v, want 오래된 succeeded만 지워짐", left)
 	}
 	for _, id := range left {
@@ -469,4 +483,171 @@ func TestStalledCountAndPruneSucceeded(t *testing.T) {
 			t.Fatal("오래된 succeeded가 남았다")
 		}
 	}
+}
+
+// config가 jobs에 의존하지 않도록 최솟값을 따로 적었다. 둘이 어긋나면 config는 통과시킨
+// lease를 Runner.Run이 거부해 worker가 기동하자마자 끝난다.
+func TestMinLeaseMatchesConfig(t *testing.T) {
+	if MinLease != config.MinWorkerLease {
+		t.Fatalf("jobs.MinLease = %v, config.MinWorkerLease = %v", MinLease, config.MinWorkerLease)
+	}
+}
+
+// 늦게 끝난 앞 시도는 어떤 결과 기록으로도 다시 점유한 시도를 덮지 못한다. 네 기록이
+// 같은 펜싱 조건을 쓰지만 한 곳만 고쳐도 잡히도록 각각 본다.
+func TestAllResultWritesAreFenced(t *testing.T) {
+	ctx := context.Background()
+	for name, write := range map[string]func(*pgxpool.Pool, Job) error{
+		"Succeed": func(p *pgxpool.Pool, j Job) error { return Succeed(ctx, p, j) },
+		"Retry":   func(p *pgxpool.Pool, j Job) error { return Retry(ctx, p, j, time.Minute, errors.New("x")) },
+		"Kill":    func(p *pgxpool.Pool, j Job) error { return Kill(ctx, p, j, errors.New("x"), nil) },
+		"Release": func(p *pgxpool.Pool, j Job) error { return Release(ctx, p, j) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFx(t)
+			id := f.insert(t, 1)[0]
+			stale, err := Claim(ctx, f.pool, []string{f.typ}, 1, time.Minute)
+			if err != nil || len(stale) != 1 {
+				t.Fatalf("첫 점유 = %v, %v", stale, err)
+			}
+			if _, err := f.pool.Exec(ctx, `UPDATE outbox_jobs SET locked_until = now() - interval '1 second' WHERE id = $1`, id); err != nil {
+				t.Fatal(err)
+			}
+			if cur, err := Claim(ctx, f.pool, []string{f.typ}, 1, time.Minute); err != nil || len(cur) != 1 {
+				t.Fatalf("다시 점유 = %v, %v", cur, err)
+			}
+
+			if err := write(f.pool, stale[0]); !errors.Is(err, ErrLeaseLost) {
+				t.Fatalf("앞 시도의 %s err = %v, want ErrLeaseLost", name, err)
+			}
+			if r := f.row(t, id); r.status != "running" || r.attempts != 2 || r.lockedUntil == nil {
+				t.Fatalf("다시 점유한 시도의 상태가 바뀌었다: %+v", r)
+			}
+		})
+	}
+}
+
+// handler 기한 + 결과 기록 한도가 lease 안에 들어간다. 그렇지 않으면 기한까지 간 handler의
+// 결과 기록이 lease 뒤에 일어나 다른 worker의 재점유와 겹친다.
+func TestHandlerDeadlineLeavesRoomToRecordWithinLease(t *testing.T) {
+	f := newFx(t)
+	id := f.insert(t, 1)[0]
+	ctx := context.Background()
+
+	var deadline, lockedUntil time.Time
+	if _, err := f.runner(Kind{Handler: func(hctx context.Context, j Job) error {
+		var ok bool
+		if deadline, ok = hctx.Deadline(); !ok {
+			return errors.New("handler context에 기한이 없다")
+		}
+		return f.pool.QueryRow(hctx, `SELECT locked_until FROM outbox_jobs WHERE id = $1`, j.ID).Scan(&lockedUntil)
+	}}).RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.row(t, id); r.status != "succeeded" {
+		t.Fatalf("상태 = %+v", r)
+	}
+	if room := lockedUntil.Sub(deadline); room < finishTimeout {
+		t.Fatalf("기한 뒤 lease 여유 = %v, want >= %v(결과 기록 한도)", room, finishTimeout)
+	}
+}
+
+func TestRunRejectsLeaseBelowMinimum(t *testing.T) {
+	f := newFx(t)
+	r := f.runner(Kind{Handler: func(context.Context, Job) error { return nil }})
+	r.Lease = MinLease - time.Second
+	if err := r.Run(context.Background()); err == nil {
+		t.Fatal("최솟값보다 짧은 lease가 허용됐다")
+	}
+}
+
+// 종료 중에 나온 Permanent는 job 자신의 판정이다. 반납하면 시도가 되돌려져 handler가
+// 다시 돈다.
+func TestPermanentDuringShutdownGoesDeadNotReleased(t *testing.T) {
+	f := newFx(t)
+	id := f.insert(t, 1)[0]
+
+	started := make(chan struct{})
+	r := f.runner(Kind{Handler: func(ctx context.Context, _ Job) error {
+		close(started)
+		<-ctx.Done()
+		return Permanent(errors.New("대상 없음"))
+	}})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+	<-started
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := f.row(t, id); got.status != "dead" || got.attempts != 1 {
+		t.Fatalf("상태 = %+v, want dead", got)
+	}
+}
+
+// 결과 로그는 기록이 커밋됐을 때만 남는다. 경보 규칙이 result=dead를 잡으므로, 롤백된
+// dead 전이나 펜싱에 막힌 완료를 결과로 알리면 오탐이 된다.
+func TestResultLogsOnlyAfterCommittedWrite(t *testing.T) {
+	ctx := context.Background()
+	logs := func(r *Runner) *lockedBuffer {
+		b := &lockedBuffer{}
+		r.Logger = slog.New(slog.NewJSONHandler(b, nil))
+		return b
+	}
+
+	t.Run("OnDead 실패", func(t *testing.T) {
+		f := newFx(t)
+		f.insert(t, 1)
+		r := f.runner(Kind{
+			Handler: func(context.Context, Job) error { return Permanent(errors.New("대상 없음")) },
+			OnDead:  func(context.Context, pgx.Tx, Job) error { return errors.New("sync 기록 실패") },
+		})
+		b := logs(r)
+		if _, err := r.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		out := b.String()
+		if strings.Contains(out, `"result":"dead"`) || !strings.Contains(out, `"result":"dead_failed"`) {
+			t.Fatalf("로그 = %s, want dead_failed만", out)
+		}
+	})
+
+	t.Run("lease를 잃은 성공", func(t *testing.T) {
+		f := newFx(t)
+		id := f.insert(t, 1)[0]
+		r := f.runner(Kind{Handler: func(hctx context.Context, _ Job) error {
+			// 처리 중에 lease가 지나 다른 worker가 다시 점유했다.
+			if _, err := f.pool.Exec(hctx, `UPDATE outbox_jobs SET locked_until = now() - interval '1 second' WHERE id = $1`, id); err != nil {
+				return err
+			}
+			_, err := Claim(hctx, f.pool, []string{f.typ}, 1, time.Minute)
+			return err
+		}})
+		b := logs(r)
+		if _, err := r.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		out := b.String()
+		if strings.Contains(out, `"result":"success"`) || !strings.Contains(out, `"result":"lease_lost"`) {
+			t.Fatalf("로그 = %s, want lease_lost만", out)
+		}
+	})
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }

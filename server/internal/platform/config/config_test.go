@@ -214,6 +214,16 @@ func TestLoadWorkerOptions(t *testing.T) {
 		t.Error("WORKER_BATCH_SIZE=0이 허용됐다")
 	}
 
+	env["WORKER_BATCH_SIZE"] = "4"
+	env["WORKER_LEASE_DURATION"] = (MinWorkerLease - time.Second).String()
+	if _, err := Load(RoleWorker, FromMap(env)); err == nil {
+		t.Error("최솟값보다 짧은 WORKER_LEASE_DURATION이 허용됐다")
+	}
+	env["WORKER_LEASE_DURATION"] = MinWorkerLease.String()
+	if _, err := Load(RoleWorker, FromMap(env)); err != nil {
+		t.Errorf("최솟값과 같은 WORKER_LEASE_DURATION이 거부됐다: %v", err)
+	}
+
 	// scheduler는 worker 전용 값을 갖지 않는다.
 	cfg, err = Load(RoleScheduler, FromMap(validEnv()))
 	if err != nil {

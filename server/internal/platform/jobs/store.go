@@ -112,8 +112,9 @@ func Kill(ctx context.Context, pool *pgxpool.Pool, j Job, cause error, onDead fu
 // Release는 끝내지 못한 시도의 lease를 반납한다. job은 곧바로 다시 점유될 수 있다.
 //
 // worker 종료로 중단된 시도는 job의 탓이 아니므로 attempt_count를 되돌린다. handler가
-// 취소에 응하지 않아 종료 한도를 넘기면 Release가 불리지 않고 lease 만료로 끝나며, 그
-// 시도는 센다(poison pill이 무한히 되풀이되지 않게).
+// 취소에 응하지 않으면 Runner.Run은 그 handler를 기다리고, 오케스트레이터가 프로세스를
+// 강제 종료하면 Release가 불리지 않는다. 그 시도는 lease 만료로 끝나며 센다(poison pill이
+// 무한히 되풀이되지 않게).
 func Release(ctx context.Context, pool *pgxpool.Pool, j Job) error {
 	return expectOne(pool.Exec(ctx, `
 		UPDATE outbox_jobs

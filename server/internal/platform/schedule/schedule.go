@@ -21,10 +21,20 @@ type Task struct {
 	Name string
 	// Interval은 성공한 실행 끝에서 다음 실행까지의 간격이다.
 	Interval time.Duration
-	// Timeout은 한 번 실행의 한도이자 lease 기간이다.
+	// Timeout은 lease 기간이다. 실행 한도는 결과 기록을 lease 안에 끝내도록 이보다
+	// finishTimeout + leaseMargin만큼 짧다.
 	Timeout time.Duration
 	Run     func(ctx context.Context) error
 }
+
+// finishTimeout은 결과 기록 한 번의 한도다.
+const finishTimeout = 5 * time.Second
+
+// leaseMargin은 실행 한도와 결과 기록을 마친 뒤에도 lease가 남도록 두는 여유다.
+const leaseMargin = 2 * time.Second
+
+// MinTimeout은 Task.Timeout의 최솟값이다. 실행에 최소 10초를 남긴다.
+const MinTimeout = finishTimeout + leaseMargin + 10*time.Second
 
 // retryAfterFailure는 실패한 작업을 다시 시도하기까지의 최대 간격이다.
 const retryAfterFailure = 5 * time.Minute
@@ -42,6 +52,9 @@ func (r *Runner) Ensure(ctx context.Context) error {
 	for _, t := range r.Tasks {
 		if t.Interval <= 0 || t.Timeout <= 0 || t.Run == nil {
 			return fmt.Errorf("schedule: 작업 %q의 Interval, Timeout, Run이 필요하다", t.Name)
+		}
+		if t.Timeout < MinTimeout {
+			return fmt.Errorf("schedule: 작업 %q의 Timeout은 %s 이상이어야 한다", t.Name, MinTimeout)
 		}
 		if _, err := r.Pool.Exec(ctx,
 			`INSERT INTO scheduled_tasks (name) VALUES ($1) ON CONFLICT (name) DO NOTHING`, t.Name); err != nil {
@@ -95,6 +108,9 @@ func (r *Runner) RunDue(ctx context.Context) []string {
 func (r *Runner) runTask(ctx context.Context, t Task) (bool, error) {
 	// 한 줄 UPDATE다. 두 scheduler가 동시에 오면 뒤의 것은 앞의 커밋을 기다렸다가
 	// WHERE를 다시 평가해 locked_until이 채워진 것을 보고 0줄이 된다.
+	// 실행 기한은 점유 요청 직전 시각에서 잰다. locked_until은 DB가 이보다 늦게 잰
+	// now() + Timeout이므로, 기한 + 결과 기록 한도는 lease 안에 들어간다(jobs.handlerBudget와 같다).
+	deadline := time.Now().Add(t.Timeout - finishTimeout - leaseMargin)
 	var lockedUntil time.Time
 	err := r.Pool.QueryRow(ctx, `
 		UPDATE scheduled_tasks
@@ -110,7 +126,7 @@ func (r *Runner) runTask(ctx context.Context, t Task) (bool, error) {
 		return false, err
 	}
 
-	tctx, cancel := context.WithTimeout(ctx, t.Timeout)
+	tctx, cancel := context.WithDeadline(ctx, deadline)
 	start := time.Now()
 	runErr := t.Run(tctx)
 	cancel()
@@ -123,10 +139,10 @@ func (r *Runner) runTask(ctx context.Context, t Task) (bool, error) {
 		lastError = &s
 	}
 	// 종료 신호로 ctx가 끝났어도 결과는 기록한다.
-	fctx, fcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	fctx, fcancel := context.WithTimeout(context.Background(), finishTimeout)
 	defer fcancel()
 	// locked_until로 펜싱한다. lease가 지나 다른 scheduler가 다시 잡았으면 그쪽이 기록한다.
-	if _, err := r.Pool.Exec(fctx, `
+	tag, err := r.Pool.Exec(fctx, `
 		UPDATE scheduled_tasks
 		   SET next_run_at = now() + make_interval(secs => $3),
 		       locked_until = NULL,
@@ -134,8 +150,17 @@ func (r *Runner) runTask(ctx context.Context, t Task) (bool, error) {
 		       last_error = $4,
 		       updated_at = now()
 		 WHERE name = $1 AND locked_until = $2`,
-		t.Name, lockedUntil, next.Seconds(), lastError); err != nil {
+		t.Name, lockedUntil, next.Seconds(), lastError)
+	if err != nil {
 		return true, errors.Join(runErr, err)
+	}
+	if tag.RowsAffected() == 0 {
+		// lease가 지나 다른 scheduler가 다시 잡았다. 이 실행의 결과는 버려진다.
+		r.Logger.Warn("예약 작업 lease를 잃어 결과를 버린다",
+			slog.String("action", "task_"+t.Name),
+			slog.String("result", "lease_lost"),
+			slog.Int64("latency_ms", time.Since(start).Milliseconds()))
+		return true, runErr
 	}
 	if runErr == nil {
 		r.Logger.Info("예약 작업 완료",

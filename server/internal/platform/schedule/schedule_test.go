@@ -119,7 +119,7 @@ func TestFailedTaskRetriesSoonerAndRecordsError(t *testing.T) {
 }
 
 // scheduler가 작업 도중 죽으면 lease가 지난 뒤 다른 scheduler가 이어받는다. 죽은 쪽의
-// 늦은 기록은 펜싱으로 무시된다.
+// 늦은 기록이 펜싱으로 무시되는 것은 TestLateResultAfterTakeoverIsFenced가 본다.
 func TestExpiredTaskLeaseIsTakenOver(t *testing.T) {
 	pool := pgtest.Pool(t, pgtest.WorkerRoleURLEnv)
 	name := uniqueName(t, pool)
@@ -148,5 +148,58 @@ func TestEnsureRejectsIncompleteTask(t *testing.T) {
 	r := &Runner{Tasks: []Task{{Name: "x"}}}
 	if err := r.Ensure(context.Background()); err == nil {
 		t.Fatal("Interval·Timeout·Run 없는 작업이 허용됐다")
+	}
+}
+
+func TestEnsureRejectsTimeoutBelowMinimum(t *testing.T) {
+	r := &Runner{Tasks: []Task{{Name: "x", Interval: time.Hour, Timeout: MinTimeout - time.Second,
+		Run: func(context.Context) error { return nil }}}}
+	if err := r.Ensure(context.Background()); err == nil {
+		t.Fatal("최솟값보다 짧은 Timeout이 허용됐다")
+	}
+}
+
+// 실행 중에 lease가 지나 다른 scheduler가 이어받았다면, 늦게 끝난 이 실행은 결과를
+// 기록하지 않는다. 이어받은 쪽의 lease와 일정이 그대로 남는다.
+func TestLateResultAfterTakeoverIsFenced(t *testing.T) {
+	pool := pgtest.Pool(t, pgtest.WorkerRoleURLEnv)
+	name := uniqueName(t, pool)
+	r := newRunner(t, pool, Task{Name: name, Interval: time.Hour, Timeout: time.Minute,
+		Run: func(ctx context.Context) error {
+			// 다른 scheduler가 lease 만료 뒤 이어받아 새 lease를 잡았다.
+			_, err := pool.Exec(ctx, `UPDATE scheduled_tasks SET locked_until = now() + interval '5 minutes' WHERE name = $1`, name)
+			return err
+		}})
+
+	if ran := r.RunDue(context.Background()); len(ran) != 1 {
+		t.Fatalf("돌린 작업 = %v", ran)
+	}
+	if s := read(t, pool, name); !s.locked || s.ran {
+		t.Fatalf("상태 = %+v, want 이어받은 쪽의 lease가 남고 결과는 기록되지 않음", s)
+	}
+}
+
+// 실행 기한 + 결과 기록 한도가 lease 안에 들어간다.
+func TestRunDeadlineLeavesRoomToRecordWithinLease(t *testing.T) {
+	pool := pgtest.Pool(t, pgtest.WorkerRoleURLEnv)
+	name := uniqueName(t, pool)
+	var deadline, lockedUntil time.Time
+	r := newRunner(t, pool, Task{Name: name, Interval: time.Hour, Timeout: time.Minute,
+		Run: func(ctx context.Context) error {
+			var ok bool
+			if deadline, ok = ctx.Deadline(); !ok {
+				return errors.New("기한이 없다")
+			}
+			return pool.QueryRow(ctx, `SELECT locked_until FROM scheduled_tasks WHERE name = $1`, name).Scan(&lockedUntil)
+		}})
+
+	if ran := r.RunDue(context.Background()); len(ran) != 1 {
+		t.Fatalf("돌린 작업 = %v", ran)
+	}
+	if s := read(t, pool, name); s.lastError != nil {
+		t.Fatalf("실행 실패: %s", *s.lastError)
+	}
+	if room := lockedUntil.Sub(deadline); room < finishTimeout {
+		t.Fatalf("기한 뒤 lease 여유 = %v, want >= %v", room, finishTimeout)
 	}
 }

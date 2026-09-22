@@ -558,3 +558,68 @@ func TestPruneWatermarkNeverMovesBackward(t *testing.T) {
 		t.Fatalf("워터마크가 내려갔다: A 앞의 cursor err = %v, want ErrCursorExpired", err)
 	}
 }
+
+// 운영에서 Prune은 scheduler가 worker 역할로 돌린다. api 역할로만 테스트하면 worker
+// 역할에 빠진 권한이 운영에서야 드러난다. batch를 여러 번 나눠 돌아도 끝에는 지운 row가
+// 모두 워터마크 이하다.
+func TestPruneAsWorkerRoleAcrossBatches(t *testing.T) {
+	f := newFx(t)
+	worker := pgtest.Pool(t, pgtest.WorkerRoleURLEnv)
+	ctx := context.Background()
+
+	ids := []uuid.UUID{f.emit(t, f.pool), f.emit(t, f.pool), f.emit(t, f.pool)}
+	if _, err := f.pool.Exec(ctx,
+		`UPDATE sync_changes SET created_at = now() - interval '40 days' WHERE entity_id = ANY($1)`, ids); err != nil {
+		t.Fatal(err)
+	}
+	var ourMax string
+	if err := f.pool.QueryRow(ctx,
+		`SELECT max(txid)::text FROM sync_changes WHERE entity_id = ANY($1)`, ids).Scan(&ourMax); err != nil {
+		t.Fatal(err)
+	}
+
+	// 테스트 전용 row만 지운다는 보장이 없으므로(공유 DB) 우리 row가 모두 사라질 때까지
+	// batch 1개씩 돌린다.
+	for i := 0; ; i++ {
+		if i > 1000 {
+			t.Fatal("정리가 끝나지 않는다")
+		}
+		n, err := pruneOnce(ctx, worker, time.Now().Add(-Retention), 1)
+		if err != nil {
+			t.Fatalf("worker 역할의 정리 실패: %v", err)
+		}
+		var gone []string
+		rows, _ := f.pool.Query(ctx, `
+			SELECT t.id::text FROM unnest($1::uuid[]) t(id)
+			 WHERE NOT EXISTS (SELECT 1 FROM sync_changes c WHERE c.entity_id = t.id)`, ids)
+		gone, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(gone) == len(ids) || n == 0 {
+			if len(gone) != len(ids) {
+				t.Fatalf("정리가 끝났는데 row가 남았다: 지워진 것 %v", gone)
+			}
+			break
+		}
+	}
+
+	// 지운 우리 row 중 가장 뒤의 것도 워터마크 이하다. 그 위치 앞의 cursor는 410이다.
+	var covered bool
+	if err := f.pool.QueryRow(ctx,
+		`SELECT pruned_through_txid >= $1::xid8 FROM sync_prune_state`, ourMax).Scan(&covered); err != nil {
+		t.Fatal(err)
+	}
+	if !covered {
+		t.Fatal("지운 row가 워터마크 뒤에 있다")
+	}
+	txid, err := strconv.ParseUint(ourMax, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := f.watermark(t)
+	c.TxID, c.Ordinal = txid, -1
+	if _, err := Read(ctx, f.pool, f.user, c, 0); !errors.Is(err, ErrCursorExpired) {
+		t.Fatalf("워터마크 이하 cursor err = %v, want ErrCursorExpired", err)
+	}
+}
