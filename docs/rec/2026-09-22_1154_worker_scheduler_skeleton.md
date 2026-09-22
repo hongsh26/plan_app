@@ -76,7 +76,7 @@ code-reviewer(opus) 판정: **조건부 MERGE-READY.** High 0, Medium 7, Low 11.
 - L3 종료가 잦으면 오래 걸리는 job이 dead에 도달하지 못한다(반납이 시도를 되돌린다). 반납 횟수 상한
 - L4 scheduler가 작업을 순차로 돌려 sync_prune(최대 10분) 동안 1분 주기 정체 감시가 늦어진다
 - L6 sync prune batch에 ORDER BY가 없어 첫 batch에서 워터마크가 크게 뛸 수 있다. 정확성은 맞다
-- L7 운영 데이터가 생긴 뒤 추가하는 index는 `NO TRANSACTION` + `CONCURRENTLY`로 만든다(00006 주석에 적었다)
+- L7 운영 데이터가 생긴 뒤 추가하는 index는 goose `NO TRANSACTION` 지시어 + `CONCURRENTLY`로 만든다(00006 주석에 적었다). 주석 줄에 goose 지시어 표기를 그대로 쓰면 지시어로 파싱되어 마이그레이션이 실패한다(CI run `35682068409`에서 한 번 실패)
 - L8 api 역할도 default privileges로 `scheduled_tasks` DML을 받는다. 마이그레이션은 역할 이름을 쓰지 않는 규약이라 배포 단계에서 역할 권한 방식과 함께 정한다
 - L9 `WORKER_BATCH_SIZE`(최대 100)와 `DATABASE_MAX_CONNS`(기본 10)의 관계를 검증하지 않는다
 - L10 구현 계획 7단계의 "EventKit 쓰기를 기기 실행 서버 명령으로 모델링"과 §9 scheduler 역할(만료 초대, 알림 예약, 장기 작업 복구, 삭제 시작)은 해당 기능 단계에서 들어온다
