@@ -35,7 +35,6 @@
 - **KMS 구현.** 이것이 없으면 api는 `APP_ENV=local`이 아닐 때 기동을 거부한다. 스테이징·프로덕션 배포는 여기에 막혀 있다. 구현할 때 api 역할은 암호화 권한만 갖고, 복호화는 삭제 worker만 할 수 있어야 한다(§11)
 - 계정 삭제 요청(`DELETE /v1/me`)과 §10 삭제 파이프라인. worker 없이 넣으면 계정이 `deletion_requested`에 갇힌다. 위 잠금 규약을 지키고, 상태 변경과 세션 전체 폐기를 한 트랜잭션에서 한다
 - 인증 rate limit (§11). 인증 없는 로그인 실패마다 `audit_events`가 쌓이는 문제도 여기서 막는다
-- 만료·폐기된 `sessions` row와 만료된 `idempotency_keys` row 정리 (scheduler)
 - OpenAPI 스키마와 실제 응답의 자동 대조 (§15 API 계약 테스트)
 - 로그인·refresh와 계정 상태 변경의 동시성 테스트(`FOR SHARE OF u` 회귀 감지). 계정 삭제와 함께
 - Apple 서버 쪽 오류(`invalid_client` 등)가 HTTP 500과 `apple_error` 로그 필드로 나가는지 보는 HTTP 계층 테스트. 서비스 계층 테스트만 있다
@@ -54,8 +53,23 @@
 
 - `GET /v1/sync`(settled horizon), `GET /v1/sync/bootstrap`, `notification_ref_key`(bootstrap·`/v1/me`)
 - **§15 순서 역전 회귀 테스트가 들어갔다.** horizon 조건을 지우면 실패한다
-- 정리 워터마크(00004)와 `Prune` 함수. **scheduler에 아직 연결하지 않았다**
+- 정리 워터마크(00004)와 `Prune` 함수. scheduler의 `sync_prune`으로 연결했다
 - sync 읽기는 primary에서 해야 한다. 같은 timeline 안의 파일시스템 스냅샷 복구는 cursor 세대로 감지되지 않으므로 운영 절차로 전체 재동기화를 강제한다
+
+### worker·scheduler 골격 진행 상황
+
+`feature/worker-scheduler`에서 구현했다. 독립 리뷰(조건부 MERGE-READY)를 받아 M1·M3·M6·M7·L1·L2·L5를 반영했다. 상세와 미룬 지적 전체는 `docs/rec/2026-09-22_1154_worker_scheduler_skeleton.md`에 있다.
+
+- `internal/platform/jobs`(outbox 점유·펜싱·재시도·dead), `internal/platform/schedule`(scheduled_tasks lease), scheduler 작업 5개(sync·세션·idempotency·끝난 job 정리, 정체 감시)
+- 결과 로그는 기록이 커밋됐을 때만 남는다. 경보 규칙이 잡을 값: `result=dead`, `result=dead_failed`, `result=stalled`
+- handler·작업 기한은 lease보다 7초 짧다. `WORKER_LEASE_DURATION`·`Task.Timeout` 최솟값 17s
+- 아직 등록된 job 종류가 없다
+
+**첫 job 종류(계정 삭제) 등록 전에 해야 하는 것:**
+
+- M2: OnDead가 계속 실패하면 handler가 다시 돌고, max를 넘으면 Kill 롤백이 lease마다 되풀이된다. OnDead를 가진 첫 종류와 함께 방식을 정한다
+- M4: batch 전체가 끝나야 다음 점유를 한다. 세마포어 + 연속 점유 루프로 바꾼다
+- **M5(지금 돌고 있는 경로): `session_prune`이 살아 있는 family의 옛 row를 영원히 남긴다.** 보존 상한 N일과 "N일 넘은 token 재사용은 탐지하지 않는다"를 설계 §5.2에 정해야 한다. 사용자 결정이 필요하다
 
 ### P0에서 남은 것
 
@@ -77,7 +91,7 @@
 
 ## 다음 작업
 
-1. worker·scheduler 골격(구현 계획 7단계): outbox 소비(lease, 재시도, dead), `Prune` 정기 실행, 세션·idempotency 정리. 그 위에 계정 삭제(`DELETE /v1/me`와 §10 파이프라인). 그 다음 의존성 순서대로 기능별 브랜치에서 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
+1. `feature/worker-scheduler`를 CI 통과·재검증 뒤 `main`에 병합한다. 그 다음 M5의 N을 정하고, M2·M4를 고친 뒤 계정 삭제(`DELETE /v1/me`와 §10 파이프라인)를 첫 job 종류로 올린다. 그 다음 의존성 순서대로 기능별 브랜치에서 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
 2. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.
 
 ## 유의 사항

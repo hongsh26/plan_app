@@ -101,6 +101,9 @@ const (
 	MigrationDatabaseURLEnv = "MIGRATION_DATABASE_URL"
 )
 
+// MinWorkerLease는 WORKER_LEASE_DURATION의 최솟값이다. jobs.MinLease와 같아야 한다.
+const MinWorkerLease = 17 * time.Second
+
 // Load는 역할에 맞는 설정을 읽고 검증한다. 문제가 하나라도 있으면 Config를
 // 반환하지 않는다. 누락·형식 오류는 모두 모아 한 번에 보고한다. 운영자가 한
 // 변수를 고치고 다시 기동했다가 다음 변수에서 또 실패하는 왕복을 없앤다.
@@ -126,6 +129,10 @@ func Load(role Role, lookup Lookup) (Config, error) {
 	case RoleWorker:
 		cfg.PollInterval = v.optionalDuration(envPollInterval, 5*time.Second)
 		cfg.WorkerLease = v.optionalDuration(envWorkerLease, time.Minute)
+		// jobs.MinLease와 같다. config가 jobs에 의존하지 않도록 값을 적는다(jobs 테스트가 대조한다).
+		if cfg.WorkerLease > 0 && cfg.WorkerLease < MinWorkerLease {
+			v.addf("%s는 %s 이상이어야 한다(handler 기한과 결과 기록이 lease 안에 끝나야 한다)", envWorkerLease, MinWorkerLease)
+		}
 		cfg.WorkerBatchSize = v.optionalInt(envWorkerBatchSize, 10, 1, 100)
 	case RoleScheduler:
 		cfg.PollInterval = v.optionalDuration(envPollInterval, 5*time.Second)
