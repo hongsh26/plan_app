@@ -12,9 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Runner는 worker 루프다. 점유한 batch를 동시에 처리하고, batch가 비지 않았으면
-// 기다리지 않고 곧바로 다음 batch를 점유한다(§12 "도메인 이벤트 commit 후 5초 이내
-// worker 대상화").
+// Runner는 worker 루프다. 점유한 batch를 동시에 처리하고, batch가 끝난 뒤 다음
+// batch를 점유한다. 연속 점유는 첫 job 종류를 등록하기 전에 보완한다.
 type Runner struct {
 	Pool  *pgxpool.Pool
 	Kinds map[string]Kind
