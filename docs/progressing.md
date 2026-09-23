@@ -58,7 +58,7 @@
 
 ### worker·scheduler 골격 진행 상황
 
-`feature/worker-scheduler`에서 구현했다. 독립 리뷰(조건부 MERGE-READY)를 받아 M1·M3·M6·M7·L1·L2·L5를 반영했다. 상세와 미룬 지적 전체는 `docs/rec/2026-09-22_1154_worker_scheduler_skeleton.md`에 있다.
+`feature/worker-scheduler`에서 구현하고 독립 재검증과 CI를 통과한 뒤 PR #2로 `main`에 병합했다. 리뷰의 M1·M3·M6·M7·L1·L2·L5를 반영했다. 상세와 미룬 지적 전체는 `docs/rec/2026-09-22_1154_worker_scheduler_skeleton.md`에 있다.
 
 - `internal/platform/jobs`(outbox 점유·펜싱·재시도·dead), `internal/platform/schedule`(scheduled_tasks lease), scheduler 작업 5개(sync·세션·idempotency·끝난 job 정리, 정체 감시)
 - 결과 로그는 기록이 커밋됐을 때만 남는다. 경보 규칙이 잡을 값: `result=dead`, `result=dead_failed`, `result=stalled`
@@ -91,7 +91,7 @@
 
 ## 다음 작업
 
-1. `feature/worker-scheduler`를 CI 통과·재검증 뒤 `main`에 병합한다. 그 다음 M5의 N을 정하고, M2·M4를 고친 뒤 계정 삭제(`DELETE /v1/me`와 §10 파이프라인)를 첫 job 종류로 올린다. 그 다음 의존성 순서대로 기능별 브랜치에서 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
+1. M5의 세션 보존 상한 N을 정하고 설계 §5.2에 반영한다. 이어 M2·M4를 고친 뒤 계정 삭제(`DELETE /v1/me`와 §10 파이프라인)를 첫 job 종류로 올린다. 그 다음 의존성 순서대로 기능별 브랜치에서 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
 2. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.
 
 ## 유의 사항
