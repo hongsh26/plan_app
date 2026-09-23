@@ -48,13 +48,15 @@
 
 ## 검증
 
-- 로컬: `go vet ./...`, `REQUIRE_DB_TESTS=1 go test -count=1 ./...` 전체 PASS (2026-09-22, 리뷰 반영 후)
-- 원격 CI: `b47947e` run `35582846592` success. 리뷰 반영 커밋의 run은 push 뒤 확인한다
+- 로컬: `go vet ./...`, `REQUIRE_DB_TESTS=1 go test -count=1 ./...` 전체 PASS (2026-09-23, 최종 재검증)
+- 원격 CI: 최종 feature HEAD `91d50ec`의 push run `35820886698`와 PR run `35821028230` 모두 success. `gofmt`, `go vet`, PostgreSQL 통합 테스트, skip 0, 마이그레이션 왕복과 기동 가드를 통과했다
 - 새 테스트가 회귀를 잡는지 확인했다. handler 기한을 `Lease`로 되돌리거나 Permanent 판정을 종료 반납 뒤로 옮기면 해당 테스트가 실패한다
 
 ## 독립 리뷰
 
 code-reviewer(opus) 판정: **조건부 MERGE-READY.** High 0, Medium 7, Low 11. 조건은 문서 기록과 M1이었다.
+
+최종 verifier 재검증은 `git diff --check main...HEAD`, worker 주석과 M4 실제 범위, 문서 일관성, jobs 통합 테스트를 다시 확인하고 **MERGE-READY**로 판정했다. PR #2를 rebase 방식으로 2026-09-23 `main`에 병합했다(`f6e6cc1`).
 
 ### 반영한 것
 
