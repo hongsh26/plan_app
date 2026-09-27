@@ -25,6 +25,7 @@ func TestPruneSessionsKeepsFamiliesWithALiveSession(t *testing.T) {
 
 	cutoff := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 	past := cutoff.Add(-24 * time.Hour)
+	tooOld := cutoff.Add(-SessionReuseRetention - time.Hour)
 	future := cutoff.Add(24 * time.Hour)
 	insert := func(family uuid.UUID, expires time.Time, used, revoked bool) uuid.UUID {
 		id := uuid.New()
@@ -48,6 +49,11 @@ func TestPruneSessionsKeepsFamiliesWithALiveSession(t *testing.T) {
 	liveFamily := uuid.New()
 	usedOld := insert(liveFamily, past, true, false)
 	current := insert(liveFamily, future, false, false)
+	// 같은 살아 있는 family여도 탐지 상한을 넘긴 token은 삭제된다.
+	veryOld := insert(liveFamily, tooOld, true, false)
+	if _, err := pool.Exec(ctx, `UPDATE sessions SET used_at = $2 WHERE id = $1`, veryOld, tooOld); err != nil {
+		t.Fatal(err)
+	}
 	// 끝난 family: 모두 만료됐거나 폐기됐다.
 	deadFamily := uuid.New()
 	deadUsed := insert(deadFamily, past, true, false)
@@ -74,6 +80,7 @@ func TestPruneSessionsKeepsFamiliesWithALiveSession(t *testing.T) {
 		want bool
 	}{
 		{"살아 있는 family의 만료된 쓴 세션", usedOld, true},
+		{"살아 있는 family의 보존 상한 지난 세션", veryOld, false},
 		{"살아 있는 세션", current, true},
 		{"끝난 family의 만료된 세션", deadUsed, false},
 		{"폐기됐지만 만료 전 세션", deadRevoked, true},

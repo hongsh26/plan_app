@@ -30,13 +30,12 @@
 - 통합 테스트는 api 런타임 역할로 접속한다. 원격 CI: 리뷰 전 `db04442` run `35572217145` PASS 152·SKIP 0, 리뷰 반영 `2d2ef70` run `35572702395` PASS 166·SKIP 0(KMS 기동 거부 스텝 포함)
 - **잠금 규약: `users` → `devices` → `sessions`, 그리고 `users`·`devices` row에는 `FOR UPDATE`를 쓰지 않는다(읽기 잠금은 `FOR SHARE`, 수정 잠금은 `FOR NO KEY UPDATE`).** mutation helper의 `idempotency_keys` INSERT가 FK 검사로 두 row에 KEY SHARE를 먼저 걸기 때문이다(`docs/rec/2026-09-21_1651_mutation_helper.md`). 계정 삭제도 이 규약을 따라야 한다
 
-**P1에서 의도적으로 미룬 것 (잊으면 안 되는 것):**
+**P1 이후 아직 남은 것 (잊으면 안 되는 것):**
 
 - **KMS 구현.** 이것이 없으면 api는 `APP_ENV=local`이 아닐 때 기동을 거부한다. 스테이징·프로덕션 배포는 여기에 막혀 있다. 구현할 때 api 역할은 암호화 권한만 갖고, 복호화는 삭제 worker만 할 수 있어야 한다(§11)
-- 계정 삭제 요청(`DELETE /v1/me`)과 §10 삭제 파이프라인. worker 없이 넣으면 계정이 `deletion_requested`에 갇힌다. 위 잠금 규약을 지키고, 상태 변경과 세션 전체 폐기를 한 트랜잭션에서 한다
 - 인증 rate limit (§11). 인증 없는 로그인 실패마다 `audit_events`가 쌓이는 문제도 여기서 막는다
 - OpenAPI 스키마와 실제 응답의 자동 대조 (§15 API 계약 테스트)
-- 로그인·refresh와 계정 상태 변경의 동시성 테스트(`FOR SHARE OF u` 회귀 감지). 계정 삭제와 함께
+- 로그인·refresh와 계정 상태 변경의 동시성 테스트(`FOR SHARE OF u` 회귀 감지)
 - Apple 서버 쪽 오류(`invalid_client` 등)가 HTTP 500과 `apple_error` 로그 필드로 나가는지 보는 HTTP 계층 테스트. 서비스 계층 테스트만 있다
 
 ### mutation helper 진행 상황
@@ -60,16 +59,14 @@
 
 `feature/worker-scheduler`에서 구현하고 독립 재검증과 CI를 통과한 뒤 PR #2로 `main`에 병합했다. 리뷰의 M1·M3·M6·M7·L1·L2·L5를 반영했다. 상세와 미룬 지적 전체는 `docs/rec/2026-09-22_1154_worker_scheduler_skeleton.md`에 있다.
 
-- `internal/platform/jobs`(outbox 점유·펜싱·재시도·dead), `internal/platform/schedule`(scheduled_tasks lease), scheduler 작업 5개(sync·세션·idempotency·끝난 job 정리, 정체 감시)
+- `internal/platform/jobs`(outbox 점유·펜싱·재시도·dead), `internal/platform/schedule`(scheduled_tasks lease), scheduler 작업 6개(sync·세션·idempotency·끝난 job·audit tombstone 정리, 정체 감시)
 - 결과 로그는 기록이 커밋됐을 때만 남는다. 경보 규칙이 잡을 값: `result=dead`, `result=dead_failed`, `result=stalled`
 - handler·작업 기한은 lease보다 7초 짧다. `WORKER_LEASE_DURATION`·`Task.Timeout` 최솟값 17s
-- 아직 등록된 job 종류가 없다
-
-**첫 job 종류(계정 삭제) 등록 전에 해야 하는 것:**
-
-- M2: OnDead가 계속 실패하면 handler가 다시 돌고, max를 넘으면 Kill 롤백이 lease마다 되풀이된다. OnDead를 가진 첫 종류와 함께 방식을 정한다
-- M4: batch 전체가 끝나야 다음 점유를 한다. 세마포어 + 연속 점유 루프로 바꾼다
-- **M5(지금 돌고 있는 경로): `session_prune`이 살아 있는 family의 옛 row를 영원히 남긴다.** 보존 상한 N일과 "N일 넘은 token 재사용은 탐지하지 않는다"를 설계 §5.2에 정해야 한다. 사용자 결정이 필요하다
+- 첫 job 종류로 `account_deletion`을 등록했다. `DELETE /v1/me`는 접근 차단·세션/기기 폐기·sync projection·audit·dedupe job enqueue를 한 mutation transaction에서 수행한다. worker는 현 스키마에 존재하는 데이터(users/devices/sessions/auth_identities/audit)를 `deletion_requested -> deleting -> deleted`로 수렴시킨다. 아직 없는 Party/calendar/proposal 데이터 정리는 후속 테이블 구현 범위다
+- M2: `dead_pending` 상태를 추가해 OnDead 실패 뒤 handler를 다시 실행하지 않고 finalization만 backoff 재시도한다. active dedupe와 fencing에 포함된다
+- M4: worker는 `BatchSize` 동시성 상한 안에서 빈 슬롯이 생기면 batch 전체를 기다리지 않고 즉시 다음 job을 점유한다
+- M5: 사용된 refresh token 해시는 `used_at`부터 90일 보존한다. 이후에는 활성 family 안에서도 정리하며 오래된 token 재사용은 일반 무효 token으로 처리한다
+- 익명화한 audit tombstone은 90일 뒤 scheduler가 batch 삭제한다
 
 ### P0에서 남은 것
 
@@ -91,7 +88,7 @@
 
 ## 다음 작업
 
-1. M5의 세션 보존 상한 N을 정하고 설계 §5.2에 반영한다. 이어 M2·M4를 고친 뒤 계정 삭제(`DELETE /v1/me`와 §10 파이프라인)를 첫 job 종류로 올린다. 그 다음 의존성 순서대로 기능별 브랜치에서 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
+1. 의존성 순서대로 기능별 브랜치에서 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
 2. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.
 
 ## 유의 사항

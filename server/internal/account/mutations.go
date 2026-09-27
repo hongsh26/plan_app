@@ -47,6 +47,8 @@ func (h *Handler) run(w http.ResponseWriter, r *http.Request, p auth.Principal, 
 	}
 	switch {
 	case mutation.WriteError(w, r, err):
+	case errors.Is(err, auth.ErrAccountLocked):
+		httpapi.WriteError(w, r, http.StatusLocked, httpapi.CodeAccountLocked, "계정이 비활성화됐거나 삭제 중이다")
 	case errors.Is(err, errNotFound):
 		httpapi.WriteError(w, r, http.StatusNotFound, httpapi.CodeNotFound, "대상을 찾을 수 없다")
 	default:

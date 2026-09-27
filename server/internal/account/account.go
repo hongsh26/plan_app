@@ -1,14 +1,10 @@
 // Package account는 사용자 자신의 계정과 기기 조회를 제공한다.
 //
 // 조회: GET /v1/me, GET /v1/devices
-// 변경: PATCH /v1/me, DELETE /v1/devices/{id}, PUT /v1/devices/{id}/push-token
+// 변경: PATCH /v1/me, DELETE /v1/me, DELETE /v1/devices/{id}, PUT /v1/devices/{id}/push-token
 //
 // 변경은 모두 internal/platform/mutation을 거친다. Idempotency-Key와 If-Match가
 // 필수이고, 도메인 변경과 sync 변경이 한 트랜잭션에서 커밋된다.
-//
-// DELETE /v1/me(계정 삭제 요청)는 아직 없다. §10 파이프라인을 진행시킬 worker가
-// 없는 상태에서 만들면 요청한 계정이 deletion_requested에 영구히 갇힌다.
-// §5.3은 유예 기간 없이 즉시 차단하라고 하므로 되돌릴 방법도 없다.
 package account
 
 import (
@@ -68,6 +64,7 @@ func NewHandler(d Deps) *Handler {
 func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.Handler) {
 	mux.Handle("GET /v1/me", require(http.HandlerFunc(h.getMe)))
 	mux.Handle("PATCH /v1/me", require(http.HandlerFunc(h.patchMe)))
+	mux.Handle("DELETE /v1/me", require(http.HandlerFunc(h.deleteMe)))
 	mux.Handle("GET /v1/devices", require(http.HandlerFunc(h.listDevices)))
 	mux.Handle("DELETE /v1/devices/{id}", require(http.HandlerFunc(h.deleteDevice)))
 	mux.Handle("PUT /v1/devices/{id}/push-token", require(http.HandlerFunc(h.putPushToken)))

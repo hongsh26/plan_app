@@ -2,9 +2,8 @@ openapi: 3.1.0
 
 # P1 인증 범위까지의 계약을 담는다.
 #
-# 담긴 것: 운영 health endpoint, 인증(§5), 계정·기기 조회와 변경.
-# 아직 없는 것: DELETE /v1/me(삭제 파이프라인과 함께), POST /v1/sync(mutation 배치),
-# calendar-write-commands.
+# 담긴 것: 운영 health endpoint, 인증(§5), 계정·기기 조회와 변경, 계정 삭제 요청.
+# 아직 없는 것: POST /v1/sync(mutation 배치), calendar-write-commands.
 # 구현보다 계약을 먼저 적으면 handler와 어긋난 채로 남기 쉽다.
 #
 # 모든 mutation은 Idempotency-Key 헤더가 필수다(인증 endpoint 제외). 수정·삭제는
@@ -204,6 +203,35 @@ paths:
           headers:
             Idempotent-Replayed:
               $ref: "#/components/headers/IdempotentReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "423":
+          $ref: "#/components/responses/AccountLocked"
+    delete:
+      summary: 계정 삭제 요청
+      description: |
+        §10. 빈 body로 보낸다. 한 트랜잭션에서 계정을 deletion_requested로 바꾸고,
+        모든 세션과 기기를 폐기하며 account_deletion job을 enqueue한다.
+
+        성공하면 access token의 기기가 즉시 폐기되므로 같은 요청을 재전송해도
+        idempotency replay까지 가지 않고 인증 계층에서 401 invalid_session 또는
+        423 account_locked로 차단된다.
+      operationId: deleteMe
+      tags: [account]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "202":
+          description: 삭제 요청이 접수됐다. 본문은 deletion_requested 상태의 현재 사용자다.
           content:
             application/json:
               schema:

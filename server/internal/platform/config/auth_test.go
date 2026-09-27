@@ -110,3 +110,35 @@ func TestLoadAuthRequiresEncryptionKey(t *testing.T) {
 		t.Errorf("code 교환 설정이 잘못 읽혔다: %+v", s)
 	}
 }
+
+func TestLoadWorkerAuthDoesNotRequireAccessSigningKey(t *testing.T) {
+	env := authEnv()
+	delete(env, "ACCESS_TOKEN_SIGNING_KEY")
+	env["APPLE_TEAM_ID"], env["APPLE_KEY_ID"], env["APPLE_PRIVATE_KEY"] = "TEAM", "KEY", "-----BEGIN PRIVATE KEY-----"
+
+	s, err := LoadWorkerAuth(EnvLocal, FromMap(env))
+	if err != nil {
+		t.Fatalf("worker auth 설정을 거부했다: %v", err)
+	}
+	if s.AppleClientID != "com.example.plantogether" || len(s.TokenEncryptionKey) != 32 {
+		t.Fatalf("worker auth 설정 값이 잘못 읽혔다: %+v", s)
+	}
+	if s.AppleCodeExchange == nil || s.AppleCodeExchange.TeamID != "TEAM" {
+		t.Fatalf("Apple revoke 자격이 읽히지 않았다: %+v", s.AppleCodeExchange)
+	}
+}
+
+func TestLoadWorkerAuthRefusesNonLocalAndPartialAppleCredentials(t *testing.T) {
+	if _, err := LoadWorkerAuth(EnvProduction, FromMap(authEnv())); !errors.Is(err, ErrKMSNotImplemented) {
+		t.Fatalf("production worker auth err = %v, want ErrKMSNotImplemented", err)
+	}
+
+	env := authEnv()
+	env["APPLE_TEAM_ID"] = "TEAM"
+	if _, err := LoadWorkerAuth(EnvLocal, FromMap(env)); err == nil ||
+		!strings.Contains(err.Error(), "APPLE_TEAM_ID") ||
+		!strings.Contains(err.Error(), "APPLE_KEY_ID") ||
+		!strings.Contains(err.Error(), "APPLE_PRIVATE_KEY") {
+		t.Fatalf("partial Apple 자격 오류가 올바르지 않다: %v", err)
+	}
+}

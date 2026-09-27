@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plantogether/server/internal/auth"
+	"plantogether/server/internal/platform/audit"
 	"plantogether/server/internal/platform/jobs"
 	"plantogether/server/internal/platform/mutation"
 	"plantogether/server/internal/platform/schedule"
@@ -61,6 +62,12 @@ func tasks(pool *pgxpool.Pool, logger *slog.Logger) []schedule.Task {
 			Name: "outbox_prune", Interval: time.Hour, Timeout: 5 * time.Minute,
 			Run: cleanup("outbox_prune", func(ctx context.Context) (int64, error) {
 				return jobs.PruneSucceeded(ctx, pool, time.Now().Add(-succeededJobRetention), cleanupBatch)
+			}),
+		},
+		{
+			Name: "audit_tombstone_prune", Interval: time.Hour, Timeout: 5 * time.Minute,
+			Run: cleanup("audit_tombstone_prune", func(ctx context.Context) (int64, error) {
+				return audit.PruneTombstones(ctx, pool, time.Now().Add(-audit.TombstoneRetention), cleanupBatch)
 			}),
 		},
 		{

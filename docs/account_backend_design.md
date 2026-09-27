@@ -129,6 +129,7 @@ API ── server device id + access token + rotating refresh token ──▶ iO
 - Refresh token: 256-bit 이상 난수 opaque token, 기본 30일, DB에는 해시만 저장.
 - Refresh 성공 시 이전 토큰을 폐기하고 새 토큰으로 회전한다.
 - 이미 사용된 refresh token이 재사용되면 해당 기기의 token family 전체를 폐기한다.
+- 재사용 탐지용으로 사용된 refresh token 해시는 `used_at`부터 90일간 보존한다. 90일이 지나면 같은 family에 활성 세션이 있어도 삭제하며, 그보다 오래된 token의 재사용은 family 탈취로 탐지하지 않고 일반 무효 token으로 처리한다. Refresh token 기본 수명(30일)의 3배를 탐지 창으로 두어 장기 무한 증가를 막는다.
 - iOS는 토큰을 Keychain에 저장하고 로그·분석 이벤트에 기록하지 않는다.
 - device ID는 최초 로그인 때 서버가 발급하고 access/session에 결합한다. 클라이언트가 임의 device ID를 권한 근거로 만들 수 없다.
 - 로그아웃은 현재 기기 세션만 폐기한다. 사용자는 설정에서 다른 기기 세션을 조회하고 폐기할 수 있다.
