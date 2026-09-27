@@ -160,7 +160,7 @@ func (t *Tx) Enqueue(ctx context.Context, j Job) error {
 	_, err = t.Exec(ctx, `
 		INSERT INTO outbox_jobs (id, type, payload, dedupe_key)
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (type, dedupe_key) WHERE status IN ('pending', 'running', 'retryable_failed')
+		ON CONFLICT (type, dedupe_key) WHERE status IN ('pending', 'running', 'retryable_failed', 'dead_pending')
 		DO NOTHING`,
 		uuid.New(), j.Type, payload, j.DedupeKey)
 	return err

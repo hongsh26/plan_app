@@ -12,8 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Runner는 worker 루프다. 점유한 batch를 동시에 처리하고, batch가 끝난 뒤 다음
-// batch를 점유한다. 연속 점유는 첫 job 종류를 등록하기 전에 보완한다.
+// Runner는 worker 루프다. BatchSize만큼 동시에 처리하고, 빈 슬롯이 생기면 곧바로
+// 새 job을 점유한다.
 type Runner struct {
 	Pool  *pgxpool.Pool
 	Kinds map[string]Kind
@@ -81,31 +81,77 @@ func (r *Runner) Run(ctx context.Context) error {
 	})
 	defer stop()
 
-	for {
-		if ctx.Err() != nil {
-			return nil
-		}
-		n, err := r.runBatch(ctx, work)
-		if err != nil && ctx.Err() == nil {
-			r.Logger.Warn("job 점유 실패",
-				slog.String("action", "job_claim"),
-				slog.String("result", "failure"),
-				slog.String("error", err.Error()))
-		}
-		if n > 0 && err == nil {
-			continue
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(r.PollInterval):
-		}
-	}
+	return r.runLoop(ctx, work)
 }
 
 // RunOnce는 batch 하나를 점유해 처리하고 처리한 수를 돌려준다. 테스트와 수동 실행용이다.
 func (r *Runner) RunOnce(ctx context.Context) (int, error) {
 	return r.runBatch(ctx, ctx)
+}
+
+func (r *Runner) runLoop(ctx, work context.Context) error {
+	types := r.types()
+	done := make(chan struct{}, r.BatchSize)
+	var wg sync.WaitGroup
+	inFlight := 0
+	wait := func(d time.Duration) bool {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-done:
+			inFlight--
+			return true
+		case <-timer.C:
+			return true
+		}
+	}
+
+	for {
+		if ctx.Err() != nil {
+			wg.Wait()
+			return nil
+		}
+		if inFlight >= r.BatchSize {
+			select {
+			case <-ctx.Done():
+				wg.Wait()
+				return nil
+			case <-done:
+				inFlight--
+				continue
+			}
+		}
+
+		limit := r.BatchSize - inFlight
+		deadline := time.Now().Add(r.handlerBudget())
+		jobs, err := Claim(ctx, r.Pool, types, limit, r.Lease)
+		if err != nil {
+			if ctx.Err() == nil {
+				r.Logger.Warn("job 점유 실패",
+					slog.String("action", "job_claim"),
+					slog.String("result", "failure"),
+					slog.String("error", err.Error()))
+				wait(r.PollInterval)
+			}
+			continue
+		}
+		for _, j := range jobs {
+			inFlight++
+			wg.Go(func() {
+				defer func() { done <- struct{}{} }()
+				r.process(work, deadline, j)
+			})
+		}
+		if len(jobs) == limit {
+			continue
+		}
+		if !wait(r.PollInterval) {
+			wg.Wait()
+			return nil
+		}
+	}
 }
 
 // runBatch는 claimCtx로 점유하고 work로 handler를 돌린다.
@@ -166,6 +212,15 @@ func (r *Runner) process(work context.Context, deadline time.Time, j Job) {
 		log.Error("job이 dead가 됐다",
 			slog.String("action", "job_run"), slog.String("result", "dead"),
 			slog.String("error", errorText(cause)))
+	}
+
+	if j.DeadPending {
+		cause := errors.New("dead finalization pending")
+		if j.LastError != nil {
+			cause = errors.New(*j.LastError)
+		}
+		kill(cause)
+		return
 	}
 
 	// 앞 시도가 lease 만료로 끝났고(worker crash나 handler 멈춤) 그것이 마지막 시도였다.

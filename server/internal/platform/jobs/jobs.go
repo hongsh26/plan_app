@@ -5,7 +5,8 @@
 //	pending ─┐
 //	         ├─ claim → running ─┬─ succeeded
 //	retryable_failed ─┘          ├─ retryable_failed (backoff 뒤 다시 claim)
-//	                             └─ dead
+//	                             └─ dead_pending ── OnDead 성공 → dead
+//	                                      └─ OnDead 실패 후 backoff 뒤 다시 claim
 //
 // 점유(claim)는 FOR UPDATE SKIP LOCKED와 locked_until lease다. worker가 죽어 status가
 // running인 채 lease가 지난 row도 다시 점유한다(§9 "worker crash 후 locked_until이
@@ -39,6 +40,10 @@ type Job struct {
 	Payload json.RawMessage
 	// Attempt는 이번 시도의 번호다. 첫 시도가 1이다.
 	Attempt int
+	// DeadPending이면 handler 판정은 끝났고 dead finalization만 남은 claim이다.
+	DeadPending bool
+	// LastError는 이전 handler가 남긴 실패 원인이다. 없을 수 있다.
+	LastError *string
 }
 
 // Handler는 job 하나를 처리한다. nil이면 succeeded, Permanent로 감싼 오류면 즉시
@@ -61,8 +66,8 @@ type Kind struct {
 	//
 	// §9 "영구 실패는 dead로 이동하고 사용자 조치가 필요한 상태를 sync feed에 기록한다"의
 	// 자리다. 사용자 조치 상태를 만드는 종류(캘린더 명령 등)가 여기서 도메인 상태와 sync
-	// 변경을 dead 전이와 원자적으로 쓴다. 오류를 돌려주면 dead 전이도 롤백되고 job은
-	// lease가 지난 뒤 다시 점유된다.
+	// 변경을 dead 전이와 원자적으로 쓴다. 오류를 돌려주면 job은 dead_pending에 남고
+	// backoff 뒤 OnDead만 다시 시도한다. handler는 다시 실행하지 않는다.
 	OnDead func(ctx context.Context, tx pgx.Tx, j Job) error
 }
 

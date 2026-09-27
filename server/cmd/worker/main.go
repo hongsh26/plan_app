@@ -15,10 +15,13 @@ import (
 	"os/signal"
 	"syscall"
 
+	"plantogether/server/internal/account"
+	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/config"
 	"plantogether/server/internal/platform/httpapi"
 	"plantogether/server/internal/platform/jobs"
 	"plantogether/server/internal/platform/postgres"
+	"plantogether/server/internal/platform/secretbox"
 )
 
 func main() {
@@ -34,6 +37,11 @@ func run() error {
 		return err
 	}
 
+	authSettings, err := config.LoadWorkerAuth(cfg.Env, config.FromEnv())
+	if err != nil {
+		return err
+	}
+
 	logger := httpapi.NewLogger(cfg.LogLevel, string(cfg.Role))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -45,13 +53,22 @@ func run() error {
 	}
 	defer pool.Close()
 
+	box, err := secretbox.NewLocal(cfg.Env, authSettings.TokenEncryptionKey)
+	if err != nil {
+		return err
+	}
+	deletion, err := newDeletionService(authSettings, pool, box, logger)
+	if err != nil {
+		return err
+	}
+
 	logger.Info("worker 기동",
 		slog.String("action", "startup"),
 		slog.String("env", cfg.Env),
 		slog.String("poll_interval", cfg.PollInterval.String()),
 	)
 
-	kinds := kinds()
+	kinds := kinds(deletion)
 	runner := &jobs.Runner{
 		Pool:            pool.Pool(),
 		Kinds:           kinds,
@@ -80,6 +97,31 @@ func run() error {
 
 // kinds는 이 worker가 처리하는 job 종류다. 여기 없는 종류는 점유하지 않는다
 // (jobs.Claim 문서의 롤링 배포 이유).
-func kinds() map[string]jobs.Kind {
-	return map[string]jobs.Kind{}
+func kinds(deletion *account.DeletionService) map[string]jobs.Kind {
+	return map[string]jobs.Kind{account.AccountDeletionJobType: deletion.JobKind()}
+}
+
+func newDeletionService(s config.WorkerAuthSettings, pool *postgres.Pool, box *secretbox.LocalAESGCM, logger *slog.Logger) (*account.DeletionService, error) {
+	var revoker account.AppleRevoker
+	if s.AppleCodeExchange != nil {
+		key, err := appleid.ParsePrivateKey(s.AppleCodeExchange.PrivateKeyPEM)
+		if err != nil {
+			return nil, err
+		}
+		client, err := appleid.NewClient(appleid.Credentials{
+			TeamID:     s.AppleCodeExchange.TeamID,
+			KeyID:      s.AppleCodeExchange.KeyID,
+			ClientID:   s.AppleClientID,
+			PrivateKey: key,
+		}, "", "", nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		revoker = client
+	} else {
+		logger.Warn("Apple revoke 자격이 꺼져 있다. Apple refresh token이 있는 계정 삭제 job은 dead가 된다 (로컬 전용)",
+			slog.String("action", "startup"),
+		)
+	}
+	return account.NewDeletionService(account.DeletionDeps{Pool: pool.Pool(), Opener: box, Apple: revoker})
 }

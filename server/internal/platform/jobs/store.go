@@ -26,29 +26,30 @@ func Claim(ctx context.Context, pool *pgxpool.Pool, types []string, limit int, l
 	rows, err := pool.Query(ctx, `
 		WITH c AS (
 			SELECT id FROM outbox_jobs
-			 WHERE status IN ('pending', 'retryable_failed', 'running')
+			 WHERE status IN ('pending', 'retryable_failed', 'running', 'dead_pending')
 			   AND next_run_at <= now()
-			   AND (status <> 'running' OR locked_until <= now())
+			   AND (status NOT IN ('running', 'dead_pending') OR locked_until IS NULL OR locked_until <= now())
 			   AND type = ANY($1)
 			 ORDER BY next_run_at
 			 LIMIT $2
 			   FOR UPDATE SKIP LOCKED
 		)
 		UPDATE outbox_jobs j
-		   SET status = 'running',
+		   SET status = CASE WHEN j.status = 'dead_pending' THEN 'dead_pending' ELSE 'running' END,
 		       locked_until = now() + make_interval(secs => $3),
 		       attempt_count = j.attempt_count + 1,
 		       updated_at = now()
 		  FROM c
 		 WHERE j.id = c.id
-		RETURNING j.id, j.type, j.payload, j.attempt_count`,
+		RETURNING j.id, j.type, j.payload, j.attempt_count,
+		          j.status = 'dead_pending', j.last_error`,
 		types, limit, lease.Seconds())
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Job, error) {
 		var j Job
-		err := r.Scan(&j.ID, &j.Type, &j.Payload, &j.Attempt)
+		err := r.Scan(&j.ID, &j.Type, &j.Payload, &j.Attempt, &j.DeadPending, &j.LastError)
 		return j, err
 	})
 }
@@ -59,6 +60,8 @@ var ErrLeaseLost = errors.New("jobs: lease를 잃었다")
 
 // fenced는 (id, running, attempt_count)가 이 시도와 같을 때만 row를 바꾼다.
 const fenced = `id = $1 AND status = 'running' AND attempt_count = $2`
+
+const deadPendingFenced = `id = $1 AND status = 'dead_pending' AND attempt_count = $2`
 
 func expectOne(tag interface{ RowsAffected() int64 }, err error) error {
 	if err != nil {
@@ -90,13 +93,40 @@ func Retry(ctx context.Context, pool *pgxpool.Pool, j Job, after time.Duration, 
 		 WHERE `+fenced, j.ID, j.Attempt, after.Seconds(), errorText(cause)))
 }
 
-// Kill은 job을 dead로 바꾼다. onDead가 있으면 같은 트랜잭션에서 부른다.
+// Kill은 job을 dead로 바꾼다. onDead가 있으면 dead 전이 트랜잭션에서 부른다.
+// onDead가 실패하면 job은 dead_pending에 남아 backoff 뒤 finalization만 다시 시도한다.
 func Kill(ctx context.Context, pool *pgxpool.Pool, j Job, cause error, onDead func(context.Context, pgx.Tx, Job) error) error {
-	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+	if !j.DeadPending {
+		if err := markDeadPending(ctx, pool, j, cause); err != nil {
+			return err
+		}
+		j.DeadPending = true
+	}
+	if cause == nil {
+		if j.LastError != nil {
+			cause = errors.New(*j.LastError)
+		} else {
+			cause = errors.New("dead finalization pending")
+		}
+	}
+	return finalizeDead(ctx, pool, j, cause, onDead)
+}
+
+func markDeadPending(ctx context.Context, pool *pgxpool.Pool, j Job, cause error) error {
+	return expectOne(pool.Exec(ctx, `
+		UPDATE outbox_jobs
+		   SET status = 'dead_pending',
+		       last_error = $3,
+		       updated_at = now()
+		 WHERE `+fenced, j.ID, j.Attempt, errorText(cause)))
+}
+
+func finalizeDead(ctx context.Context, pool *pgxpool.Pool, j Job, cause error, onDead func(context.Context, pgx.Tx, Job) error) error {
+	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if err := expectOne(tx.Exec(ctx, `
 			UPDATE outbox_jobs
 			   SET status = 'dead', locked_until = NULL, last_error = $3, updated_at = now()
-			 WHERE `+fenced, j.ID, j.Attempt, errorText(cause))); err != nil {
+			 WHERE `+deadPendingFenced, j.ID, j.Attempt, errorText(cause))); err != nil {
 			return err
 		}
 		if onDead == nil {
@@ -107,6 +137,22 @@ func Kill(ctx context.Context, pool *pgxpool.Pool, j Job, cause error, onDead fu
 		}
 		return nil
 	})
+	if err == nil || errors.Is(err, ErrLeaseLost) {
+		return err
+	}
+	if deferErr := deferDead(ctx, pool, j, Backoff(j.Attempt, nil)); deferErr != nil {
+		return errors.Join(err, deferErr)
+	}
+	return err
+}
+
+func deferDead(ctx context.Context, pool *pgxpool.Pool, j Job, after time.Duration) error {
+	return expectOne(pool.Exec(ctx, `
+		UPDATE outbox_jobs
+		   SET locked_until = NULL,
+		       next_run_at = now() + make_interval(secs => $3),
+		       updated_at = now()
+		 WHERE `+deadPendingFenced, j.ID, j.Attempt, after.Seconds()))
 }
 
 // Release는 끝내지 못한 시도의 lease를 반납한다. job은 곧바로 다시 점유될 수 있다.
@@ -132,9 +178,9 @@ func StalledCount(ctx context.Context, pool *pgxpool.Pool, olderThan time.Durati
 	var n int64
 	err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM outbox_jobs
-		 WHERE status IN ('pending', 'retryable_failed', 'running')
+		 WHERE status IN ('pending', 'retryable_failed', 'running', 'dead_pending')
 		   AND next_run_at <= now() - make_interval(secs => $1)
-		   AND (status <> 'running' OR locked_until <= now())`,
+		   AND (status NOT IN ('running', 'dead_pending') OR locked_until IS NULL OR locked_until <= now())`,
 		olderThan.Seconds()).Scan(&n)
 	return n, err
 }

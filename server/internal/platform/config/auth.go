@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// 인증 설정 환경 변수. api 역할만 읽는다.
+// 인증 설정 환경 변수. api와 worker 역할이 읽는다.
 const (
 	envAccessTokenSigningKey = "ACCESS_TOKEN_SIGNING_KEY"
 	envAppleClientID         = "APPLE_CLIENT_ID"
@@ -30,6 +30,13 @@ type AuthSettings struct {
 
 	// TokenEncryptionKey는 로컬 암호화 키다. Apple refresh token과 push token을
 	// 봉인한다(§11). 항상 필수다.
+	TokenEncryptionKey []byte
+}
+
+// WorkerAuthSettings는 worker가 Apple refresh token을 열고 revoke하는 데 필요한 설정이다.
+type WorkerAuthSettings struct {
+	AppleClientID      string
+	AppleCodeExchange  *AppleCodeExchangeSettings
 	TokenEncryptionKey []byte
 }
 
@@ -71,20 +78,49 @@ func LoadAuth(env string, lookup Lookup) (AuthSettings, error) {
 		TokenEncryptionKey:    v.requiredBase64Key(envTokenEncryptionKey, 32, 32),
 	}
 
-	teamID, hasTeam := nonEmpty(lookup, envAppleTeamID)
-	keyID, hasKey := nonEmpty(lookup, envAppleKeyID)
-	pemRaw, hasPEM := nonEmpty(lookup, envApplePrivateKey)
-	switch {
-	case hasTeam && hasKey && hasPEM:
-		s.AppleCodeExchange = &AppleCodeExchangeSettings{TeamID: teamID, KeyID: keyID, PrivateKeyPEM: []byte(pemRaw)}
-	case hasTeam || hasKey || hasPEM:
-		v.addf("%s, %s, %s는 모두 설정하거나 모두 비워야 한다", envAppleTeamID, envAppleKeyID, envApplePrivateKey)
-	}
+	s.AppleCodeExchange = optionalAppleCodeExchange(v, lookup)
 
 	if err := v.err(); err != nil {
 		return AuthSettings{}, err
 	}
 	return s, nil
+}
+
+// LoadWorkerAuth는 worker 역할의 삭제 pipeline 설정을 읽고 검증한다.
+//
+// worker는 access token을 발급하지 않으므로 ACCESS_TOKEN_SIGNING_KEY를 읽지 않는다.
+// Apple revoke는 로그인 code 교환과 같은 client secret 자격을 사용한다. 로컬에서
+// 자격이 없으면 token이 없는 개발 계정만 삭제할 수 있고, token이 있는 job은 dead가 된다.
+func LoadWorkerAuth(env string, lookup Lookup) (WorkerAuthSettings, error) {
+	if lookup == nil {
+		return WorkerAuthSettings{}, errors.New("config: lookup이 nil이다")
+	}
+	if env != EnvLocal {
+		return WorkerAuthSettings{}, ErrKMSNotImplemented
+	}
+	v := &validator{lookup: lookup}
+	s := WorkerAuthSettings{
+		AppleClientID:      v.requiredNonEmpty(envAppleClientID),
+		TokenEncryptionKey: v.requiredBase64Key(envTokenEncryptionKey, 32, 32),
+	}
+	s.AppleCodeExchange = optionalAppleCodeExchange(v, lookup)
+	if err := v.err(); err != nil {
+		return WorkerAuthSettings{}, err
+	}
+	return s, nil
+}
+
+func optionalAppleCodeExchange(v *validator, lookup Lookup) *AppleCodeExchangeSettings {
+	teamID, hasTeam := nonEmpty(lookup, envAppleTeamID)
+	keyID, hasKey := nonEmpty(lookup, envAppleKeyID)
+	pemRaw, hasPEM := nonEmpty(lookup, envApplePrivateKey)
+	switch {
+	case hasTeam && hasKey && hasPEM:
+		return &AppleCodeExchangeSettings{TeamID: teamID, KeyID: keyID, PrivateKeyPEM: []byte(pemRaw)}
+	case hasTeam || hasKey || hasPEM:
+		v.addf("%s, %s, %s는 모두 설정하거나 모두 비워야 한다", envAppleTeamID, envAppleKeyID, envApplePrivateKey)
+	}
+	return nil
 }
 
 func nonEmpty(lookup Lookup, key string) (string, bool) {

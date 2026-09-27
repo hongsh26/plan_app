@@ -303,18 +303,69 @@ func TestRunnerRecordsSuccessRetryAndDead(t *testing.T) {
 		}
 	})
 
-	t.Run("OnDead 실패는 dead 전이를 롤백한다", func(t *testing.T) {
+	t.Run("OnDead 실패는 dead_pending에서 finalization만 재시도한다", func(t *testing.T) {
 		f := newFx(t)
 		id := f.insert(t, 1)[0]
-		if _, err := f.runner(Kind{
-			Handler: func(context.Context, Job) error { return Permanent(errors.New("대상 없음")) },
-			OnDead:  func(context.Context, pgx.Tx, Job) error { return errors.New("sync 기록 실패") },
-		}).RunOnce(ctx); err != nil {
+		var handlerRuns atomic.Int32
+		var onDeadFails atomic.Bool
+		onDeadFails.Store(true)
+		var seenStatus string
+		r := f.runner(Kind{
+			Handler: func(context.Context, Job) error {
+				handlerRuns.Add(1)
+				return Permanent(errors.New("대상 없음"))
+			},
+			OnDead: func(context.Context, pgx.Tx, Job) error { return errors.New("sync 기록 실패") },
+		})
+		r.Kinds[f.typ] = Kind{
+			Handler: r.Kinds[f.typ].Handler,
+			OnDead: func(ctx context.Context, tx pgx.Tx, j Job) error {
+				if onDeadFails.Load() {
+					return errors.New("sync 기록 실패")
+				}
+				return tx.QueryRow(ctx, `SELECT status FROM outbox_jobs WHERE id = $1`, j.ID).Scan(&seenStatus)
+			},
+		}
+		if _, err := r.RunOnce(ctx); err != nil {
 			t.Fatal(err)
 		}
-		// lease가 지나면 다시 점유되어 dead 처리를 다시 시도한다.
-		if r := f.row(t, id); r.status != "running" || r.lockedUntil == nil {
-			t.Fatalf("상태 = %+v, want running(lease 대기)", r)
+		got := f.row(t, id)
+		if got.status != "dead_pending" || got.lockedUntil != nil || got.nextRunIn < backoffBase/2-2*time.Second {
+			t.Fatalf("상태 = %+v, want dead_pending(backoff)", got)
+		}
+		if handlerRuns.Load() != 1 {
+			t.Fatalf("handler 실행 횟수 = %d, want 1", handlerRuns.Load())
+		}
+
+		if _, err := f.pool.Exec(ctx, `UPDATE outbox_jobs SET next_run_at = now() WHERE id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		got = f.row(t, id)
+		if got.status != "dead_pending" || got.attempts != 2 {
+			t.Fatalf("상태 = %+v, want dead_pending 재시도", got)
+		}
+		if handlerRuns.Load() != 1 {
+			t.Fatalf("dead_pending claim이 handler를 다시 실행했다: %d", handlerRuns.Load())
+		}
+
+		onDeadFails.Store(false)
+		if _, err := f.pool.Exec(ctx, `UPDATE outbox_jobs SET next_run_at = now() WHERE id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.row(t, id); got.status != "dead" || got.attempts != 3 {
+			t.Fatalf("상태 = %+v, want dead", got)
+		}
+		if seenStatus != "dead" {
+			t.Fatalf("OnDead가 본 상태 = %q, want dead", seenStatus)
+		}
+		if handlerRuns.Load() != 1 {
+			t.Fatalf("finalization 성공까지 handler 실행 횟수 = %d, want 1", handlerRuns.Load())
 		}
 	})
 
@@ -365,6 +416,35 @@ func TestLeaseExpiryAfterLastAttemptGoesDeadWithoutRunning(t *testing.T) {
 	}
 	if r := f.row(t, id); r.status != "dead" || r.lastError == nil || !strings.Contains(*r.lastError, "lease") {
 		t.Fatalf("상태 = %+v", r)
+	}
+}
+
+func TestMarkDeadPendingKeepsCurrentLeaseUntilDeferred(t *testing.T) {
+	f := newFx(t)
+	id := f.insert(t, 1)[0]
+	ctx := context.Background()
+
+	claimed, err := Claim(ctx, f.pool, []string{f.typ}, 1, time.Minute)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("점유 = %v, %v", claimed, err)
+	}
+	if err := markDeadPending(ctx, f.pool, claimed[0], errors.New("대상 없음")); err != nil {
+		t.Fatal(err)
+	}
+
+	got := f.row(t, id)
+	if got.status != "dead_pending" || got.lockedUntil == nil {
+		t.Fatalf("상태 = %+v, want lease가 살아 있는 dead_pending", got)
+	}
+	if claimedAgain, err := Claim(ctx, f.pool, []string{f.typ}, 1, time.Minute); err != nil || len(claimedAgain) != 0 {
+		t.Fatalf("lease가 살아 있는 dead_pending을 다시 점유했다: %v, %v", claimedAgain, err)
+	}
+	if err := deferDead(ctx, f.pool, claimed[0], time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	got = f.row(t, id)
+	if got.lockedUntil != nil || got.nextRunIn < time.Minute-2*time.Second {
+		t.Fatalf("defer 후 상태 = %+v, want lock 해제 + backoff", got)
 	}
 }
 
@@ -445,8 +525,8 @@ func TestStalledCountAndPruneSucceeded(t *testing.T) {
 	// 0: 오래 밀린 pending, 1: 오래전에 끝난 succeeded, 2: 방금 끝난 succeeded,
 	// 3: 오래 밀렸지만 lease가 살아 있는 running(처리 중이므로 정체가 아니다),
 	// 4: 미래에 실행할 retryable_failed, 5: 오래 밀렸고 lease가 지난 running(worker가 죽었다),
-	// 6: 오래전에 dead(정체 감시 대상이 아니다)
-	ids := f.insert(t, 7)
+	// 6: 오래전에 dead(정체 감시 대상이 아니다), 7: 오래 밀린 dead_pending(OnDead 재시도 정체)
+	ids := f.insert(t, 8)
 	for i, q := range []string{
 		`UPDATE outbox_jobs SET next_run_at = now() - interval '1 hour' WHERE id = $1`,
 		`UPDATE outbox_jobs SET status = 'succeeded', updated_at = now() - interval '30 days' WHERE id = $1`,
@@ -455,6 +535,7 @@ func TestStalledCountAndPruneSucceeded(t *testing.T) {
 		`UPDATE outbox_jobs SET status = 'retryable_failed', next_run_at = now() + interval '1 hour' WHERE id = $1`,
 		`UPDATE outbox_jobs SET status = 'running', next_run_at = now() - interval '1 hour', locked_until = now() - interval '1 second' WHERE id = $1`,
 		`UPDATE outbox_jobs SET status = 'dead', next_run_at = now() - interval '1 hour' WHERE id = $1`,
+		`UPDATE outbox_jobs SET status = 'dead_pending', next_run_at = now() - interval '1 hour', locked_until = NULL WHERE id = $1`,
 	} {
 		if _, err := f.pool.Exec(ctx, q, ids[i]); err != nil {
 			t.Fatal(err)
@@ -462,8 +543,8 @@ func TestStalledCountAndPruneSucceeded(t *testing.T) {
 	}
 
 	after, err := StalledCount(ctx, f.pool, 15*time.Minute)
-	if err != nil || after-before != 2 {
-		t.Fatalf("StalledCount 증가 = %d, %v, want 2(밀린 pending과 lease가 지난 running)", after-before, err)
+	if err != nil || after-before != 3 {
+		t.Fatalf("StalledCount 증가 = %d, %v, want 3(밀린 pending, lease가 지난 running, dead_pending)", after-before, err)
 	}
 
 	if _, err := PruneSucceeded(ctx, f.pool, time.Now().Add(-7*24*time.Hour), 1); err != nil {

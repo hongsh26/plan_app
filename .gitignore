@@ -25,6 +25,7 @@ src/PlanTogether.xcodeproj/
 # README는 server/에서 작업하라고 하므로 `go build -o api ./cmd/api`의 산출물은
 # server/api다. 루트에 고정한 /api는 그걸 잡지 못한다.
 server/bin/
+server/.cache/
 server/api
 server/worker
 server/scheduler

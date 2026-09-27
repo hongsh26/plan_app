@@ -40,6 +40,7 @@ func (subjectApple) Verify(_ context.Context, idToken, _ string) (appleid.Identi
 type stack struct {
 	handler http.Handler
 	pool    *pgxpool.Pool
+	box     *secretbox.LocalAESGCM
 	logs    *bytes.Buffer
 }
 
@@ -66,7 +67,7 @@ func newStack(t *testing.T) *stack {
 		t.Fatal(err)
 	}
 	NewHandler(Deps{Pool: pool, Logger: logger, Sealer: box, RefKeyBox: box}).Register(mux, authHandler.Require)
-	return &stack{handler: httpapi.Wrap(logger, mux), pool: pool, logs: &logs}
+	return &stack{handler: httpapi.Wrap(logger, mux), pool: pool, box: box, logs: &logs}
 }
 
 func (s *stack) do(t *testing.T, method, path, token string, body any) *httptest.ResponseRecorder {
