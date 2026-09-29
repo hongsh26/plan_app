@@ -240,12 +240,10 @@ func TestSecondActiveOwnerIsRejectedImmediately(t *testing.T) {
 // §5.1: 활성 방장 unique index는 지연되지 않으므로 T4(위임)는 강등을 먼저 실행한 뒤
 // 승격해야 한다.
 //
-// 설계 §5.1은 "하나의 UPDATE ... CASE 문으로 처리할 수 없다"고 썼지만 실제로는
-// "처리해서는 안 된다"가 정확하다. 한 문장 안의 row 처리 순서는 보장되지 않아서,
-// 강등 row가 먼저 걸리면 통과하고 승격 row가 먼저 걸리면 실패한다. 즉 한 문장
-// 방식은 금지되는 것이 아니라 순서에 따라 결과가 갈린다. 그 때문에 한 문장 방식은
-// 어느 쪽으로도 단정할 수 없어 테스트하지 않는다. 대신 순서가 확정된 두 경로를
-// 본다: 승격 먼저는 반드시 실패하고, 강등 먼저는 반드시 통과한다.
+// 설계 §5.1은 한 문장 UPDATE ... CASE 방식이 row 처리 순서에 따라 결과가 갈려 믿을 수
+// 없다고 쓴다. 강등 row가 먼저 걸리면 통과하고 승격 row가 먼저 걸리면 실패한다. 그 때문에
+// 한 문장 방식은 어느 쪽으로도 단정할 수 없어 테스트하지 않는다. 대신 순서가 확정된 두
+// 경로를 본다: 승격 먼저는 반드시 실패하고, 강등 먼저는 반드시 통과한다.
 func TestOwnerTransferMustDemoteBeforePromote(t *testing.T) {
 	conn := connect(t)
 	ctx := context.Background()
@@ -679,4 +677,26 @@ func TestActivePartyCannotCarryDisbandedAt(t *testing.T) {
 	_, err := tx.Exec(context.Background(),
 		`UPDATE parties SET disbanded_at = now() WHERE id = $1`, partyID)
 	assertCheckViolation(t, err, "parties_disbanded_at_requires_disbanded_check")
+}
+
+// 멤버십의 party_id를 바꾸면 떠나온 Party도 커밋 시점에 검증된다. 새 Party만 보면
+// 원래 Party가 방장과 멤버 없이 active로 남는다.
+func TestMovingMembershipRevalidatesPreviousParty(t *testing.T) {
+	conn := connect(t)
+	tx := begin(t, conn)
+	ctx := context.Background()
+
+	partyA, ownerA, _ := insertParty(t, tx)
+	partyB, _, _ := insertParty(t, tx)
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE party_memberships SET party_id = $1, role = 'member' WHERE id = $2`,
+		partyB, ownerA); err != nil {
+		t.Fatalf("멤버십을 옮길 수 없다: %v", err)
+	}
+
+	err := checkDeferred(tx)
+	assertCheckViolationAmong(t, err,
+		"party_active_owner_membership_check", "party_active_party_has_member_check")
+	_ = partyA
 }
