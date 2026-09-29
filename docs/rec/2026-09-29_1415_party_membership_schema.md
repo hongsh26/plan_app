@@ -95,7 +95,7 @@ row 처리 순서가 보장되지 않아서, 강등 row가 먼저 걸리면 통�
 - api 역할로 실제 T1 트랜잭션을 `COMMIT`까지 실행했다. `SET CONSTRAINTS`가 아닌 진짜 커밋에서도
   트리거가 통과한다. 런타임 역할 4종 권한도 default privileges로 새 테이블에 붙었다
   (api·worker는 SELECT/INSERT/UPDATE/DELETE, readonly는 SELECT)
-- `REQUIRE_DB_TESTS=1 go test -count=1 ./...` 전체 통과. 새 테스트는 30개 케이스다
+- `REQUIRE_DB_TESTS=1 go test -count=1 ./...` 전체 통과. 새 테스트는 말단 30개 케이스다(1차 재검증 반영으로 1개 추가, 최상위 17개)
 
 ### 테스트가 쓰는 기법
 
@@ -147,3 +147,13 @@ P2(Party 생성·조회·수정 endpoint)다. 착수 전에 정할 것 하나가
 `party_memberships.user_id`가 `users`를 참조하므로 멤버십 INSERT는 `users` row에 KEY SHARE를 건다.
 mutation helper의 `idempotency_keys` INSERT도 같은 row에 KEY SHARE를 건다. 두 경로의 상호작용을
 P2 착수 시점에 확인하고, `mutation.Retries()`가 0이 아니면 규약이 깨진 것으로 본다.
+
+## 1차 독립 재검증 반영
+
+재검증은 NOT-READY였다(테스트 303 PASS는 재현됨). 차단 2건을 고쳤다.
+
+- **지연 트리거의 `party_id` UPDATE 구멍.** 세 트리거 함수가 UPDATE에서 `NEW`의 Party만 검사해, 멤버십을 다른 Party로 옮기면 떠나온 Party가 방장·멤버 없이 active로 남았다. 함수가 `OLD`와 `NEW`의 Party를 모두 검사하도록 바꿨고 `TestMovingMembershipRevalidatesPreviousParty`를 추가했다. 00010이 아직 `main`에 없어 제자리에서 고쳤다.
+- `progressing.md` 120줄 -> 100줄 이하. 병합된 서버 기반 절을 요약으로 압축하고 낡은 §5.1 항목을 지웠다.
+- Low: 마이그레이션·테스트의 낡은 T4 주석 정정.
+
+미룬 Low: 해산 트리거 세 분기가 같은 제약 이름을 써서 오류 메시지로 분기를 구분하지 못한다. 트랜잭션 안 `DROP TRIGGER`의 AccessExclusive 잠금은 다른 패키지가 party 테이블을 쓰면 flaky 위험이 있다. 지연 트리거는 READ COMMITTED에서 동시 커밋에 안전하지 않으므로 P2 잠금 규약(§5.5 Party row `FOR UPDATE`)과 함께 적는다.

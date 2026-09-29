@@ -104,8 +104,8 @@ CREATE UNIQUE INDEX party_memberships_active_member_key
 -- §5.1: 한 Party에 role='owner' AND status='active'인 멤버십은 최대 1개다.
 --
 -- unique index는 지연할 수 없으므로 이 검사는 문장마다 즉시 일어난다. 그래서 T4(위임)는
--- 기존 방장 강등과 대상 승격을 하나의 UPDATE ... CASE로 처리할 수 없고 강등을 먼저 실행한
--- 뒤 승격해야 한다. active Party에서 "정확히 1개"를 만드는 나머지 절반은 아래 지연
+-- 기존 방장 강등과 대상 승격을 하나의 UPDATE ... CASE로 처리하면 row 처리 순서에 따라 실패할 수 있으므로
+-- 순서를 믿을 수 없다. 강등을 먼저 실행한 뒤 승격한다. active Party에서 "정확히 1개"를 만드는 나머지 절반은 아래 지연
 -- 트리거 party_assert_active_owner_membership이 담당한다.
 CREATE UNIQUE INDEX party_memberships_active_owner_key
     ON party_memberships (party_id) WHERE role = 'owner' AND status = 'active';
@@ -273,21 +273,25 @@ CREATE FUNCTION party_assert_active_owner_membership() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
     target uuid;
+    targets uuid[] := ARRAY[]::uuid[];
 BEGIN
     -- DELETE에서 NEW는 할당되지 않으므로 분기한다. TG_OP/NEW/OLD/TG_ARGV는 트리거
     -- 함수의 지역 변수이므로 공용 헬퍼로 뽑아낼 수 없고 여기서 직접 읽는다.
-    IF TG_OP = 'DELETE' THEN
-        target := (to_jsonb(OLD) ->> TG_ARGV[0])::uuid;
-    ELSE
-        target := (to_jsonb(NEW) ->> TG_ARGV[0])::uuid;
+    -- UPDATE가 소속 Party를 바꾸면 떠나온 Party(OLD)도 검사해야 한다.
+    IF TG_OP <> 'INSERT' THEN
+        targets := targets || (to_jsonb(OLD) ->> TG_ARGV[0])::uuid;
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        targets := targets || (to_jsonb(NEW) ->> TG_ARGV[0])::uuid;
     END IF;
 
+    FOREACH target IN ARRAY targets LOOP
     IF target IS NULL THEN
-        RETURN NULL;
+        CONTINUE;
     END IF;
 
     IF NOT EXISTS (SELECT 1 FROM parties WHERE id = target AND status = 'active') THEN
-        RETURN NULL;
+        CONTINUE;
     END IF;
 
     IF NOT EXISTS (
@@ -304,6 +308,7 @@ BEGIN
             USING ERRCODE = 'check_violation',
                   CONSTRAINT = 'party_active_owner_membership_check';
     END IF;
+    END LOOP;
 
     RETURN NULL;
 END;
@@ -317,21 +322,25 @@ CREATE FUNCTION party_assert_active_party_has_member() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
     target uuid;
+    targets uuid[] := ARRAY[]::uuid[];
 BEGIN
     -- DELETE에서 NEW는 할당되지 않으므로 분기한다. TG_OP/NEW/OLD/TG_ARGV는 트리거
     -- 함수의 지역 변수이므로 공용 헬퍼로 뽑아낼 수 없고 여기서 직접 읽는다.
-    IF TG_OP = 'DELETE' THEN
-        target := (to_jsonb(OLD) ->> TG_ARGV[0])::uuid;
-    ELSE
-        target := (to_jsonb(NEW) ->> TG_ARGV[0])::uuid;
+    -- UPDATE가 소속 Party를 바꾸면 떠나온 Party(OLD)도 검사해야 한다.
+    IF TG_OP <> 'INSERT' THEN
+        targets := targets || (to_jsonb(OLD) ->> TG_ARGV[0])::uuid;
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        targets := targets || (to_jsonb(NEW) ->> TG_ARGV[0])::uuid;
     END IF;
 
+    FOREACH target IN ARRAY targets LOOP
     IF target IS NULL THEN
-        RETURN NULL;
+        CONTINUE;
     END IF;
 
     IF NOT EXISTS (SELECT 1 FROM parties WHERE id = target AND status = 'active') THEN
-        RETURN NULL;
+        CONTINUE;
     END IF;
 
     IF NOT EXISTS (
@@ -342,6 +351,7 @@ BEGIN
             USING ERRCODE = 'check_violation',
                   CONSTRAINT = 'party_active_party_has_member_check';
     END IF;
+    END LOOP;
 
     RETURN NULL;
 END;
@@ -355,21 +365,25 @@ CREATE FUNCTION party_assert_disbanded_has_no_active_children() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
     target uuid;
+    targets uuid[] := ARRAY[]::uuid[];
 BEGIN
     -- DELETE에서 NEW는 할당되지 않으므로 분기한다. TG_OP/NEW/OLD/TG_ARGV는 트리거
     -- 함수의 지역 변수이므로 공용 헬퍼로 뽑아낼 수 없고 여기서 직접 읽는다.
-    IF TG_OP = 'DELETE' THEN
-        target := (to_jsonb(OLD) ->> TG_ARGV[0])::uuid;
-    ELSE
-        target := (to_jsonb(NEW) ->> TG_ARGV[0])::uuid;
+    -- UPDATE가 소속 Party를 바꾸면 떠나온 Party(OLD)도 검사해야 한다.
+    IF TG_OP <> 'INSERT' THEN
+        targets := targets || (to_jsonb(OLD) ->> TG_ARGV[0])::uuid;
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        targets := targets || (to_jsonb(NEW) ->> TG_ARGV[0])::uuid;
     END IF;
 
+    FOREACH target IN ARRAY targets LOOP
     IF target IS NULL THEN
-        RETURN NULL;
+        CONTINUE;
     END IF;
 
     IF NOT EXISTS (SELECT 1 FROM parties WHERE id = target AND status = 'disbanded') THEN
-        RETURN NULL;
+        CONTINUE;
     END IF;
 
     IF EXISTS (
@@ -395,6 +409,7 @@ BEGIN
             USING ERRCODE = 'check_violation',
                   CONSTRAINT = 'party_disbanded_has_no_active_children_check';
     END IF;
+    END LOOP;
 
     RETURN NULL;
 END;
