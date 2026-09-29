@@ -230,7 +230,9 @@
 - 기존: 활성 멤버는 `(party_id, user_id) WHERE status = 'active'` partial unique index로 하나만 존재한다.
 - 추가: **`status='active'`인 Party에 한해** `owner_membership_id`가 가리키는 멤버십은 같은 Party에 속하고 `status='active'`이며 `role='owner'`여야 한다. `disbanded` Party의 `owner_membership_id`는 마지막 방장을 가리키는 감사 참조이며 이 조건의 대상이 아니다.
 - 추가: 한 Party에 `role='owner' AND status='active'`인 멤버십은 최대 1개다. `(party_id) WHERE role='owner' AND status='active'` partial unique index로 강제한다. `active` Party에서는 정확히 1개다.
-  이 index는 **즉시 검증된다**(unique index는 지연할 수 없다). 따라서 T4는 기존 방장 강등과 대상 승격을 하나의 `UPDATE ... CASE` 문으로 처리할 수 없고, **강등을 먼저 실행한 뒤 승격**하는 별도 두 문으로 나눠야 한다. 아래 지연 검증 목록은 `owner_membership_id`의 3조건만 담당한다.
+  이 index는 **즉시 검증된다**(unique index는 지연할 수 없다). 따라서 T4는 기존 방장 강등과 대상 승격을 **강등을 먼저 실행한 뒤 승격**하는 별도 두 문으로 나눠야 한다. 아래 지연 검증 목록은 `owner_membership_id`의 3조건만 담당한다.
+
+  나누는 이유는 한 문장 `UPDATE ... CASE`가 **금지되기 때문이 아니라 결과를 믿을 수 없기 때문**이다. 즉시 검증은 문장 끝이 아니라 row 단위로 일어나는데 한 문장 안의 row 처리 순서는 보장되지 않는다. 강등 row가 먼저 처리되면 충돌이 없어 통과하고, 승격 row가 먼저 처리되면 활성 방장이 2명이 되는 순간이 생겨 실패한다. 실제로 한 문장 방식이 통과하는 것을 확인했다(`docs/rec/2026-09-29_1415_party_membership_schema.md`). 같은 문장이 실행 계획이나 데이터 분포가 바뀌면 실패할 수 있으므로 순서를 코드로 고정한다.
 - 추가: `status='active'`인 Party는 활성 멤버가 1명 이상이다. 마지막 활성 멤버가 사라지는 트랜잭션은 반드시 같은 트랜잭션에서 Party를 `disbanded`로 만든다.
 - 추가: `party_invites.used_count <= max_uses`를 CHECK constraint로 강제한다.
 - 추가: `status='disbanded'`인 Party에는 활성 멤버십, 활성 초대, 활성 projection이 없다.

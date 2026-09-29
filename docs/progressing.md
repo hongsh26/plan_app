@@ -62,11 +62,19 @@
 - `internal/platform/jobs`(outbox 점유·펜싱·재시도·dead), `internal/platform/schedule`(scheduled_tasks lease), scheduler 작업 6개(sync·세션·idempotency·끝난 job·audit tombstone 정리, 정체 감시)
 - 결과 로그는 기록이 커밋됐을 때만 남는다. 경보 규칙이 잡을 값: `result=dead`, `result=dead_failed`, `result=stalled`
 - handler·작업 기한은 lease보다 7초 짧다. `WORKER_LEASE_DURATION`·`Task.Timeout` 최솟값 17s
-- 첫 job 종류로 `account_deletion`을 등록했다. `DELETE /v1/me`는 접근 차단·세션/기기 폐기·sync projection·audit·dedupe job enqueue를 한 mutation transaction에서 수행한다. worker는 현 스키마에 존재하는 데이터(users/devices/sessions/auth_identities/audit)를 `deletion_requested -> deleting -> deleted`로 수렴시킨다. 아직 없는 Party/calendar/proposal 데이터 정리는 후속 테이블 구현 범위다
+- 첫 job 종류로 `account_deletion`을 등록했다. `DELETE /v1/me`는 접근 차단·세션/기기 폐기·sync projection·audit·dedupe job enqueue를 한 mutation transaction에서 수행한다. worker는 users/devices/sessions/auth_identities/audit를 `deletion_requested -> deleting -> deleted`로 수렴시킨다. **00010으로 Party 테이블이 생긴 지금 이 범위는 모자란다.** 아래 "계정 삭제와 Party의 공백"을 본다
 - M2: `dead_pending` 상태를 추가해 OnDead 실패 뒤 handler를 다시 실행하지 않고 finalization만 backoff 재시도한다. active dedupe와 fencing에 포함된다
 - M4: worker는 `BatchSize` 동시성 상한 안에서 빈 슬롯이 생기면 batch 전체를 기다리지 않고 즉시 다음 job을 점유한다
 - M5: 사용된 refresh token 해시는 `used_at`부터 90일 보존한다. 이후에는 활성 family 안에서도 정리하며 오래된 token 재사용은 일반 무효 token으로 처리한다
 - 익명화한 audit tombstone은 90일 뒤 scheduler가 batch 삭제한다
+
+### 계정 삭제와 Party의 공백 (지금 살아 있는 결함)
+
+migration 00010으로 Party 테이블이 생겼지만 삭제 worker(`internal/account/deletion.go`)는 아직 sessions·devices·auth_identities·audit_events·users만 건드린다. 그래서 **활성 멤버십을 가진 사용자가 `status='deleted'`까지 가면서 Party의 활성 멤버로, 경우에 따라 활성 방장으로 남는다.**
+
+DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합성만 보고 `users.status`를 보지 않으며, 삭제 파이프라인은 `users` row를 물리 삭제하지 않아 FK RESTRICT도 걸리지 않는다. 현재 테스트가 통과하는 이유는 계정 삭제 테스트에 Party row가 없기 때문이지 이 경로가 안전해서가 아니다.
+
+설계 §5.8과 계획 P8(강제 위임·해산)이 이 공백의 주인이다. **P8을 P5 이후로 미루더라도 이 결함은 그때까지 살아 있다.** 승계자 결정 규칙은 계획 P8에 있다.
 
 ### Party 스키마(P1) 진행 상황
 
