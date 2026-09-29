@@ -68,9 +68,15 @@
 - M5: 사용된 refresh token 해시는 `used_at`부터 90일 보존한다. 이후에는 활성 family 안에서도 정리하며 오래된 token 재사용은 일반 무효 token으로 처리한다
 - 익명화한 audit tombstone은 90일 뒤 scheduler가 batch 삭제한다
 
-### 계정 삭제 브랜치 검증
+### Party 스키마(P1) 진행 상황
 
-`feature/account-deletion`의 계정 삭제·worker 신뢰성 변경을 `8d1103d`에 커밋했다. 독립 재검토에서 발견한 Apple 자격 오류의 즉시 영구 실패와 24시간 초과 시 삭제 중단을 수정했다. 2026-09-28 로컬 PostgreSQL에서 migration 00009 적용 상태와 `REQUIRE_DB_TESTS=1 go test -count=1 ./...` 통과를 확인했다. 원격 CI 확인 및 `main` 병합이 남았다.
+`feature/party-membership`에서 migration 00010과 통합 테스트를 구현했다. 상세와 확정한 방향은 `docs/rec/2026-09-29_1415_party_membership_schema.md`에 있다. 로컬에서 전체 테스트가 통과했고 **독립 재검증과 원격 CI, `main` 병합이 남았다.**
+
+- 테이블 5종(`parties`, `party_memberships`, `party_invites`, `party_visibility_settings`, `party_schedule_projections`), 부분 unique index 3종, 지연 검증 CONSTRAINT TRIGGER 3종
+- **계획 P1의 "추가"는 실제로는 전체 CREATE였다.** 설계 §8이 세 테이블을 고정했지만 P0 골격은 만들지 않았다. 후속 설계 계획에도 같은 착시가 있을 수 있으니 착수 전에 실제 스키마를 먼저 확인한다
+- **`SET CONSTRAINTS ALL IMMEDIATE`는 남은 트랜잭션 전체의 검사 시점을 바꾼다.** 지연 검증 테스트에서 이 함수는 트랜잭션당 한 번, 마지막에만 부른다. 중간에 부르면 확인하려는 지연이 사라져 테스트가 조용히 무의미해진다
+- `CREATE CONSTRAINT TRIGGER` 이름이 63자를 넘으면 PostgreSQL이 조용히 자른다
+- **설계 §5.1 수정 필요.** "T4를 하나의 `UPDATE ... CASE`로 처리할 수 없다"는 과장이다. 실제로는 row 처리 순서에 따라 통과하기도 한다. 처방(강등 먼저, 승격 나중)은 그대로 옳고 근거 문장만 "순서가 보장되지 않아 믿을 수 없다"로 바꿔야 한다
 
 ### P0에서 남은 것
 
@@ -92,9 +98,10 @@
 
 ## 다음 작업
 
-1. `feature/account-deletion` 원격 CI를 확인하고 `main`에 병합한다.
-2. 의존성 순서대로 기능별 브랜치에서 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
-3. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.
+1. Party 스키마(P1)를 독립 재검증하고 원격 CI 통과 후 `main`에 병합한다.
+2. Party membership P2(생성·조회·수정 endpoint)를 구현한다. **착수 전에 잠금 규약을 정한다.** 설계 §5.5는 `parties` → `party_memberships` → `party_invites` 순서와 대상 Party row `FOR UPDATE`를 요구하는데, `party_memberships.user_id` FK가 `users` row에 KEY SHARE를 걸어 mutation helper의 `idempotency_keys` INSERT와 만난다. `mutation.Retries()`가 0이 아니면 규약이 깨진 것이다.
+3. 이후 의존성 순서대로 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
+4. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.
 
 ## 유의 사항
 
