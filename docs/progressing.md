@@ -78,7 +78,7 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 
 ### Party 스키마(P1) 진행 상황
 
-`feature/party-membership`에서 migration 00010과 통합 테스트를 구현했다. 상세와 확정한 방향은 `docs/rec/2026-09-29_1415_party_membership_schema.md`에 있다. 로컬에서 전체 테스트가 통과했고 **독립 재검증과 원격 CI, `main` 병합이 남았다.**
+`feature/party-membership`에서 migration 00010과 통합 테스트를 구현했다. 상세와 확정한 방향은 `docs/rec/2026-09-29_1415_party_membership_schema.md`에 있다. 원격 CI run `36525689898`에서 PASS 303·SKIP 0으로 통과했다(`ad14f8c`). **독립 재검증과 `main` 병합이 남았다.** 재검증은 시작했다가 중단했으므로 처음부터 다시 돌려야 한다.
 
 - 테이블 5종(`parties`, `party_memberships`, `party_invites`, `party_visibility_settings`, `party_schedule_projections`), 부분 unique index 3종, 지연 검증 CONSTRAINT TRIGGER 3종
 - **계획 P1의 "추가"는 실제로는 전체 CREATE였다.** 설계 §8이 세 테이블을 고정했지만 P0 골격은 만들지 않았다. 후속 설계 계획에도 같은 착시가 있을 수 있으니 착수 전에 실제 스키마를 먼저 확인한다
