@@ -1,5 +1,6 @@
 // Package party implements the P2 Party creation, lookup, update, and
-// membership list endpoints from party_membership_design.md.
+// membership list endpoints and the P3 invite endpoints from
+// party_membership_design.md.
 package party
 
 import (
@@ -59,6 +60,7 @@ func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.H
 	mux.Handle("GET /v1/parties/{id}", require(http.HandlerFunc(h.getParty)))
 	mux.Handle("PATCH /v1/parties/{id}", require(http.HandlerFunc(h.patchParty)))
 	mux.Handle("GET /v1/parties/{id}/memberships", require(http.HandlerFunc(h.listMemberships)))
+	h.registerInvites(mux, require)
 }
 
 type partyResponse struct {
@@ -312,6 +314,14 @@ func (h *Handler) writeDomainError(w http.ResponseWriter, r *http.Request, actio
 		httpapi.WriteError(w, r, http.StatusConflict, codePartyOwnedLimitReached, "소유한 Party 한도에 도달했다")
 	case errors.Is(err, errJoinedLimitReached):
 		httpapi.WriteError(w, r, http.StatusConflict, codePartyJoinedLimitReached, "참여한 Party 한도에 도달했다")
+	case errors.Is(err, errAlreadyMember):
+		httpapi.WriteError(w, r, http.StatusConflict, codeAlreadyMember, "이미 이 Party의 멤버다")
+	case errors.Is(err, errPartyFull):
+		httpapi.WriteError(w, r, http.StatusConflict, codePartyFull, "정원이 찼다")
+	case errors.Is(err, errInviteLimit):
+		httpapi.WriteError(w, r, http.StatusConflict, codePartyInviteLimitReached, "활성 초대 한도에 도달했다")
+	case errors.Is(err, errInviteRateLimits):
+		httpapi.WriteError(w, r, http.StatusTooManyRequests, httpapi.CodeRateLimited, "초대 생성 횟수 제한을 넘었다")
 	case errors.Is(err, errPartyDisbanded):
 		httpapi.WriteError(w, r, http.StatusGone, codePartyDisbanded, "이미 해산된 Party다")
 	default:

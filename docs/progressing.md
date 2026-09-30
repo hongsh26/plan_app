@@ -56,12 +56,15 @@ Migration 00010과 통합 테스트를 PR #5로 `main`에 병합했다. 수정�
 - **`SET CONSTRAINTS ALL IMMEDIATE`는 남은 트랜잭션 전체의 검사 시점을 바꾼다.** 지연 검증 테스트에서 이 함수는 트랜잭션당 한 번, 마지막에만 부른다. 중간에 부르면 확인하려는 지연이 사라져 테스트가 조용히 무의미해진다
 - `CREATE CONSTRAINT TRIGGER` 이름이 63자를 넘으면 PostgreSQL이 조용히 자른다
 
-### Party API(P2) 완료
+### Party API(P2) 완료, 초대(P3) 구현 중
 
-`POST /v1/parties`, `GET /v1/parties/{id}`, `PATCH /v1/parties/{id}`, `GET /v1/parties/{id}/memberships`를 `main`에 병합했다(원격 CI 통과). 상세는 `docs/rec/2026-09-30_1500_party_name_rune_length.md`.
+P2(생성·조회·수정·멤버 목록)는 `main`에 있다. 이름 길이는 40 **rune** 기준이다(설계 §4.1 개정, `docs/rec/2026-09-30_1500_party_name_rune_length.md`).
 
-- 이름 길이는 40 **rune** 기준이다(설계 §4.1 개정). 결합 이모지는 여러 개로 센다. 검증은 애플리케이션(`NormalizeName`)에만 있고 DB 제약은 없다
-- 결합 이모지를 rune으로 세는 경계 테스트는 아직 없다(낮은 위험)
+P3 초대 API(생성·목록·무효화·미리보기·수락)를 `feature/party-invites`에 구현했다. 커밋·CI·병합 전이다. 상세와 설계 편차는 `docs/rec/2026-09-30_1621_party_invites.md`.
+
+- **초대 재전송은 token 원문을 다시 주지 못한다.** mutation은 결과 포인터만 저장하고 DB에는 hash만 있다. 응답을 잃으면 무효화하고 새로 만든다
+- `party_invites`에 version 열이 없어 sync 초대 upsert의 version을 `used_count + 1`로 쓴다
+- **이번에 제외한 것:** 수락·미리보기 사용자/IP당 분당 제한(공용 rate limit 인프라가 없어 인증 rate limit과 함께 설계), Universal Link AASA 호스팅과 웹 폴백 페이지, `notify_member_joined`를 처리하는 worker kind(job은 쌓이고 설계 9 이후 처리)
 
 ### P0에서 남은 것
 
@@ -83,7 +86,7 @@ Migration 00010과 통합 테스트를 PR #5로 `main`에 병합했다. 수정�
 
 ## 다음 작업
 
-1. Party membership **P3(초대)**를 새 브랜치 `feature/party-invites`에서 착수한다. 계획은 `.omc/plans/party-membership-implementation.md` P3. 이후 P4(위임)·P5(탈퇴·강퇴·해산)·P8(계정 삭제 연동) 순이며, P8 전까지 아래 계정 삭제 공백은 살아 있다.
+1. `feature/party-invites`를 재검증하고 CI를 통과시켜 병합한다. 이후 P4(위임)·P5(탈퇴·강퇴·해산)·P8(계정 삭제 연동) 순이며, P8 전까지 위 계정 삭제 공백은 살아 있다. 위 "이번에 제외한 것"은 별도 작업으로 남는다.
 2. `calendar_busy_facts` 테이블은 아직 없다. T1의 기존 busy fact projection 생성은 캘린더 동기화 단계에서 연결해야 한다. 현재는 원본이 없어 projection 0건이 정상이다.
 3. 이후 의존성 순서대로 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
 4. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.

@@ -286,7 +286,7 @@ active ─┬─▶ revoked    (방장이 무효화, 또는 Party 해산)
 
 모든 항목은 단일 PostgreSQL 트랜잭션이며 도메인 변경, projection 삭제, `sync_changes`, `outbox_jobs`를 함께 커밋한다.
 
-**잠금 순서**: 모든 트랜잭션은 `parties` → `party_memberships` → `party_invites` 순으로 row를 잠근다. 이 순서를 지키지 않으면 초대 수락(초대→Party)과 해산·위임(Party→초대)이 서로를 기다리는 교착이 생긴다. 대상 Party row를 먼저 `FOR UPDATE`로 잠그는 것이 모든 Party mutation의 첫 단계다.
+**잠금 순서**: 사용자 row를 잠그는 트랜잭션(T1 생성, T3 수락)은 `users`(`FOR NO KEY UPDATE`)를 **가장 먼저** 잠근다. 같은 사용자의 서로 다른 Party 동시 가입이 참여 한도 20을 넘지 않게 직렬화하기 위해서다. 이후 모든 트랜잭션은 `parties` → `party_memberships` → `party_invites` 순으로 row를 잠근다. `parties`를 잡은 뒤 `users`를 잠그는 트랜잭션을 추가하면 T3와 교착하므로 금지한다. 이 순서를 지키지 않으면 초대 수락(초대→Party)과 해산·위임(Party→초대)이 서로를 기다리는 교착이 생긴다. 대상 Party row를 먼저 `FOR UPDATE`로 잠그는 것이 모든 Party mutation의 첫 단계다.
 
 **`expected_version`의 대상**: 모든 Party mutation에서 `expected_version`은 `parties.version`을 의미한다. 멤버십 row의 version은 sync 투영용이며 요청 검증에 쓰지 않는다.
 
@@ -634,7 +634,8 @@ Universal Link를 위해 다음이 함께 필요하다.
 
 ### 9.4 재시도와 중복 방지
 
-- 초대 수락 재시도: 같은 `Idempotency-Key`면 저장된 결과를 재사용한다. 키가 다르고 이미 멤버면 `409 already_member`를 반환하며 `used_count`를 두 번 올리지 않는다.
+- 초대 수락 재시도: 같은 `Idempotency-Key`면 저장된 결과를 재사용한다.
+- 초대 **생성** 재시도: 같은 `Idempotency-Key`면 `201`과 초대 메타데이터를 반환하되 **token 원문은 다시 주지 않는다**(서버에는 hash만 있고 원문 저장은 §7.4가 금지). 응답을 잃은 클라이언트는 해당 초대를 무효화하고 새로 만든다. 활성 초대가 3개면 먼저 무효화해야 한다. 키가 다르고 이미 멤버면 `409 already_member`를 반환하며 `used_count`를 두 번 올리지 않는다.
 - 정원 경쟁: 두 사용자가 마지막 자리를 동시에 수락하면 `parties` row 잠금 아래 카운트를 세므로 한 명만 성공하고 나머지는 `409 party_full`을 받는다.
 - 소유권 위임 경쟁: `expected_version` 불일치로 두 번째 요청이 `409 version_conflict`를 받는다.
 - 탈퇴 재시도: 이미 비활성이면 현재 상태와 `200`을 반환한다.

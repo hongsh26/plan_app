@@ -146,6 +146,9 @@ func cleanupUser(t *testing.T, pool *pgxpool.Pool, userID uuid.UUID) {
 		if _, err := tx.Exec(ctx, `DELETE FROM party_visibility_settings WHERE party_id = $1`, partyID); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := tx.Exec(ctx, `UPDATE party_memberships SET invite_id = NULL WHERE party_id = $1`, partyID); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := tx.Exec(ctx, `DELETE FROM party_invites WHERE party_id = $1`, partyID); err != nil {
 			t.Fatal(err)
 		}
