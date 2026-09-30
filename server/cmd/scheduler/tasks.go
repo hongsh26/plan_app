@@ -11,6 +11,7 @@ import (
 	"plantogether/server/internal/platform/audit"
 	"plantogether/server/internal/platform/jobs"
 	"plantogether/server/internal/platform/mutation"
+	"plantogether/server/internal/platform/ratelimit"
 	"plantogether/server/internal/platform/schedule"
 	"plantogether/server/internal/syncfeed"
 )
@@ -68,6 +69,13 @@ func tasks(pool *pgxpool.Pool, logger *slog.Logger) []schedule.Task {
 			Name: "audit_tombstone_prune", Interval: time.Hour, Timeout: 5 * time.Minute,
 			Run: cleanup("audit_tombstone_prune", func(ctx context.Context) (int64, error) {
 				return audit.PruneTombstones(ctx, pool, time.Now().Add(-audit.TombstoneRetention), cleanupBatch)
+			}),
+		},
+		{
+			// 가장 긴 창이 1시간이라 2시간이 지난 bucket은 의미가 없다(docs/rate_limit_design.md §8).
+			Name: "rate_limit_prune", Interval: 10 * time.Minute, Timeout: 5 * time.Minute,
+			Run: cleanup("rate_limit_prune", func(ctx context.Context) (int64, error) {
+				return ratelimit.Prune(ctx, pool, ratelimit.Retention, cleanupBatch)
 			}),
 		},
 		{

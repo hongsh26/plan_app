@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -40,6 +41,31 @@ func NewPool(ctx context.Context, databaseURL string, maxConns int32) (*Pool, er
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("연결 pool을 만들지 못했다: %w", err)
+	}
+	return &Pool{pool: pool}, nil
+}
+
+// NewLimiterPool은 요청 제한 장치 전용 작은 pool을 만든다(docs/rate_limit_design.md §4.5).
+// 도메인 pool과 분리해 제한 문장이 느려져도 도메인 요청의 연결을 잠식하지 않게 하고,
+// 서버 측 statement_timeout을 연결 파라미터로 건다. ctx timeout만 쓰면 pgx가 초과 시
+// 연결을 끊어 재연결이 폭증한다.
+func NewLimiterPool(ctx context.Context, databaseURL string, maxConns int32, statementTimeout time.Duration) (*Pool, error) {
+	cfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, errors.New("DATABASE_URL을 연결 문자열로 해석할 수 없다")
+	}
+	if maxConns > 0 {
+		cfg.MaxConns = maxConns
+	}
+	if statementTimeout > 0 {
+		if cfg.ConnConfig.RuntimeParams == nil {
+			cfg.ConnConfig.RuntimeParams = map[string]string{}
+		}
+		cfg.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(statementTimeout.Milliseconds(), 10)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("제한 장치 연결 pool을 만들지 못했다: %w", err)
 	}
 	return &Pool{pool: pool}, nil
 }

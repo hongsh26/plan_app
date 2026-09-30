@@ -35,7 +35,6 @@
 **아직 남은 것 (잊으면 안 되는 것):**
 
 - **KMS 구현.** 없으면 api는 `APP_ENV=local`이 아닐 때 기동을 거부한다. 스테이징·프로덕션 배포가 막혀 있다. api 역할은 암호화만, 복호화는 삭제 worker만(§11)
-- 요청 제한 구현과 로그인 실패 `audit_events` 상한(`rate_limit_design.md`, 계획 R0~R5)
 - OpenAPI 스키마와 실제 응답의 자동 대조(§15)
 - 로그인·refresh와 계정 상태 변경의 동시성 테스트(`FOR SHARE OF u` 회귀 감지)
 - Apple 서버 오류(`invalid_client` 등)가 HTTP 500과 `apple_error` 로그 필드로 나가는지 보는 HTTP 계층 테스트
@@ -56,7 +55,16 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 - **초대 재전송은 token 원문을 다시 주지 못한다.** 응답을 잃으면 무효화하고 새로 만든다. sync 초대 version은 `used_count + 1`이다
 - **`SET CONSTRAINTS ALL IMMEDIATE`는 남은 트랜잭션 전체의 검사 시점을 바꾼다.** 지연 검증 테스트에서는 트랜잭션당 한 번, 마지막에만 부른다
 - `CREATE CONSTRAINT TRIGGER` 이름이 63자를 넘으면 PostgreSQL이 조용히 자른다. 후속 설계 계획의 "추가"는 실제 스키마를 먼저 확인한다
-- **P3에서 제외해 남은 것:** 수락·미리보기 분당 제한(`rate_limit_design.md`가 소유, 미구현이라 설계 4 §10 해당 인수 조건은 미충족), AASA 호스팅과 웹 폴백, `notify_member_joined` worker kind(job은 pending으로 쌓인다), 가입 시 busy projection 생성(`calendar_busy_facts` 없음)
+- **P3에서 남은 것:** AASA 호스팅과 웹 폴백(`invite.web` 제한 포함), `notify_member_joined`를 처리하는 worker kind(job은 pending으로 쌓인다), 가입 시 busy projection 생성(`calendar_busy_facts` 없음)
+
+### 요청 제한 구현 완료
+
+`auth.apple`·`auth.refresh`·`account.delete`·`invite.preview/accept`와 미인증 실패 audit 상한을 구현했다. 설계는 `docs/rate_limit_design.md`, 상세는 `docs/rec/2026-09-30_1710_rate_limit_impl.md`. 한도는 `internal/platform/ratelimit/limits.go` 한 곳이다.
+
+- **새 소비자는 `Require` 다음, 모든 입력 검증과 조회·`mutation.Prepare` 앞에서 `ratelimit.Enforce`를 호출한다.** 도메인 트랜잭션 안에서 세면 롤백과 함께 카운트가 사라져 제한이 무력해진다
+- **배포 전 설정:** `CLIENT_IP_SOURCE`(비로컬 필수)와 `TRUSTED_PROXY_HOPS`, `RATE_LIMIT_KEY`. 실제 헤더로 hops를 검증한다. `client_ip_fallback`·`limiter_error` 로그를 경보에 건다
+- **iOS 계약:** refresh 429는 세션 상실이 아니다. `Retry-After` 뒤 재시도하며 로그아웃하지 않는다
+- 남은 소비자: 공개 수준 변경·검색·제안(각 설계 구현 시), 웹 폴백 `invite.web`
 
 ### P0에서 남은 것
 
@@ -78,7 +86,7 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 
 ## 다음 작업
 
-1. **요청 제한 설계(`docs/rate_limit_design.md`)는 1차 독립 검토 지적을 반영했다.** 재검토·확정 후 R0~R5로 구현한다(`feature/rate-limit-design`). 잠정 한도(auth 30/분, refresh 300/분, 삭제 10/시간, audit 전역 300)는 사용자 확인이 필요하다. 그 뒤 P4(소유권 위임)·P5(탈퇴·강퇴·해산)·P8(계정 삭제 연동) 순이며, P8 전까지 위 계정 삭제 공백은 살아 있다.
+1. **P4(소유권 위임)**를 새 브랜치에서 착수한다(`.omc/plans/party-membership-implementation.md` P4). 이후 P5(탈퇴·강퇴·해산)·P8(계정 삭제 연동) 순이며, P8 전까지 위 계정 삭제 공백은 살아 있다.
 2. `calendar_busy_facts` 테이블은 아직 없다. T1의 기존 busy fact projection 생성은 캘린더 동기화 단계에서 연결해야 한다. 현재는 원본이 없어 projection 0건이 정상이다.
 3. 이후 의존성 순서대로 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
 4. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.

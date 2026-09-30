@@ -24,6 +24,7 @@ import (
 
 	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/audit"
+	"plantogether/server/internal/platform/ratelimit"
 )
 
 var (
@@ -74,6 +75,8 @@ type Service struct {
 	sealer Sealer
 	tokens *AccessTokens
 	now    func() time.Time
+	// limiter는 요청 제한과 미인증 실패 audit 상한이다. nil이면 꺼진다.
+	limiter ratelimit.Allower
 }
 
 // Deps는 Service의 의존성이다.
@@ -88,6 +91,8 @@ type Deps struct {
 	Sealer        Sealer
 	Tokens        *AccessTokens
 	Now           func() time.Time
+	// Limiter는 docs/rate_limit_design.md의 요청 제한이다. nil이면 제한하지 않는다.
+	Limiter ratelimit.Allower
 }
 
 // NewService는 Service를 만든다.
@@ -101,7 +106,7 @@ func NewService(d Deps) (*Service, error) {
 	if d.Now == nil {
 		d.Now = time.Now
 	}
-	return &Service{pool: d.Pool, apple: d.Apple, code: d.CodeExchanger, sealer: d.Sealer, tokens: d.Tokens, now: d.Now}, nil
+	return &Service{pool: d.Pool, apple: d.Apple, code: d.CodeExchanger, sealer: d.Sealer, tokens: d.Tokens, now: d.Now, limiter: d.Limiter}, nil
 }
 
 // SignInInput은 POST /v1/auth/apple의 입력이다.
@@ -518,6 +523,24 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (Princip
 // auditFailure는 행위자를 모르는 실패를 남긴다(audit_events 스키마 주석 참고).
 // 로그인 실패가 audit 기록 실패 때문에 다른 오류로 바뀌면 안 되므로 결과를
 // 무시한다.
+//
+// 실패마다 행을 쓰면 공격자가 audit_events를 무한히 늘릴 수 있으므로 docs/rate_limit_design.md
+// §7의 상한을 거친다. IP당(action 무관) 10분 5행을 먼저 통과해야 하고, 통과한 것만
+// 전역 10분 300행에 센다. 그래서 전역 상한은 실제로 쓰인 행 수를 막는다. 상한 초과와
+// 제한 장치 오류일 때는 행을 쓰지 않는다(쓰기 증폭 방지가 audit 보존보다 우선).
+// 이 두 scope의 초과는 rate_limit.exceeded audit를 남기지 않는다(재귀 방지).
 func (s *Service) auditFailure(ctx context.Context, action string, requestID uuid.UUID) {
+	if s.limiter != nil {
+		perIP, err := s.limiter.Allow(ctx, ratelimit.ModeClosed,
+			ratelimit.IPRule(ctx, ratelimit.ScopeAuditAuthFailure, ratelimit.LimitAuditIP))
+		if err != nil || !perIP.Allowed {
+			return
+		}
+		global, err := s.limiter.Allow(ctx, ratelimit.ModeClosed,
+			ratelimit.GlobalRule(ratelimit.ScopeAuditAuthFailureAll, ratelimit.LimitAuditGlobal))
+		if err != nil || !global.Allowed {
+			return
+		}
+	}
 	_ = audit.Record(ctx, s.pool, audit.Event{Action: action, Result: "failure", RequestID: requestID})
 }

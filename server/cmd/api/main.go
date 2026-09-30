@@ -28,6 +28,7 @@ import (
 	"plantogether/server/internal/platform/config"
 	"plantogether/server/internal/platform/httpapi"
 	"plantogether/server/internal/platform/postgres"
+	"plantogether/server/internal/platform/ratelimit"
 	"plantogether/server/internal/platform/secretbox"
 	"plantogether/server/internal/syncfeed"
 )
@@ -76,6 +77,11 @@ func run() error {
 		return err
 	}
 
+	rateSettings, err := config.LoadRateLimit(cfg.Env, config.FromEnv())
+	if err != nil {
+		return err
+	}
+
 	logger := httpapi.NewLogger(cfg.LogLevel, string(cfg.Role))
 
 	// SIGINT/SIGTERM에 취소되는 context.
@@ -90,23 +96,37 @@ func run() error {
 	}
 	defer pool.Close()
 
+	// 요청 제한은 도메인 pool과 분리된 작은 pool을 쓴다. 제한 문장이 느려져도 도메인 요청의
+	// 연결을 잠식하지 않게 하기 위해서다(docs/rate_limit_design.md §4.5).
+	limiterPool, err := postgres.NewLimiterPool(ctx, cfg.DatabaseURL, rateSettings.PoolMaxConns, rateSettings.StatementTimeout)
+	if err != nil {
+		return err
+	}
+	defer limiterPool.Close()
+	limiter, err := ratelimit.New(limiterPool.Pool(), rateSettings.Key, logger)
+	if err != nil {
+		return err
+	}
+
 	// secretbox.NewLocal은 APP_ENV=local이 아니면 실패한다. config.LoadAuth가
 	// 이미 거부했으므로 여기 오는 것은 local뿐이다.
 	box, err := secretbox.NewLocal(cfg.Env, authSettings.TokenEncryptionKey)
 	if err != nil {
 		return err
 	}
-	authHandler, err := newAuthHandler(authSettings, pool, box, logger)
+	authHandler, err := newAuthHandler(authSettings, pool, box, logger, limiter)
 	if err != nil {
 		return err
 	}
 	mux := httpapi.NewMux(pool, logger)
 	authHandler.Register(mux)
-	account.NewHandler(account.Deps{Pool: pool.Pool(), Logger: logger, Sealer: box, RefKeyBox: box}).Register(mux, authHandler.Require)
-	party.NewHandler(party.Deps{Pool: pool.Pool(), Logger: logger}).Register(mux, authHandler.Require)
+	account.NewHandler(account.Deps{Pool: pool.Pool(), Logger: logger, Sealer: box, RefKeyBox: box, Limiter: limiter}).Register(mux, authHandler.Require)
+	party.NewHandler(party.Deps{Pool: pool.Pool(), Logger: logger, Limiter: limiter}).Register(mux, authHandler.Require)
 	syncfeed.NewHandler(syncfeed.Deps{Pool: pool.Pool(), Logger: logger, RefKeyBox: box}).Register(mux, authHandler.Require)
 
-	server := httpapi.NewServer(cfg.HTTPAddr, httpapi.Wrap(logger, mux))
+	server := httpapi.NewServer(cfg.HTTPAddr, httpapi.WithClientIP(
+		httpapi.ClientIPResolver{Source: rateSettings.ClientIPSource, Hops: rateSettings.TrustedProxyHops},
+		httpapi.Wrap(logger, mux)))
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -156,7 +176,7 @@ func run() error {
 // Apple code 교환 자격이 없으면 교환을 건너뛴다. config.LoadAuth가 이 조합을
 // APP_ENV=local에서만 허용하므로 여기서 다시 확인하지 않는다. 대신 기동 로그에
 // 남겨 개발자가 모르고 지나가지 않게 한다.
-func newAuthHandler(s config.AuthSettings, pool *postgres.Pool, box *secretbox.LocalAESGCM, logger *slog.Logger) (*auth.Handler, error) {
+func newAuthHandler(s config.AuthSettings, pool *postgres.Pool, box *secretbox.LocalAESGCM, logger *slog.Logger, limiter *ratelimit.Limiter) (*auth.Handler, error) {
 	tokens, err := auth.NewAccessTokens(s.AccessTokenSigningKey, nil)
 	if err != nil {
 		return nil, err
@@ -165,7 +185,7 @@ func newAuthHandler(s config.AuthSettings, pool *postgres.Pool, box *secretbox.L
 	if err != nil {
 		return nil, err
 	}
-	deps := auth.Deps{Pool: pool.Pool(), Apple: verifier, Tokens: tokens}
+	deps := auth.Deps{Pool: pool.Pool(), Apple: verifier, Tokens: tokens, Limiter: limiter}
 
 	if s.AppleCodeExchange != nil {
 		key, err := appleid.ParsePrivateKey(s.AppleCodeExchange.PrivateKeyPEM)

@@ -12,6 +12,7 @@ import (
 
 	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/httpapi"
+	"plantogether/server/internal/platform/ratelimit"
 )
 
 // Handler는 인증 endpoint와 인증 미들웨어를 제공한다.
@@ -65,6 +66,12 @@ func toSessionResponse(r *http.Request, s Session) sessionResponse {
 }
 
 func (h *Handler) signInWithApple(w http.ResponseWriter, r *http.Request) {
+	// 요청 제한은 본문 파싱과 Apple 호출보다 먼저다(docs/rate_limit_design.md §4.2, §9).
+	// 미인증이라 IP만 키다. 초과해도 audit는 남기지 않고 지표만 올린다(미인증 scope).
+	if _, ok := ratelimit.Enforce(w, r, h.svc.limiter, ratelimit.ModeClosed,
+		ratelimit.IPRule(r.Context(), ratelimit.ScopeAuthApple, ratelimit.LimitAuthApple)); !ok {
+		return
+	}
 	var req signInRequest
 	if err := httpapi.DecodeJSON(w, r, &req); err != nil {
 		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidRequest, "요청 본문이 올바르지 않다")
@@ -101,6 +108,12 @@ type refreshRequest struct {
 }
 
 func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
+	// refresh는 장치 오류 시 통과시킨다(open). 전면 503은 사실상 앱 장애이고, 256-bit
+	// token은 추측이 비현실적이라 남용 방지 가치가 낮다. 429는 세션 상실이 아니다.
+	if _, ok := ratelimit.Enforce(w, r, h.svc.limiter, ratelimit.ModeOpen,
+		ratelimit.IPRule(r.Context(), ratelimit.ScopeAuthRefresh, ratelimit.LimitAuthRefresh)); !ok {
+		return
+	}
 	var req refreshRequest
 	if err := httpapi.DecodeJSON(w, r, &req); err != nil || req.RefreshToken == "" {
 		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidRequest, "refresh_token이 필요하다")

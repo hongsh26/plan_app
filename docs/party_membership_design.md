@@ -670,7 +670,7 @@ Universal Link를 위해 다음이 함께 필요하다.
 - [ ] 활성 초대 4개째 생성이 `409 party_invite_limit_reached`다.
 - [ ] 미로그인 상태로 수락 API를 호출하면 `401 invalid_session`이고 어떤 멤버십도 생성되지 않는다.
 - [ ] 초대 token이 애플리케이션 로그, audit event, 분석 이벤트, 푸시 payload 어디에도 나타나지 않는다.
-- [ ] 미리보기 조회가 분당 10회를 넘으면 `429 rate_limited`다.
+- [x] 미리보기 조회가 분당 10회를 넘으면 `429 rate_limited`다. (`rate_limit_design.md` 구현, `internal/party/ratelimit_test.go`. 웹 폴백 페이지 쪽 제한은 AASA·웹 폴백 작업에서)
 - [ ] 정원이 찬 Party에서 초대 생성이 `409 party_full`이고 `max_uses=0`인 초대가 만들어지지 않는다.
 - [ ] 이미 활성 멤버인 사용자의 수락이 `409 already_member`이고 `used_count`가 증가하지 않는다.
 

@@ -24,6 +24,7 @@ import (
 	"plantogether/server/internal/auth"
 	"plantogether/server/internal/platform/httpapi"
 	"plantogether/server/internal/platform/mutation"
+	"plantogether/server/internal/platform/ratelimit"
 )
 
 const (
@@ -327,6 +328,12 @@ type previewEnvelope struct {
 
 // previewInvite는 §7.2 필드만 돌려준다. 만료·무효·소진·해산·미존재는 모두 같은 404다.
 func (h *Handler) previewInvite(w http.ResponseWriter, r *http.Request) {
+	// 요청 제한은 token 길이 검사와 조회보다 먼저다. 잘못된 token이 404로 끝나는 시도도
+	// 모두 센다(docs/rate_limit_design.md §4.2). 그렇지 않으면 미리보기가 token 유효성을
+	// 알려주는 검증 경로가 된다(§4.2).
+	if !h.enforceInviteLimit(w, r, ratelimit.ScopeInvitePreview, ratelimit.LimitPreviewUser, ratelimit.LimitPreviewIP) {
+		return
+	}
 	token := r.PathValue("token")
 	if token == "" || len(token) > maxTokenLength {
 		httpapi.WriteError(w, r, http.StatusNotFound, httpapi.CodeNotFound, "대상을 찾을 수 없다")
@@ -368,6 +375,11 @@ type acceptEnvelope struct {
 // 함께 넘지 못하게 직렬화하기 위해서다. T1(createParty)과 같은 순서라 교착이 없다.
 func (h *Handler) acceptInvite(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.PrincipalFrom(r.Context())
+	// 요청 제한은 형식 검사·Prepare·mutation.Run(멱등성 replay 확인 포함)보다 먼저다.
+	// 같은 Idempotency-Key의 재전송도 한도를 소비한다.
+	if !h.enforceInviteLimit(w, r, ratelimit.ScopeInviteAccept, ratelimit.LimitAcceptUser, ratelimit.LimitAcceptIP) {
+		return
+	}
 	token := r.PathValue("token")
 	if token == "" || len(token) > maxTokenLength {
 		httpapi.WriteError(w, r, http.StatusNotFound, httpapi.CodeNotFound, "대상을 찾을 수 없다")
@@ -638,4 +650,17 @@ func (h *Handler) writeInviteLoadError(w http.ResponseWriter, r *http.Request, a
 		err = errNotFound
 	}
 	h.writeDomainError(w, r, action, err)
+}
+
+// enforceInviteLimit는 사용자+IP 규칙을 한 번에 판정한다. 장치 오류 시 503(closed)이다.
+// 사용자가 인증된 scope이므로 처음 한도를 넘긴 요청에는 audit 한 줄을 남긴다.
+func (h *Handler) enforceInviteLimit(w http.ResponseWriter, r *http.Request, scope string, user, ip ratelimit.Limit) bool {
+	p, _ := auth.PrincipalFrom(r.Context())
+	d, ok := ratelimit.Enforce(w, r, h.limiter, ratelimit.ModeClosed,
+		ratelimit.UserRule(scope, user, p.UserID),
+		ratelimit.IPRule(r.Context(), scope, ip))
+	if !ok {
+		ratelimit.RecordExceeded(r.Context(), h.pool, p.UserID, d)
+	}
+	return ok
 }

@@ -22,6 +22,7 @@ import (
 	"plantogether/server/internal/platform/httpapi"
 	"plantogether/server/internal/platform/jobs"
 	"plantogether/server/internal/platform/mutation"
+	"plantogether/server/internal/platform/ratelimit"
 )
 
 // AccountDeletionJobType은 §10 계정 삭제 pipeline의 outbox job 종류다.
@@ -35,6 +36,14 @@ type accountDeletionPayload struct {
 // enqueue한다. 같은 요청을 성공 뒤 재전송하면 인증 계층에서 이미 차단된다.
 func (h *Handler) deleteMe(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.PrincipalFrom(r.Context())
+	// 요청 제한은 Prepare와 멱등성 확인보다 먼저다. 성공한 삭제 뒤에는 계정이 잠겨 Require가
+	// 막으므로 여기서 세는 것은 400/409 실패 반복이다(docs/rate_limit_design.md §3.1).
+	d, ok := ratelimit.Enforce(w, r, h.limiter, ratelimit.ModeClosed,
+		ratelimit.UserRule(ratelimit.ScopeAccountDelete, ratelimit.LimitAccountDelete, p.UserID))
+	if !ok {
+		ratelimit.RecordExceeded(r.Context(), h.pool, p.UserID, d)
+		return
+	}
 	prep, ok := mutation.Prepare(w, r, true)
 	if !ok {
 		return

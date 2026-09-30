@@ -18,6 +18,7 @@ import (
 	"plantogether/server/internal/auth"
 	"plantogether/server/internal/platform/httpapi"
 	"plantogether/server/internal/platform/mutation"
+	"plantogether/server/internal/platform/ratelimit"
 )
 
 const ReplayedHeader = "Idempotent-Replayed"
@@ -40,19 +41,28 @@ type Handler struct {
 	pool   *pgxpool.Pool
 	logger *slog.Logger
 	now    func() time.Time
+	// limiter는 초대 미리보기·수락 요청 제한이다. nil이면 꺼진다.
+	limiter Limiter
+}
+
+// Limiter는 요청 제한 판정이다. ratelimit.Limiter가 구현한다.
+type Limiter interface {
+	Allow(ctx context.Context, mode ratelimit.Mode, rules ...ratelimit.Rule) (ratelimit.Decision, error)
 }
 
 type Deps struct {
 	Pool   *pgxpool.Pool
 	Logger *slog.Logger
 	Now    func() time.Time
+	// Limiter는 docs/rate_limit_design.md의 요청 제한이다. nil이면 제한하지 않는다.
+	Limiter Limiter
 }
 
 func NewHandler(d Deps) *Handler {
 	if d.Now == nil {
 		d.Now = time.Now
 	}
-	return &Handler{pool: d.Pool, logger: d.Logger, now: d.Now}
+	return &Handler{pool: d.Pool, logger: d.Logger, now: d.Now, limiter: d.Limiter}
 }
 
 func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.Handler) {

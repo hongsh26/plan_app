@@ -115,6 +115,8 @@ paths:
           $ref: "#/components/responses/InvalidSession"
         "423":
           $ref: "#/components/responses/AccountLocked"
+        "429":
+          $ref: "#/components/responses/RateLimited"
         "503":
           $ref: "#/components/responses/Unavailable"
 
@@ -147,6 +149,8 @@ paths:
           $ref: "#/components/responses/InvalidSession"
         "423":
           $ref: "#/components/responses/AccountLocked"
+        "429":
+          $ref: "#/components/responses/RateLimited"
 
   /v1/auth/logout:
     post:
@@ -244,6 +248,10 @@ paths:
           $ref: "#/components/responses/Conflict"
         "423":
           $ref: "#/components/responses/AccountLocked"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
 
   /v1/devices:
     get:
@@ -426,6 +434,9 @@ components:
       schema: {type: string, format: uuid}
 
   headers:
+    RetryAfter:
+      description: 재시도까지 기다릴 초(정수, 최소 1). 429에서는 창 종료까지 남은 초다. 남은 횟수와 한도는 알리지 않는다.
+      schema: {type: integer, minimum: 1}
     IdempotentReplayed:
       description: 저장된 결과를 돌려준 재전송이면 "true". 본문은 현재 리소스 상태다.
       schema: {type: string, enum: ["true"]}
@@ -475,8 +486,23 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    RateLimited:
+      description: |
+        요청 제한 초과(docs/rate_limit_design.md §6). Retry-After 이후에 재시도한다. 본문은 어느 키가
+        초과했는지, 한도, 남은 횟수를 담지 않는다. **세션 상실이 아니다.** 클라이언트는 로그아웃하거나
+        refresh token을 폐기하지 않는다.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     Unavailable:
-      description: Apple 같은 외부 의존성 장애. 사용자 자격 문제가 아니므로 클라이언트는 로그아웃하지 않고 재시도한다.
+      description: Apple 같은 외부 의존성 장애, 또는 요청 제한 장치를 확인하지 못한 경우(closed scope). 사용자 자격 문제가 아니므로 클라이언트는 로그아웃하지 않고 Retry-After 이후 재시도한다.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
       content:
         application/json:
           schema:

@@ -4,7 +4,7 @@
 
 ## 0. 설계 상태
 
-- 상태: 초안. 독립 검토(architect) 1차 지적을 반영했다. **한도 숫자 중 "잠정" 표시는 운영 계측 전까지의 출발값이며 사용자 확인이 필요하다.** 번호 있는 상세 설계 1~11(`feature_design_backlog.md`)에 속하지 않는 횡단 인프라 설계다.
+- 상태: **구현됨(범위 명시)**. 독립 검토 2차까지 반영했고 `auth.apple`·`auth.refresh`·`account.delete`·`invite.preview/accept`·`audit.auth_failure*`와 scheduler prune, 429/503 계약이 구현돼 있다. 미구현: `invite.web`(AASA·웹 폴백 작업), `visibility.change`·검색·제안(각 설계 구현 시 소비자로 붙는다). 한도 숫자의 "잠정" 표시는 운영 계측 전까지의 출발값이며 사용자가 그대로 쓰기로 했다(추후 변경 가능, 값은 `internal/platform/ratelimit/limits.go` 한 곳). 번호 있는 상세 설계 1~11(`feature_design_backlog.md`)에 속하지 않는 횡단 인프라 설계다.
 - 이 문서가 소유하는 것: 공용 제한 장치의 저장 방식, 판정 순서, 클라이언트 IP 규칙, `429` 응답 계약, audit·로그 규칙, 각 호출자의 적용 지점.
 - 이 문서가 소유하지 않는 것: 가능 시간 검색·제안 API의 한도 숫자(각 설계가 소유하고 이 장치를 쓴다). 초대 **생성**의 시간당 10회 제한(§3.3).
 
@@ -192,7 +192,7 @@ Retry-After: <초, 정수, 최소 1>
 - **미인증 실패 audit(`auth.apple_sign_in`, `auth.apple_code_exchange`, `auth.apple_code_subject_mismatch`)의 상한**: 지금은 실패마다 `audit_events`에 행이 쌓인다(`internal/auth/service.go` `auditFailure`). 실패 audit를 쓰기 전에 두 scope를 모두 통과해야 한다: IP 단독 `audit.auth_failure`(action과 무관하게 IP당 10분 5행)와 전역 `audit.auth_failure.global`(10분 300행). IP를 순환하는 공격(IPv6 /48 하나가 /64 65,536개)도 전역 상한이 전체 행 수를 막는다. 한도 초과분은 행을 쓰지 않고 지표만 올린다. **공격 중에는 정상 실패 audit가 일부 누락될 수 있다**는 대가를 감수한다.
 - 구현: `auditFailure` 호출 지점은 `auth/service.go`의 Apple 로그인 경로 4곳(137, 155, 168, 274)이며 274는 Apple 성공 뒤 423 경로도 같은 상한을 따른다. refresh 경로는 `auditFailure`를 부르지 않으므로 시그니처를 바꾸지 않는다. `SignInInput`에 클라이언트 IP(hash)와 `Limiter`를 주입한다.
 - 로그에는 `scope`, `result=limited|limiter_error`, `request_id`만 남긴다. IP·hash·사용자 ID는 남기지 않는다.
-- 지표: scope별 `limited` 수, `limiter_error` 수, `client_ip_fallback` 수. 초대 token 추측 의심은 `invite.*` scope의 `limited` 급증으로 본다.
+- 관측: scope별 `limited`, `limiter_error`, `client_ip_fallback`을 구조화 로그(`result=` 값)로 남기고 경보는 이 로그 기반이다. 프로세스 내 카운터(`Limited()`, `Errors()`, `Fallbacks()`)는 아직 외부 지표로 내보내지 않는다. 초대 token 추측 의심은 `invite.*` scope의 `limited` 급증으로 본다.
 - `RATE_LIMIT_KEY` 교체: bucket이 최대 1시간만 살아 있어 교체해도 손실이 없다. 다만 롤링 배포 중에는 옛 키와 새 키가 함께 쓰여 실효 한도가 최대 2배가 될 수 있다.
 
 ## 8. 정리와 운영
@@ -218,36 +218,42 @@ Retry-After: <초, 정수, 최소 1>
 
 ## 10. 테스트 가능한 인수 조건
 
-- [ ] 잘못된 token으로 미리보기를 분당 10회 넘게 호출하면 `429 rate_limited`와 `Retry-After`가 나온다. **이 시도들은 모두 `404`였으며 도메인 롤백 후에도 카운트가 남았다.**
-- [ ] 수락이 사용자당 분당 5회, IP당 분당 30회를 넘으면 `429`다.
-- [ ] 사용자 A가 한도를 소진해도 사용자 B의 같은 scope 요청은 통과한다(IP 한도 이내).
-- [ ] 같은 `Idempotency-Key` 재전송도 한도를 소비한다.
-- [ ] 두 API task(두 `Limiter` 인스턴스)가 같은 DB를 쓰면 합산 한도가 지켜진다.
-- [ ] 창이 지나면 카운트가 새로 시작하고 `Retry-After`가 창 종료까지 남은 초와 일치한다.
-- [ ] 로컬 사전 차단 캐시가 있어도 한도 미만 요청을 거부하지 않는다. 캐시는 DB가 초과를 반환한 키만 막고, 창이 바뀌면(DB 기준 남은 초 경과) 다시 통과한다.
-- [ ] 한도에 딱 도달한 요청 다음 요청은 DB를 거쳐 `limit + 1`을 받고, 캐시 때문에 초과 audit가 사라지지 않는다. 캐시를 가진 두 `Limiter`가 같은 DB를 써도 초과 audit는 한 줄이다.
-- [ ] 폴백(`ip:fallback`) 요청도 IP만 쓰는 scope의 한도를 소비하고, 폴백 때문에 정상 경로 요청이 거부되지 않는다.
-- [ ] `invite.web` 폴백·초과·장치 실패 페이지는 잘못된 token 페이지와 **바이트 단위로 같고** Party 이름·유효성 신호가 없다.
-- [ ] 미인증 scope(`auth.*`, `invite.web`)의 초과는 audit 행을 늘리지 않는다. 한 요청에서 두 bucket이 동시에 초과 전이돼도 audit는 1줄이다.
-- [ ] limiter 오류일 때 실패 audit를 쓰지 않고 지표만 올린다.
-- [ ] `xff` 모드에서 `X-Forwarded-For`의 왼쪽 위조 항목이 무시된다. 여러 줄 헤더는 모두 합쳐 파싱한다. `ip:port`, `[v6]:port`, IPv4-mapped IPv6가 올바르게 처리된다. 항목 부족·파싱 실패 시 IP 키가 판정에서 제외되고 `client_ip_fallback`이 기록된다. `APP_ENV != local`에서 `CLIENT_IP_SOURCE`가 없으면 기동을 거부한다.
-- [ ] `auth.apple`·`auth.refresh`·`account.delete`가 한도 초과 시 `429`다. 초과한 `auth.apple` 요청은 Apple 서버(mock)를 호출하지 않는다.
-- [ ] 초대 token 길이 검사 실패(형식 404)도 한도를 소비한다.
-- [ ] IPv6 /64 안의 다른 주소가 같은 bucket을 쓴다.
-- [ ] `rate_limit_buckets`, audit, 로그 어디에도 원문 IP·token이 없다.
-- [ ] 초과 순간에 audit `rate_limit.exceeded`가 창당 1줄만 남고, 이후 거부는 audit를 늘리지 않는다.
-- [ ] 같은 IP에서 로그인 실패를 100번 반복해도 action이 달라도 미인증 실패 audit 행은 10분에 5개 이하다. 서로 다른 IP 1000개에서 실패해도 전역 상한(300) 이하다. 이 두 scope의 초과는 `rate_limit.exceeded` audit를 남기지 않는다.
-- [ ] `invite.*` scope의 초과 audit `rate_limit.exceeded`가 창당 1줄이다.
-- [ ] 제한 문장이 실패하면 closed scope는 `503`과 `Retry-After`, open scope는 통과하며 `limiter_error`가 기록되고, `invite.web`은 이름 없는 정적 페이지다.
-- [ ] 제한 장치의 pool 고갈·timeout이 도메인 pool을 잠식하지 않는다.
-- [ ] 다중 키 upsert가 subject 접두사 덕에 같은 row 충돌 오류를 내지 않고, 정렬된 순서로 교착하지 않는다.
-- [ ] 만료된 bucket을 prune 작업이 지우고 살아 있는 창은 지우지 않는다.
+- [x] 잘못된 token으로 미리보기를 분당 10회 넘게 호출하면 `429 rate_limited`와 `Retry-After`가 나온다. **이 시도들은 모두 `404`였으며 도메인 롤백 후에도 카운트가 남았다.**
+- [x] 수락이 사용자당 분당 5회, IP당 분당 30회를 넘으면 `429`다.
+- [x] 사용자 A가 한도를 소진해도 사용자 B의 같은 scope 요청은 통과한다(IP 한도 이내).
+- [x] 같은 `Idempotency-Key` 재전송도 한도를 소비한다.
+- [x] 두 API task(두 `Limiter` 인스턴스)가 같은 DB를 쓰면 합산 한도가 지켜진다.
+- [x] 창이 지나면 카운트가 새로 시작하고 `Retry-After`가 창 종료까지 남은 초와 일치한다.
+- [x] 로컬 사전 차단 캐시가 있어도 한도 미만 요청을 거부하지 않는다. 캐시는 DB가 초과를 반환한 키만 막고, 창이 바뀌면(DB 기준 남은 초 경과) 다시 통과한다.
+- [x] 한도에 딱 도달한 요청 다음 요청은 DB를 거쳐 `limit + 1`을 받고, 캐시 때문에 초과 audit가 사라지지 않는다. 캐시를 가진 두 `Limiter`가 같은 DB를 써도 초과 audit는 한 줄이다.
+- [x] 폴백(`ip:fallback`) 요청도 IP만 쓰는 scope의 한도를 소비하고, 폴백 때문에 정상 경로 요청이 거부되지 않는다.
+- [ ] `invite.web` 폴백·초과·장치 실패 페이지는 잘못된 token 페이지와 **바이트 단위로 같고** Party 이름·유효성 신호가 없다. (미구현: AASA·웹 폴백 작업)
+- [x] 미인증 scope(`auth.*`, `invite.web`)의 초과는 audit 행을 늘리지 않는다. 한 요청에서 두 bucket이 동시에 초과 전이돼도 audit는 1줄이다.
+- [x] limiter 오류일 때 실패 audit를 쓰지 않고 지표만 올린다.
+- [x] `xff` 모드에서 `X-Forwarded-For`의 왼쪽 위조 항목이 무시된다. 여러 줄 헤더는 모두 합쳐 파싱한다. `ip:port`, `[v6]:port`, IPv4-mapped IPv6가 올바르게 처리된다. 항목 부족·파싱 실패 시 IP 키가 판정에서 제외되고 `client_ip_fallback`이 기록된다. `APP_ENV != local`에서 `CLIENT_IP_SOURCE`가 없으면 기동을 거부한다.
+- [x] `auth.apple`·`auth.refresh`·`account.delete`가 한도 초과 시 `429`다. 초과한 `auth.apple` 요청은 Apple 서버(mock)를 호출하지 않는다.
+- [x] 초대 token 길이 검사 실패(형식 404)도 한도를 소비한다.
+- [x] IPv6 /64 안의 다른 주소가 같은 bucket을 쓴다.
+- [x] `rate_limit_buckets`, audit, 로그 어디에도 원문 IP·token이 없다.
+- [x] 초과 순간에 audit `rate_limit.exceeded`가 창당 1줄만 남고, 이후 거부는 audit를 늘리지 않는다.
+- [x] (테스트는 40회·8개 IP로 축소해 상한 5·7을 검증) 같은 IP에서 로그인 실패를 100번 반복해도 action이 달라도 미인증 실패 audit 행은 10분에 5개 이하다. 서로 다른 IP 1000개에서 실패해도 전역 상한(300) 이하다. 이 두 scope의 초과는 `rate_limit.exceeded` audit를 남기지 않는다.
+- [x] `invite.*` scope의 초과 audit `rate_limit.exceeded`가 창당 1줄이다.
+- [x] 제한 문장이 실패하면 closed scope는 `503`과 `Retry-After`, open scope는 통과하며 `limiter_error`가 기록되고, `invite.web`은 이름 없는 정적 페이지다.
+- [ ] 제한 장치의 pool 고갈·timeout이 도메인 pool을 잠식하지 않는다. (전용 pool과 `statement_timeout` 설정은 검증했고, 부하 상황의 격리는 운영 계측에서 확인한다)
+- [x] 다중 키 upsert가 subject 접두사 덕에 같은 row 충돌 오류를 내지 않고, 정렬된 순서로 교착하지 않는다.
+- [x] 만료된 bucket을 prune 작업이 지우고 살아 있는 창은 지우지 않는다.
 
 ## 11. 현재 구현과의 차이
 
-- 요청 제한 코드가 없다. `httpapi.CodeRateLimited` 상수와 P3의 초대 생성 시간당 count만 있다.
-- `auditFailure`는 실패마다 `audit_events`에 행을 쓴다.
-- 클라이언트 IP를 읽는 코드가 없다.
+구현됨: `auth.apple`·`auth.refresh`·`account.delete`·`invite.preview/accept`·`audit.auth_failure*`, 클라이언트 IP 해석, 전용 pool, `rate_limit_buckets`와 prune, 429/503 계약, OpenAPI(인증·계정 삭제 endpoint).
+
+남은 차이:
+
+- `invite.web`(웹 폴백)은 AASA·웹 폴백 작업에서 붙인다.
+- `visibility.change`, 가능 시간 검색, 제안은 각 설계 구현 시 같은 `Limiter`를 호출한다.
+- OpenAPI에는 초대 endpoint 자체가 아직 없다. 추가할 때 429/503을 함께 넣는다.
+- 관측은 로그 기반이다. 외부 지표 내보내기는 없다.
+- 사전 차단 캐시가 항목 상한에 차면 새 키마다 전체를 훑는다(IP를 순환하는 공격에서 CPU 증폭 가능). 현실적 영향은 작아 후속으로 미룬다.
 
 ## 12. 미결정 사항
 

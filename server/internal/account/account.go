@@ -21,6 +21,7 @@ import (
 	"plantogether/server/internal/auth"
 	"plantogether/server/internal/notification"
 	"plantogether/server/internal/platform/httpapi"
+	"plantogether/server/internal/platform/ratelimit"
 )
 
 // Sealer는 push token 암호화다. secretbox가 구현한다.
@@ -39,6 +40,8 @@ type Handler struct {
 	sealer    Sealer
 	refKeyBox notification.Box
 	now       func() time.Time
+	// limiter는 계정 삭제 요청 제한이다. nil이면 꺼진다.
+	limiter ratelimit.Allower
 }
 
 // Deps는 Handler의 의존성이다.
@@ -50,6 +53,8 @@ type Deps struct {
 	// RefKeyBox는 notification_ref_key를 봉인하고 연다.
 	RefKeyBox notification.Box
 	Now       func() time.Time
+	// Limiter는 docs/rate_limit_design.md의 요청 제한이다. nil이면 제한하지 않는다.
+	Limiter ratelimit.Allower
 }
 
 // NewHandler는 Handler를 만든다.
@@ -57,7 +62,7 @@ func NewHandler(d Deps) *Handler {
 	if d.Now == nil {
 		d.Now = time.Now
 	}
-	return &Handler{pool: d.Pool, logger: d.Logger, sealer: d.Sealer, refKeyBox: d.RefKeyBox, now: d.Now}
+	return &Handler{pool: d.Pool, logger: d.Logger, sealer: d.Sealer, refKeyBox: d.RefKeyBox, now: d.Now, limiter: d.Limiter}
 }
 
 // Register는 endpoint를 등록한다. require는 인증 미들웨어다.
