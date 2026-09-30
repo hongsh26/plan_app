@@ -23,6 +23,7 @@ import (
 
 	"plantogether/server/internal/account"
 	"plantogether/server/internal/auth"
+	"plantogether/server/internal/party"
 	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/config"
 	"plantogether/server/internal/platform/httpapi"
@@ -102,6 +103,7 @@ func run() error {
 	mux := httpapi.NewMux(pool, logger)
 	authHandler.Register(mux)
 	account.NewHandler(account.Deps{Pool: pool.Pool(), Logger: logger, Sealer: box, RefKeyBox: box}).Register(mux, authHandler.Require)
+	party.NewHandler(party.Deps{Pool: pool.Pool(), Logger: logger}).Register(mux, authHandler.Require)
 	syncfeed.NewHandler(syncfeed.Deps{Pool: pool.Pool(), Logger: logger, RefKeyBox: box}).Register(mux, authHandler.Require)
 
 	server := httpapi.NewServer(cfg.HTTPAddr, httpapi.Wrap(logger, mux))

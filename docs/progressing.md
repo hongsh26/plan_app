@@ -47,9 +47,9 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 
 설계 §5.8과 계획 P8(강제 위임·해산)이 이 공백의 주인이다. **P8을 P5 이후로 미루더라도 이 결함은 그때까지 살아 있다.** 승계자 결정 규칙은 계획 P8에 있다.
 
-### Party 스키마(P1) 진행 상황
+### Party 스키마(P1) 완료
 
-`feature/party-membership`에서 migration 00010과 통합 테스트를 구현했다. 상세와 확정한 방향은 `docs/rec/2026-09-29_1415_party_membership_schema.md`에 있다. 독립 재검증(1차)이 지연 트리거의 `party_id` UPDATE 구멍과 문서 줄 수 초과를 지적해 고쳤다(트리거가 OLD Party도 검사, 테스트 1개 추가). **수정분의 원격 CI와 재검증 후 `main` 병합이 남았다.**
+Migration 00010과 통합 테스트를 PR #5로 `main`에 병합했다. 수정분의 원격 CI, PR 필수 검사, 독립 재검증이 통과했다. 상세는 `docs/rec/2026-09-29_1415_party_membership_schema.md`와 `docs/rec/2026-09-30_1400_party_schema_merge.md`에 있다.
 
 - 테이블 5종(`parties`, `party_memberships`, `party_invites`, `party_visibility_settings`, `party_schedule_projections`), 부분 unique index 3종, 지연 검증 CONSTRAINT TRIGGER 3종
 - **계획 P1의 "추가"는 실제로는 전체 CREATE였다.** 설계 §8이 세 테이블을 고정했지만 P0 골격은 만들지 않았다. 후속 설계 계획에도 같은 착시가 있을 수 있으니 착수 전에 실제 스키마를 먼저 확인한다
@@ -76,8 +76,8 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 
 ## 다음 작업
 
-1. Party 스키마(P1) 수정분을 원격 CI와 재검증(2차)으로 확인한 뒤 `main`에 병합한다.
-2. Party membership P2(생성·조회·수정 endpoint)를 구현한다. **착수 전에 잠금 규약을 정한다.** 설계 §5.5는 `parties` → `party_memberships` → `party_invites` 순서와 대상 Party row `FOR UPDATE`를 요구하는데, `party_memberships.user_id` FK가 `users` row에 KEY SHARE를 걸어 mutation helper의 `idempotency_keys` INSERT와 만난다. `mutation.Retries()`가 0이 아니면 규약이 깨진 것이다.
+1. `feature/party-api`(Party P2 생성·조회·수정 endpoint)는 구현·테스트·재검증을 마쳤고 **병합만 남았다.** 이름 길이는 40 rune으로 확정했다(`docs/rec/2026-09-30_1500_party_name_rune_length.md`). 병합은 `feature/**`에서 CI 통과 후 fast-forward한다.
+2. `calendar_busy_facts` 테이블은 아직 없다. T1의 기존 busy fact projection 생성은 캘린더 동기화 단계에서 연결해야 한다. 현재는 원본이 없어 projection 0건이 정상이다.
 3. 이후 의존성 순서대로 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
 4. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.
 
