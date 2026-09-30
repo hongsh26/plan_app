@@ -23,6 +23,7 @@ import (
 
 	"plantogether/server/internal/account"
 	"plantogether/server/internal/auth"
+	"plantogether/server/internal/calendar"
 	"plantogether/server/internal/party"
 	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/config"
@@ -122,6 +123,7 @@ func run() error {
 	authHandler.Register(mux)
 	account.NewHandler(account.Deps{Pool: pool.Pool(), Logger: logger, Sealer: box, RefKeyBox: box, Limiter: limiter}).Register(mux, authHandler.Require)
 	party.NewHandler(party.Deps{Pool: pool.Pool(), Logger: logger, Limiter: limiter}).Register(mux, authHandler.Require)
+	calendar.NewHandler(calendar.Deps{Pool: pool.Pool(), Logger: logger, Limiter: limiter}).Register(mux, authHandler.Require)
 	syncfeed.NewHandler(syncfeed.Deps{Pool: pool.Pool(), Logger: logger, RefKeyBox: box}).Register(mux, authHandler.Require)
 
 	server := httpapi.NewServer(cfg.HTTPAddr, httpapi.WithClientIP(

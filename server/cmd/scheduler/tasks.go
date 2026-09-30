@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plantogether/server/internal/auth"
+	"plantogether/server/internal/calendar"
 	"plantogether/server/internal/platform/audit"
 	"plantogether/server/internal/platform/jobs"
 	"plantogether/server/internal/platform/mutation"
@@ -69,6 +70,13 @@ func tasks(pool *pgxpool.Pool, logger *slog.Logger) []schedule.Task {
 			Name: "audit_tombstone_prune", Interval: time.Hour, Timeout: 5 * time.Minute,
 			Run: cleanup("audit_tombstone_prune", func(ctx context.Context) (int64, error) {
 				return audit.PruneTombstones(ctx, pool, time.Now().Add(-audit.TombstoneRetention), cleanupBatch)
+			}),
+		},
+		{
+			// 완료·중단·방치된 snapshot session과 staging은 24시간 뒤 지운다(설계 3 §11).
+			Name: "calendar_snapshot_prune", Interval: time.Hour, Timeout: 5 * time.Minute,
+			Run: cleanup("calendar_snapshot_prune", func(ctx context.Context) (int64, error) {
+				return calendar.Prune(ctx, pool, time.Now().Add(-calendar.StagingRetention), cleanupBatch)
 			}),
 		},
 		{

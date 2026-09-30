@@ -78,13 +78,13 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 
 ## 다음 작업
 
-**목표: 핵심 가치(공통 가능 시간 찾기)를 보여주는 시연.** 사용자가 정한 순서다. 시연에 필요 없는 P5·P6~P8·제안·캘린더 쓰기·알림은 뒤로 미루되, P8(계정 삭제 연동)은 출시 전 필수다.
+**목표: 핵심 가치(공통 가능 시간 찾기)를 보여주는 시연.** 시연에 필요 없는 P5·P6~P8·제안·캘린더 쓰기·알림은 뒤로 미루되, P8(계정 삭제 연동)은 출시 전 필수다.
 
-1. ✅ 개발용 로그인(A): `DEV_LOGIN_ENABLED=true`(로컬 전용)에서 identity_token `dev:<이름>`. `server/scripts/`의 `run_api_dev.sh`, `demo_api.sh`로 서버 API 시연 가능
-2. **캘린더 동기화 서버**(설계 3, `calendar_busy_facts` 테이블과 busy 업로드·projection 생성). T1·T3의 busy projection stub이 여기서 채워진다
-3. **공개 수준**(설계 5, `.omc/plans/party-visibility-implementation.md`)
-4. **가능 시간 검색 서버**(설계 6, `.omc/plans/availability-search-implementation.md`)
-5. **iOS 연동**: API 클라이언트, 로그인, Party·초대·캘린더 권한·가능 시간 화면. 기존 Swift는 설계와 크게 어긋나 새로 연결한다. 디자인은 `docs/design_references.md`
+1. ✅ 개발용 로그인(`DEV_LOGIN_ENABLED=true`, 로컬 전용)과 `server/scripts/`(`run_api_dev.sh`, `demo_api.sh`)
+2. ✅ 캘린더 동기화 서버(설계 3): 연결·snapshot·Busy facts·busy projection·freshness(재검증 High 1·Med 4 반영, 후속 Low는 rec 참고). `docs/rec/2026-09-30_1749_calendar_sync_server.md`
+3. **공개 수준**(설계 5, `.omc/plans/party-visibility-implementation.md`): 본인 설정 API와 details 상세, 하향·상향 시 projection 갱신. 지금은 설정 변경 API가 없고 projection은 busyOnly뿐이다
+4. **가능 시간 검색 서버**(설계 6, `.omc/plans/availability-search-implementation.md`): `calendar.FreshUsers`로 freshness gate, `calendar_busy_facts`로 계산
+5. **P6-lite + iOS 연동:** `bootstrap`이 Party·멤버십·projection을 내려주고 `GET /v1/parties`(내 Party 목록)를 추가한다(지금 bootstrap은 user·기기뿐). 그 뒤 iOS API 클라이언트·로그인·Party·초대·캘린더·가능 시간 화면. 디자인은 `docs/design_references.md`
 
 ## 유의 사항
 

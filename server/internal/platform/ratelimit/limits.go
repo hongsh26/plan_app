@@ -17,20 +17,24 @@ const (
 	ScopeAccountDelete       = "account.delete"
 	ScopeInvitePreview       = "invite.preview"
 	ScopeInviteAccept        = "invite.accept"
+	ScopeCalendarSnapshot    = "calendar.snapshot"
+	ScopeCalendarPage        = "calendar.page"
 	ScopeAuditAuthFailure    = "audit.auth_failure"
 	ScopeAuditAuthFailureAll = "audit.auth_failure.global"
 )
 
 var (
-	LimitAuthApple     = Limit{Count: 30, Window: time.Minute}       // IP당 (잠정)
-	LimitAuthRefresh   = Limit{Count: 300, Window: time.Minute}      // IP당 (잠정)
-	LimitAccountDelete = Limit{Count: 10, Window: time.Hour}         // 사용자당 (잠정)
-	LimitPreviewUser   = Limit{Count: 10, Window: time.Minute}       // party_membership_design.md §4.2
-	LimitPreviewIP     = Limit{Count: 30, Window: time.Minute}       //
-	LimitAcceptUser    = Limit{Count: 5, Window: time.Minute}        //
-	LimitAcceptIP      = Limit{Count: 30, Window: time.Minute}       //
-	LimitAuditIP       = Limit{Count: 5, Window: 10 * time.Minute}   // 미인증 실패 audit, IP당
-	LimitAuditGlobal   = Limit{Count: 300, Window: 10 * time.Minute} // 미인증 실패 audit, 전역 (잠정)
+	LimitAuthApple        = Limit{Count: 30, Window: time.Minute}       // IP당 (잠정)
+	LimitAuthRefresh      = Limit{Count: 300, Window: time.Minute}      // IP당 (잠정)
+	LimitAccountDelete    = Limit{Count: 10, Window: time.Hour}         // 사용자당 (잠정)
+	LimitPreviewUser      = Limit{Count: 10, Window: time.Minute}       // party_membership_design.md §4.2
+	LimitPreviewIP        = Limit{Count: 30, Window: time.Minute}       //
+	LimitAcceptUser       = Limit{Count: 5, Window: time.Minute}        //
+	LimitAcceptIP         = Limit{Count: 30, Window: time.Minute}       //
+	LimitCalendarSnapshot = Limit{Count: 10, Window: time.Minute}       // snapshot 생성, 사용자당 (잠정)
+	LimitCalendarPage     = Limit{Count: 300, Window: time.Minute}      // page 업로드, 사용자당 (잠정)
+	LimitAuditIP          = Limit{Count: 5, Window: 10 * time.Minute}   // 미인증 실패 audit, IP당
+	LimitAuditGlobal      = Limit{Count: 300, Window: 10 * time.Minute} // 미인증 실패 audit, 전역 (잠정)
 )
 
 // UserRule은 인증된 사용자 규칙이다.

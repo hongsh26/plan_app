@@ -171,6 +171,7 @@ ready → error → syncing
 | POST | `/v1/calendar/snapshots/{id}/complete` | 검증 후 window 원자적 교체 |
 | POST | `/v1/calendar/snapshots/{id}/abort` | 미완료 staging 폐기 |
 
+- **구현 메모(서버, 시연 트랙):** `PUT /v1/calendar/connection`은 If-Match가 없으면 create-only(이미 있으면 409), 있으면 그 version과 같을 때만 갱신한다(공용 파서가 version 0을 받지 않는다). `syncing`·`ready`는 서버만 정하고 클라이언트는 `permission_required`·`selecting`·`denied`·`restricted`·`revoked`·`needs_source_reselection`·`error`·`disconnected`만 보낸다. page는 본문 64KB 제한 때문에 250 facts 이하, snapshot은 200 page·20,000 facts 이하다. revision은 연결 안에서 단조 증가하며 `calendar_connections.last_snapshot_revision`이 session 정리 뒤에도 이를 지킨다.
 - snapshot은 connection, window, revision과 page count를 가진다.
 - page에는 EventKit identifier 없이 무작위 `source_event_key`와 allowlist 필드만 포함한다.
 - 앱이 만든 확정 일정에는 allowlist 필드로 `app_confirmed_event_id`를 함께 올린다. `calendar_write_design.md` §6.6.1의 재일정 자기 충돌 제외가 이 값을 쓴다.

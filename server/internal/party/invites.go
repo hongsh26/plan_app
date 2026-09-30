@@ -551,6 +551,11 @@ func (h *Handler) emitJoin(ctx context.Context, tx *mutation.Tx, partyID, invite
 	if err := emitProjection(ctx, tx, newUserID, settingID); err != nil {
 		return err
 	}
+	// 다른 멤버의 허용된 projection도 부트스트랩으로 받는다(설계 4 §5.5 T3 13단계). 신규 멤버 본인의
+	// projection은 RebuildBusyProjections가 이미 활성 멤버 전원에게 발행했다.
+	if err := emitPartyProjectionsTo(ctx, tx, newUserID, partyID, newUserID); err != nil {
+		return err
+	}
 	// 방장에게만 초대 변경. token은 payload에 없다.
 	for _, m := range members {
 		if m.role == "owner" {

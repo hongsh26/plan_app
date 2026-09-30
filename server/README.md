@@ -26,6 +26,7 @@ If-Match, sync 변경 피드, outbox를 한 트랜잭션에서 강제) 위에 �
 | `internal/auth/` | Apple 로그인, refresh 회전·재사용 탐지, 로그아웃, 인증 미들웨어 (§5) |
 | `internal/account/` | `GET/PATCH /v1/me`, `GET /v1/devices`, `DELETE /v1/devices/{id}`, `PUT /v1/devices/{id}/push-token` |
 | `internal/syncfeed/` | `GET /v1/sync`(settled horizon 증분), `GET /v1/sync/bootstrap`. §13의 `internal/sync/`이지만 표준 라이브러리 `sync`와 이름이 겹쳐 바꿨다 |
+| `internal/calendar/` | 캘린더 동기화(설계 3): 연결 상태, snapshot 업로드·complete(원자적 generation 교체), Busy facts, freshness. complete와 상태 전이가 Party busy projection을 맞춘다 |
 | `internal/notification/` | 사용자별 `notification_ref_key` 발급. 발송은 아직 없다 |
 | `internal/platform/mutation/` | 모든 mutation의 공통 트랜잭션. 멱등성, version 충돌, sync 변경(ordinal 발급), outbox |
 | `internal/platform/audit/` | 보안 audit 기록 |

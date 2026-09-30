@@ -141,6 +141,48 @@ func (t *Tx) EmitChange(ctx context.Context, c Change) error {
 	return nil
 }
 
+// EmitChanges는 여러 sync 변경을 한 문장으로 기록한다. ordinal은 EmitChange와 같은 counter에서
+// 순서대로 발급한다. 수천 개를 EmitChange로 하나씩 넣으면 트랜잭션 안의 왕복이 폭증하므로
+// 대량 발행(캘린더 snapshot의 projection 변경)은 이 함수를 쓴다.
+func (t *Tx) EmitChanges(ctx context.Context, changes []Change) error {
+	const chunk = 1000
+	for start := 0; start < len(changes); start += chunk {
+		end := start + chunk
+		if end > len(changes) {
+			end = len(changes)
+		}
+		part := changes[start:end]
+		ordinals := make([]int32, len(part))
+		recipients := make([]uuid.UUID, len(part))
+		types := make([]string, len(part))
+		ids := make([]uuid.UUID, len(part))
+		ops := make([]string, len(part))
+		versions := make([]*int64, len(part))
+		payloads := make([]string, len(part))
+		for i, c := range part {
+			b, err := json.Marshal(c.Payload)
+			if err != nil {
+				return fmt.Errorf("mutation: sync payload를 직렬화할 수 없다: %w", err)
+			}
+			ordinals[i], recipients[i], types[i], ids[i], versions[i], payloads[i] = t.ordinal+int32(i), c.Recipient, c.EntityType, c.EntityID, c.Version, string(b)
+			ops[i] = "upsert"
+			if c.Version == nil {
+				ops[i] = "tombstone"
+			}
+		}
+		if _, err := t.Exec(ctx, `
+			INSERT INTO sync_changes (ordinal, recipient_user_id, entity_type, entity_id, operation, entity_version, payload)
+			SELECT o, r, e, i, op, v, p::jsonb
+			  FROM unnest($1::int[], $2::uuid[], $3::text[], $4::uuid[], $5::text[], $6::bigint[], $7::text[])
+			       AS x(o, r, e, i, op, v, p)`,
+			ordinals, recipients, types, ids, ops, versions, payloads); err != nil {
+			return err
+		}
+		t.ordinal += int32(len(part))
+	}
+	return nil
+}
+
 // Job은 outbox job 하나다.
 type Job struct {
 	Type    string

@@ -373,20 +373,43 @@ func TestActivePartyMustKeepAtLeastOneActiveMember(t *testing.T) {
 	// 트랜잭션 안의 DROP TRIGGER는 rollback으로 되돌아가므로 스키마에 남지 않는다.
 	// 테스트 역할이 plantogether_migration(테이블 소유자)이라 실행할 수 있다.
 	t.Run("방장 트리거를 빼도 멤버 수 트리거가 혼자 거부한다", func(t *testing.T) {
-		tx := begin(t, conn)
-		_, ownerMembershipID, _ := insertParty(t, tx)
-
-		for _, trigger := range []string{
-			"parties_assert_active_owner_membership ON parties",
-			"party_memberships_assert_active_owner_membership ON party_memberships",
-		} {
-			if _, err := tx.Exec(ctx, `DROP TRIGGER `+trigger); err != nil {
-				t.Fatalf("방장 트리거를 치울 수 없다 (%s): %v", trigger, err)
+		// DROP TRIGGER는 테이블에 ACCESS EXCLUSIVE 잠금을 잡는다. 이 패키지는 다른 패키지의 테스트와
+		// 같은 DB에서 병렬로 돌므로 parties·party_memberships를 만지는 다른 트랜잭션과 서로를 기다리며
+		// 교착할 수 있고, PostgreSQL은 그중 아무나 희생자로 고른다(다른 패키지의 테스트가 죽는다).
+		// 그래서 이 트랜잭션은 잠금을 오래 기다리지 않는다: lock_timeout을 교착 감지(기본 1초)보다 짧게
+		// 두고, 잠금을 못 얻으면 롤백한 뒤 잠시 쉬었다가 다시 시도한다. 교착·대기는 이 테스트가
+		// 확인하려는 불변식과 무관하다.
+		for attempt := 1; ; attempt++ {
+			tx := begin(t, conn)
+			if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '300ms'`); err != nil {
+				t.Fatalf("lock_timeout을 걸 수 없다: %v", err)
 			}
-		}
+			_, ownerMembershipID, _ := insertParty(t, tx)
 
-		endLastMember(t, tx, ownerMembershipID)
-		assertCheckViolation(t, checkDeferred(tx), "party_active_party_has_member_check")
+			retry := false
+			for _, trigger := range []string{
+				"parties_assert_active_owner_membership ON parties",
+				"party_memberships_assert_active_owner_membership ON party_memberships",
+			} {
+				if _, err := tx.Exec(ctx, `DROP TRIGGER `+trigger); err != nil {
+					var pgErr *pgconn.PgError
+					if errors.As(err, &pgErr) && (pgErr.Code == "40P01" || pgErr.Code == "55P03") && attempt < 30 {
+						retry = true
+						break
+					}
+					t.Fatalf("방장 트리거를 치울 수 없다 (%s): %v", trigger, err)
+				}
+			}
+			if retry {
+				_ = tx.Rollback(ctx)
+				time.Sleep(time.Duration(attempt) * 40 * time.Millisecond)
+				continue
+			}
+
+			endLastMember(t, tx, ownerMembershipID)
+			assertCheckViolation(t, checkDeferred(tx), "party_active_party_has_member_check")
+			return
+		}
 	})
 
 	t.Run("같은 트랜잭션에서 해산하면 통과한다", func(t *testing.T) {

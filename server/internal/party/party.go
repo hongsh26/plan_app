@@ -516,11 +516,11 @@ func checkCreateLimits(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
 	return nil
 }
 
-func createBusyOnlyProjections(_ context.Context, _ pgx.Tx, _ uuid.UUID, _ uuid.UUID) error {
-	// calendar_busy_facts is introduced by the calendar sync slice. Until that
-	// table exists, P2 creates zero projections and later snapshot completion
-	// will populate them.
-	return nil
+// createBusyOnlyProjections는 Party 생성·가입 시 사용자의 활성 generation Busy facts로 이 Party의
+// busyOnly projection을 만든다(설계 4 §5.5.1). 캘린더가 아직 ready가 아니면 만들지 않고, 이후 첫
+// snapshot 완료가 만든다.
+func createBusyOnlyProjections(ctx context.Context, tx *mutation.Tx, partyID, userID uuid.UUID) error {
+	return RebuildBusyProjections(ctx, tx, userID, &partyID, false)
 }
 
 func emitProjection(ctx context.Context, tx *mutation.Tx, recipient, entityID uuid.UUID) error {
