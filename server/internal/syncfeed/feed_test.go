@@ -504,9 +504,21 @@ func TestIncrementalPayloadIsFullProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	page, err := Read(ctx, f.pool, f.user, boot.Watermark, 0)
-	if err != nil || len(page.Changes) == 0 {
-		t.Fatalf("변경을 받지 못했다: %v", err)
+	// 다른 테스트 패키지의 트랜잭션이 horizon을 잠시 붙잡을 수 있으므로 drain과 같이 기다린다.
+	var page Page
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		page, err = Read(ctx, f.pool, f.user, boot.Watermark, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Changes) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("10초 안에 변경을 받지 못했다")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	var inc map[string]any
 	_ = json.Unmarshal(page.Changes[len(page.Changes)-1].Payload, &inc)
