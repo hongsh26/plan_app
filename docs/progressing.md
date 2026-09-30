@@ -2,7 +2,7 @@
 
 ## 현재
 
-**설계 단계는 끝났다. 상세 설계 1~9가 모두 확정됐고 각각 구현 계획이 `.omc/plans/`에 1:1로 있다. 지금은 구현 단계다.**
+**설계 단계는 끝났다. 상세 설계 1~9가 확정됐고 각각 구현 계획이 `.omc/plans/`에 1:1로 있다. 요청 제한 설계(횡단 인프라)는 초안이다. 지금은 구현 단계다.**
 
 | 설계 | 문서 | 구현 계획 |
 |---|---|---|
@@ -14,6 +14,7 @@
 | 7 제안·응답·확정 | `docs/proposal_lifecycle_design.md` | `.omc/plans/proposal-lifecycle-implementation.md` |
 | 8 확정 일정 캘린더 쓰기 | `docs/calendar_write_design.md` | `.omc/plans/calendar-write-implementation.md` |
 | 9 알림 | `docs/notification_design.md` | `.omc/plans/notification-implementation.md` |
+| 횡단 요청 제한 | `docs/rate_limit_design.md` | `.omc/plans/rate-limit-implementation.md` |
 
 각 설계의 확정 근거와 검토 이력은 `docs/rec/`에 있다. 컷라인과 범위는 `docs/feature_design_backlog.md`가 소유한다.
 
@@ -34,7 +35,7 @@
 **아직 남은 것 (잊으면 안 되는 것):**
 
 - **KMS 구현.** 없으면 api는 `APP_ENV=local`이 아닐 때 기동을 거부한다. 스테이징·프로덕션 배포가 막혀 있다. api 역할은 암호화만, 복호화는 삭제 worker만(§11)
-- 인증 rate limit(§11)과 로그인 실패마다 쌓이는 `audit_events` 문제
+- 요청 제한 구현과 로그인 실패 `audit_events` 상한(`rate_limit_design.md`, 계획 R0~R5)
 - OpenAPI 스키마와 실제 응답의 자동 대조(§15)
 - 로그인·refresh와 계정 상태 변경의 동시성 테스트(`FOR SHARE OF u` 회귀 감지)
 - Apple 서버 오류(`invalid_client` 등)가 HTTP 500과 `apple_error` 로그 필드로 나가는지 보는 HTTP 계층 테스트
@@ -47,24 +48,15 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 
 설계 §5.8과 계획 P8(강제 위임·해산)이 이 공백의 주인이다. **P8을 P5 이후로 미루더라도 이 결함은 그때까지 살아 있다.** 승계자 결정 규칙은 계획 P8에 있다.
 
-### Party 스키마(P1) 완료
+### Party P1~P3 완료 (`main`)
 
-Migration 00010과 통합 테스트를 PR #5로 `main`에 병합했다. 수정분의 원격 CI, PR 필수 검사, 독립 재검증이 통과했다. 상세는 `docs/rec/2026-09-29_1415_party_membership_schema.md`와 `docs/rec/2026-09-30_1400_party_schema_merge.md`에 있다.
+스키마(migration 00010), API(생성·조회·수정·멤버 목록), 초대(생성·목록·무효화·미리보기·수락)가 `main`에 있다. 상세와 설계 편차는 `docs/rec/2026-09-29_1415_party_membership_schema.md`, `..._09-30_1500_party_name_rune_length.md`, `..._09-30_1621_party_invites.md`.
 
-- 테이블 5종(`parties`, `party_memberships`, `party_invites`, `party_visibility_settings`, `party_schedule_projections`), 부분 unique index 3종, 지연 검증 CONSTRAINT TRIGGER 3종
-- **계획 P1의 "추가"는 실제로는 전체 CREATE였다.** 설계 §8이 세 테이블을 고정했지만 P0 골격은 만들지 않았다. 후속 설계 계획에도 같은 착시가 있을 수 있으니 착수 전에 실제 스키마를 먼저 확인한다
-- **`SET CONSTRAINTS ALL IMMEDIATE`는 남은 트랜잭션 전체의 검사 시점을 바꾼다.** 지연 검증 테스트에서 이 함수는 트랜잭션당 한 번, 마지막에만 부른다. 중간에 부르면 확인하려는 지연이 사라져 테스트가 조용히 무의미해진다
-- `CREATE CONSTRAINT TRIGGER` 이름이 63자를 넘으면 PostgreSQL이 조용히 자른다
-
-### Party API(P2) 완료, 초대(P3) 구현 중
-
-P2(생성·조회·수정·멤버 목록)는 `main`에 있다. 이름 길이는 40 **rune** 기준이다(설계 §4.1 개정, `docs/rec/2026-09-30_1500_party_name_rune_length.md`).
-
-P3 초대 API(생성·목록·무효화·미리보기·수락)를 `feature/party-invites`에 구현했다. 커밋·CI·병합 전이다. 상세와 설계 편차는 `docs/rec/2026-09-30_1621_party_invites.md`.
-
-- **초대 재전송은 token 원문을 다시 주지 못한다.** mutation은 결과 포인터만 저장하고 DB에는 hash만 있다. 응답을 잃으면 무효화하고 새로 만든다
-- `party_invites`에 version 열이 없어 sync 초대 upsert의 version을 `used_count + 1`로 쓴다
-- **이번에 제외한 것:** 수락·미리보기 사용자/IP당 분당 제한(공용 rate limit 인프라가 없어 인증 rate limit과 함께 설계), Universal Link AASA 호스팅과 웹 폴백 페이지, `notify_member_joined`를 처리하는 worker kind(job은 쌓이고 설계 9 이후 처리)
+- 이름 길이는 40 **rune** 기준이다(설계 §4.1 개정)
+- **초대 재전송은 token 원문을 다시 주지 못한다.** 응답을 잃으면 무효화하고 새로 만든다. sync 초대 version은 `used_count + 1`이다
+- **`SET CONSTRAINTS ALL IMMEDIATE`는 남은 트랜잭션 전체의 검사 시점을 바꾼다.** 지연 검증 테스트에서는 트랜잭션당 한 번, 마지막에만 부른다
+- `CREATE CONSTRAINT TRIGGER` 이름이 63자를 넘으면 PostgreSQL이 조용히 자른다. 후속 설계 계획의 "추가"는 실제 스키마를 먼저 확인한다
+- **P3에서 제외해 남은 것:** 수락·미리보기 분당 제한(`rate_limit_design.md`가 소유, 미구현이라 설계 4 §10 해당 인수 조건은 미충족), AASA 호스팅과 웹 폴백, `notify_member_joined` worker kind(job은 pending으로 쌓인다), 가입 시 busy projection 생성(`calendar_busy_facts` 없음)
 
 ### P0에서 남은 것
 
@@ -86,7 +78,7 @@ P3 초대 API(생성·목록·무효화·미리보기·수락)를 `feature/party
 
 ## 다음 작업
 
-1. `feature/party-invites`를 재검증하고 CI를 통과시켜 병합한다. 이후 P4(위임)·P5(탈퇴·강퇴·해산)·P8(계정 삭제 연동) 순이며, P8 전까지 위 계정 삭제 공백은 살아 있다. 위 "이번에 제외한 것"은 별도 작업으로 남는다.
+1. **요청 제한 설계(`docs/rate_limit_design.md`)는 1차 독립 검토 지적을 반영했다.** 재검토·확정 후 R0~R5로 구현한다(`feature/rate-limit-design`). 잠정 한도(auth 30/분, refresh 300/분, 삭제 10/시간, audit 전역 300)는 사용자 확인이 필요하다. 그 뒤 P4(소유권 위임)·P5(탈퇴·강퇴·해산)·P8(계정 삭제 연동) 순이며, P8 전까지 위 계정 삭제 공백은 살아 있다.
 2. `calendar_busy_facts` 테이블은 아직 없다. T1의 기존 busy fact projection 생성은 캘린더 동기화 단계에서 연결해야 한다. 현재는 원본이 없어 projection 0건이 정상이다.
 3. 이후 의존성 순서대로 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
 4. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.

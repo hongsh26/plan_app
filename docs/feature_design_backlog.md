@@ -174,7 +174,7 @@
 - 기준 데이터: PostgreSQL과 명시적 스키마 마이그레이션
 - 데이터 접근: PostgreSQL 전용 드라이버와 명시적 SQL 우선
 - 비동기 작업: PostgreSQL 트랜잭션과 함께 기록되는 outbox/job 테이블로 시작
-- 캐시: 초기 핵심 경로에서는 사용하지 않고, 요청 제한이나 짧은 TTL 캐시가 필요할 때 Valkey를 추가
+- 캐시: 초기 핵심 경로에서는 사용하지 않고, 짧은 TTL 캐시가 필요할 때 Valkey를 추가. **요청 제한은 PostgreSQL 카운터로 정했다**(`docs/rate_limit_design.md`). DB upsert가 병목이 되면 재검토한다
 - 배포 단위: 같은 코드베이스와 컨테이너 이미지에서 `api`, `worker`, `scheduler` 프로세스를 분리
 - 관리형 서비스 경계: PostgreSQL의 HA·백업과 컨테이너 실행 환경은 관리형을 허용하되, 도메인 API와 데이터 모델은 자체 소유
 
