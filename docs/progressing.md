@@ -56,6 +56,13 @@ Migration 00010과 통합 테스트를 PR #5로 `main`에 병합했다. 수정�
 - **`SET CONSTRAINTS ALL IMMEDIATE`는 남은 트랜잭션 전체의 검사 시점을 바꾼다.** 지연 검증 테스트에서 이 함수는 트랜잭션당 한 번, 마지막에만 부른다. 중간에 부르면 확인하려는 지연이 사라져 테스트가 조용히 무의미해진다
 - `CREATE CONSTRAINT TRIGGER` 이름이 63자를 넘으면 PostgreSQL이 조용히 자른다
 
+### Party API(P2) 완료
+
+`POST /v1/parties`, `GET /v1/parties/{id}`, `PATCH /v1/parties/{id}`, `GET /v1/parties/{id}/memberships`를 `main`에 병합했다(원격 CI 통과). 상세는 `docs/rec/2026-09-30_1500_party_name_rune_length.md`.
+
+- 이름 길이는 40 **rune** 기준이다(설계 §4.1 개정). 결합 이모지는 여러 개로 센다. 검증은 애플리케이션(`NormalizeName`)에만 있고 DB 제약은 없다
+- 결합 이모지를 rune으로 세는 경계 테스트는 아직 없다(낮은 위험)
+
 ### P0에서 남은 것
 
 리뷰 지적 중 남은 Low:
@@ -76,7 +83,7 @@ Migration 00010과 통합 테스트를 PR #5로 `main`에 병합했다. 수정�
 
 ## 다음 작업
 
-1. `feature/party-api`(Party P2 생성·조회·수정 endpoint)는 구현·테스트·재검증을 마쳤고 **병합만 남았다.** 이름 길이는 40 rune으로 확정했다(`docs/rec/2026-09-30_1500_party_name_rune_length.md`). 병합은 `feature/**`에서 CI 통과 후 fast-forward한다.
+1. Party membership **P3(초대)**를 새 브랜치 `feature/party-invites`에서 착수한다. 계획은 `.omc/plans/party-membership-implementation.md` P3. 이후 P4(위임)·P5(탈퇴·강퇴·해산)·P8(계정 삭제 연동) 순이며, P8 전까지 아래 계정 삭제 공백은 살아 있다.
 2. `calendar_busy_facts` 테이블은 아직 없다. T1의 기존 busy fact projection 생성은 캘린더 동기화 단계에서 연결해야 한다. 현재는 원본이 없어 projection 0건이 정상이다.
 3. 이후 의존성 순서대로 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
 4. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.
