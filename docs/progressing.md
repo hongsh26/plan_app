@@ -78,10 +78,13 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 
 ## 다음 작업
 
-1. **P5(탈퇴·강퇴·해산)**를 새 브랜치에서 착수한다(`.omc/plans/party-membership-implementation.md` P5). 이후 P6~P7(동기화 전파·알림 job), P8(계정 삭제 연동) 순이며, P8 전까지 아래 계정 삭제 공백은 살아 있다.
-2. `calendar_busy_facts` 테이블은 아직 없다. T1의 기존 busy fact projection 생성은 캘린더 동기화 단계에서 연결해야 한다. 현재는 원본이 없어 projection 0건이 정상이다.
-3. 이후 의존성 순서대로 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
-4. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.
+**목표: 핵심 가치(공통 가능 시간 찾기)를 보여주는 시연.** 사용자가 정한 순서다. 시연에 필요 없는 P5·P6~P8·제안·캘린더 쓰기·알림은 뒤로 미루되, P8(계정 삭제 연동)은 출시 전 필수다.
+
+1. ✅ 개발용 로그인(A): `DEV_LOGIN_ENABLED=true`(로컬 전용)에서 identity_token `dev:<이름>`. `server/scripts/`의 `run_api_dev.sh`, `demo_api.sh`로 서버 API 시연 가능
+2. **캘린더 동기화 서버**(설계 3, `calendar_busy_facts` 테이블과 busy 업로드·projection 생성). T1·T3의 busy projection stub이 여기서 채워진다
+3. **공개 수준**(설계 5, `.omc/plans/party-visibility-implementation.md`)
+4. **가능 시간 검색 서버**(설계 6, `.omc/plans/availability-search-implementation.md`)
+5. **iOS 연동**: API 클라이언트, 로그인, Party·초대·캘린더 권한·가능 시간 화면. 기존 Swift는 설계와 크게 어긋나 새로 연결한다. 디자인은 `docs/design_references.md`
 
 ## 유의 사항
 

@@ -14,6 +14,7 @@ If-Match, sync 변경 피드, outbox를 한 트랜잭션에서 강제) 위에 �
 
 | 경로 | 역할 |
 |---|---|
+| `scripts/` | 시연용. `run_api_dev.sh`(개발용 로그인을 켠 로컬 api), `demo_api.sh`(로그인→Party→초대→수락→위임 시연). 로컬 전용 |
 | `cmd/api/` | HTTP API. 인증·권한·상태 전이·sync (§9). 현재 health, 인증, 계정 조회와 마이그레이션 실행 |
 | `cmd/worker/` | APNs 발송, 계정 삭제, 명령 만료·재할당 (§9). outbox job 루프. 현재 `account_deletion` 등록 |
 | `cmd/scheduler/` | 만료 초대, 알림 예약, 작업 복구 (§9). 현재 sync 피드·세션·idempotency·끝난 job 정리와 밀린 job 감시 |

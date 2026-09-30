@@ -142,3 +142,40 @@ func TestLoadWorkerAuthRefusesNonLocalAndPartialAppleCredentials(t *testing.T) {
 		t.Fatalf("partial Apple 자격 오류가 올바르지 않다: %v", err)
 	}
 }
+
+func TestLoadAuthDevLoginFlag(t *testing.T) {
+	base := func() map[string]string {
+		return map[string]string{
+			"ACCESS_TOKEN_SIGNING_KEY": b64(32),
+			"APPLE_CLIENT_ID":          "com.example.app",
+			"TOKEN_ENCRYPTION_KEY":     b64(32),
+		}
+	}
+	s, err := LoadAuth(EnvLocal, FromMap(base()))
+	if err != nil || s.DevLogin {
+		t.Fatalf("기본값은 꺼져 있어야 한다: %+v %v", s, err)
+	}
+	m := base()
+	m["DEV_LOGIN_ENABLED"] = "true"
+	if s, err = LoadAuth(EnvLocal, FromMap(m)); err != nil || !s.DevLogin {
+		t.Fatalf("켜지지 않았다: %+v %v", s, err)
+	}
+	m["DEV_LOGIN_ENABLED"] = "maybe"
+	if _, err = LoadAuth(EnvLocal, FromMap(m)); err == nil {
+		t.Fatal("잘못된 값을 받았다")
+	}
+	// 배포 환경에서는 KMS 가드와 별개로 개발용 로그인 전용 오류가 나야 한다. KMS를 구현해
+	// 배포 환경을 허용하는 날에도 이 가드가 남아 있어야 하므로 오류 메시지까지 확인한다.
+	for _, env := range []string{"production", "staging"} {
+		m["DEV_LOGIN_ENABLED"] = "true"
+		_, err = LoadAuth(env, FromMap(m))
+		if err == nil || errors.Is(err, ErrKMSNotImplemented) || !strings.Contains(err.Error(), "DEV_LOGIN_ENABLED") {
+			t.Fatalf("%s: 개발용 로그인 전용 거부가 아니다: %v", env, err)
+		}
+		// 꺼져 있으면(또는 값이 없으면) 기존 KMS 거부 그대로다.
+		m["DEV_LOGIN_ENABLED"] = "false"
+		if _, err = LoadAuth(env, FromMap(m)); !errors.Is(err, ErrKMSNotImplemented) {
+			t.Fatalf("%s: %v", env, err)
+		}
+	}
+}

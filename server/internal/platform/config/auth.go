@@ -14,6 +14,7 @@ const (
 	envAppleKeyID            = "APPLE_KEY_ID"
 	envApplePrivateKey       = "APPLE_PRIVATE_KEY"
 	envTokenEncryptionKey    = "TOKEN_ENCRYPTION_KEY"
+	envDevLoginEnabled       = "DEV_LOGIN_ENABLED"
 )
 
 // AuthSettings는 api의 인증 설정이다.
@@ -31,6 +32,11 @@ type AuthSettings struct {
 	// TokenEncryptionKey는 로컬 암호화 키다. Apple refresh token과 push token을
 	// 봉인한다(§11). 항상 필수다.
 	TokenEncryptionKey []byte
+
+	// DevLogin이 true이면 identity_token "dev:<이름>"으로 Apple 없이 로그인한다. 시연과 로컬
+	// 개발 전용이다. LoadAuth가 KMS 가드와 별개로 APP_ENV=local이 아니면 이 플래그를 거부한다.
+	// 켜면 실제 Apple token은 받지 않는다(모든 로그인이 Apple refresh token 없이 만들어진다).
+	DevLogin bool
 }
 
 // WorkerAuthSettings는 worker가 Apple refresh token을 열고 revoke하는 데 필요한 설정이다.
@@ -67,7 +73,12 @@ func LoadAuth(env string, lookup Lookup) (AuthSettings, error) {
 	if lookup == nil {
 		return AuthSettings{}, errors.New("config: lookup이 nil이다")
 	}
+	// 개발용 로그인 가드는 KMS 가드와 독립이다. 나중에 KMS를 구현해 배포 환경을 허용하더라도
+	// 이 검사가 남아 있어야 "dev:<이름>"으로 누구나 로그인하는 우회가 배포 환경에서 켜지지 않는다.
 	if env != EnvLocal {
+		if raw, ok := nonEmpty(lookup, envDevLoginEnabled); ok && raw != "0" && strings.ToLower(raw) != "false" {
+			return AuthSettings{}, errors.New(envDevLoginEnabled + "는 APP_ENV=local에서만 켤 수 있다")
+		}
 		return AuthSettings{}, ErrKMSNotImplemented
 	}
 
@@ -79,6 +90,15 @@ func LoadAuth(env string, lookup Lookup) (AuthSettings, error) {
 	}
 
 	s.AppleCodeExchange = optionalAppleCodeExchange(v, lookup)
+	if raw, ok := nonEmpty(lookup, envDevLoginEnabled); ok {
+		switch strings.ToLower(raw) {
+		case "1", "true":
+			s.DevLogin = true
+		case "0", "false":
+		default:
+			v.addf("%s는 true 또는 false여야 한다", envDevLoginEnabled)
+		}
+	}
 
 	if err := v.err(); err != nil {
 		return AuthSettings{}, err

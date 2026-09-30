@@ -114,7 +114,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	authHandler, err := newAuthHandler(authSettings, pool, box, logger, limiter)
+	authHandler, err := newAuthHandler(authSettings, cfg.Env, pool, box, logger, limiter)
 	if err != nil {
 		return err
 	}
@@ -176,7 +176,7 @@ func run() error {
 // Apple code 교환 자격이 없으면 교환을 건너뛴다. config.LoadAuth가 이 조합을
 // APP_ENV=local에서만 허용하므로 여기서 다시 확인하지 않는다. 대신 기동 로그에
 // 남겨 개발자가 모르고 지나가지 않게 한다.
-func newAuthHandler(s config.AuthSettings, pool *postgres.Pool, box *secretbox.LocalAESGCM, logger *slog.Logger, limiter *ratelimit.Limiter) (*auth.Handler, error) {
+func newAuthHandler(s config.AuthSettings, env string, pool *postgres.Pool, box *secretbox.LocalAESGCM, logger *slog.Logger, limiter *ratelimit.Limiter) (*auth.Handler, error) {
 	tokens, err := auth.NewAccessTokens(s.AccessTokenSigningKey, nil)
 	if err != nil {
 		return nil, err
@@ -186,8 +186,21 @@ func newAuthHandler(s config.AuthSettings, pool *postgres.Pool, box *secretbox.L
 		return nil, err
 	}
 	deps := auth.Deps{Pool: pool.Pool(), Apple: verifier, Tokens: tokens, Limiter: limiter}
+	if s.DevLogin {
+		// 시연과 로컬 개발 전용. LoadAuth가 이미 local 밖을 거부하지만, 이 우회는 인증 자체를
+		// 없애므로 여기서 한 번 더 확인한다(방어 심층).
+		if env != config.EnvLocal {
+			return nil, errors.New("개발용 로그인은 APP_ENV=local에서만 쓸 수 있다")
+		}
+		// 실제 Apple token은 받지 않는다(Next 없음). 이 모드의 모든 계정이 Apple refresh
+		// token 없이 만들어져 revoke 대상이 아니기 때문이다.
+		deps.Apple = auth.DevVerifier{}
+		logger.Warn("개발용 로그인이 켜져 있다. identity_token 'dev:<이름>'으로 누구나 로그인할 수 있고 실제 Apple 로그인은 꺼진다 (로컬 전용). 이 모드의 계정은 Apple revoke 대상이 아니다",
+			slog.String("action", "startup"),
+		)
+	}
 
-	if s.AppleCodeExchange != nil {
+	if s.AppleCodeExchange != nil && !s.DevLogin {
 		key, err := appleid.ParsePrivateKey(s.AppleCodeExchange.PrivateKeyPEM)
 		if err != nil {
 			return nil, err
@@ -203,7 +216,7 @@ func newAuthHandler(s config.AuthSettings, pool *postgres.Pool, box *secretbox.L
 		}
 		deps.CodeExchanger = client
 		deps.Sealer = box
-	} else {
+	} else if !s.DevLogin {
 		logger.Warn("Apple code 교환이 꺼져 있다. Apple refresh token을 저장하지 않으므로 계정 삭제 시 revoke할 수 없다 (로컬 전용)",
 			slog.String("action", "startup"),
 		)
