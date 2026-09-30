@@ -685,10 +685,10 @@ Universal Link를 위해 다음이 함께 필요하다.
 
 - [ ] `active` Party에 `role='owner' AND status='active'` 멤버십이 항상 정확히 1개이고, `disbanded` Party에는 0개다.
 - [ ] 위임 후 이전 방장은 `member`가 되고 관리 API가 모두 `403 forbidden`이다.
-- [ ] 위임 시 해당 Party의 활성 초대가 모두 `revoked`가 된다.
-- [ ] 위임 시 일반 멤버의 sync 응답에 `party_invite` tombstone이 포함되지 않는다.
-- [ ] 비활성 멤버를 대상으로 위임하면 `400 invalid_request`이고 소유권이 바뀌지 않는다.
-- [ ] 위임이 강등→승격 두 문으로 실행되어 owner partial unique index 위반 없이 커밋된다.
+- [x] 위임 시 해당 Party의 활성 초대가 모두 `revoked`가 된다.
+- [x] 위임 시 일반 멤버의 sync 응답에 `party_invite` tombstone이 포함되지 않는다. (`sync_changes` 수신자 기준으로 검증. sync 읽기 API 응답 단언은 P6 동기화 전파에서)
+- [x] 비활성 멤버를 대상으로 위임하면 `400 invalid_request`이고 소유권이 바뀌지 않는다.
+- [x] 위임이 강등→승격 두 문으로 실행되어 owner partial unique index 위반 없이 커밋된다.
 - [ ] 방장이 자기 자신을 강퇴하면 `400 invalid_request`다.
 
 ### 탈퇴·강퇴·해산

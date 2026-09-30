@@ -71,6 +71,7 @@ func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.H
 	mux.Handle("PATCH /v1/parties/{id}", require(http.HandlerFunc(h.patchParty)))
 	mux.Handle("GET /v1/parties/{id}/memberships", require(http.HandlerFunc(h.listMemberships)))
 	h.registerInvites(mux, require)
+	h.registerOwnerTransfer(mux, require)
 }
 
 type partyResponse struct {
@@ -318,6 +319,8 @@ func (h *Handler) writeDomainError(w http.ResponseWriter, r *http.Request, actio
 		httpapi.WriteError(w, r, http.StatusLocked, httpapi.CodeAccountLocked, "계정이 비활성화됐거나 삭제 중이다")
 	case errors.Is(err, errNotFound):
 		httpapi.WriteError(w, r, http.StatusNotFound, httpapi.CodeNotFound, "대상을 찾을 수 없다")
+	case errors.Is(err, errInvalidTransferTarget):
+		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidRequest, "위임 대상은 이 Party의 활성 멤버여야 한다")
 	case errors.Is(err, errForbidden):
 		httpapi.WriteError(w, r, http.StatusForbidden, httpapi.CodeForbidden, "권한이 없다")
 	case errors.Is(err, errOwnedLimitReached):

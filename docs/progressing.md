@@ -47,24 +47,16 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 
 설계 §5.8과 계획 P8(강제 위임·해산)이 이 공백의 주인이다. **P8을 P5 이후로 미루더라도 이 결함은 그때까지 살아 있다.** 승계자 결정 규칙은 계획 P8에 있다.
 
-### Party P1~P3 완료 (`main`)
+### Party P1~P4, 요청 제한 완료
 
-스키마(migration 00010), API(생성·조회·수정·멤버 목록), 초대(생성·목록·무효화·미리보기·수락)가 `main`에 있다. 상세와 설계 편차는 `docs/rec/2026-09-29_1415_party_membership_schema.md`, `..._09-30_1500_party_name_rune_length.md`, `..._09-30_1621_party_invites.md`.
+스키마(00010), API(생성·조회·수정·멤버 목록), 초대(P3), 소유권 위임(P4, `POST /v1/parties/{id}/owner`), 공용 요청 제한(00011)을 구현했다. 상세와 설계 편차는 `docs/rec/`의 `..._09-29_1415_party_membership_schema`, `..._09-30_1621_party_invites`, `..._09-30_1710_rate_limit_impl`, `..._09-30_1720_party_owner_transfer`.
 
-- 이름 길이는 40 **rune** 기준이다(설계 §4.1 개정)
-- **초대 재전송은 token 원문을 다시 주지 못한다.** 응답을 잃으면 무효화하고 새로 만든다. sync 초대 version은 `used_count + 1`이다
-- **`SET CONSTRAINTS ALL IMMEDIATE`는 남은 트랜잭션 전체의 검사 시점을 바꾼다.** 지연 검증 테스트에서는 트랜잭션당 한 번, 마지막에만 부른다
-- `CREATE CONSTRAINT TRIGGER` 이름이 63자를 넘으면 PostgreSQL이 조용히 자른다. 후속 설계 계획의 "추가"는 실제 스키마를 먼저 확인한다
-- **P3에서 남은 것:** AASA 호스팅과 웹 폴백(`invite.web` 제한 포함), `notify_member_joined`를 처리하는 worker kind(job은 pending으로 쌓인다), 가입 시 busy projection 생성(`calendar_busy_facts` 없음)
-
-### 요청 제한 구현 완료
-
-`auth.apple`·`auth.refresh`·`account.delete`·`invite.preview/accept`와 미인증 실패 audit 상한을 구현했다. 설계는 `docs/rate_limit_design.md`, 상세는 `docs/rec/2026-09-30_1710_rate_limit_impl.md`. 한도는 `internal/platform/ratelimit/limits.go` 한 곳이다.
-
-- **새 소비자는 `Require` 다음, 모든 입력 검증과 조회·`mutation.Prepare` 앞에서 `ratelimit.Enforce`를 호출한다.** 도메인 트랜잭션 안에서 세면 롤백과 함께 카운트가 사라져 제한이 무력해진다
-- **배포 전 설정:** `CLIENT_IP_SOURCE`(비로컬 필수)와 `TRUSTED_PROXY_HOPS`, `RATE_LIMIT_KEY`. 실제 헤더로 hops를 검증한다. `client_ip_fallback`·`limiter_error` 로그를 경보에 건다
+- 이름 길이는 40 **rune** 기준이다. 초대 재전송은 token 원문을 다시 주지 못한다(무효화 후 새로 만든다)
+- **`SET CONSTRAINTS ALL IMMEDIATE`는 남은 트랜잭션 전체의 검사 시점을 바꾼다.** 지연 검증 테스트에서는 트랜잭션당 한 번, 마지막에만 부른다. `CREATE CONSTRAINT TRIGGER` 이름이 63자를 넘으면 PostgreSQL이 조용히 자른다
+- **새 소비자는 `Require` 다음, 모든 입력 검증·조회·`mutation.Prepare` 앞에서 `ratelimit.Enforce`를 호출한다.** 트랜잭션 안에서 세면 롤백과 함께 카운트가 사라진다. 한도는 `internal/platform/ratelimit/limits.go` 한 곳
+- **배포 전:** `CLIENT_IP_SOURCE`(비로컬 필수)·`TRUSTED_PROXY_HOPS`·`RATE_LIMIT_KEY`를 설정하고 실제 헤더로 hops를 검증한다. `client_ip_fallback`·`limiter_error` 로그를 경보에 건다
 - **iOS 계약:** refresh 429는 세션 상실이 아니다. `Retry-After` 뒤 재시도하며 로그아웃하지 않는다
-- 남은 소비자: 공개 수준 변경·검색·제안(각 설계 구현 시), 웹 폴백 `invite.web`
+- **남은 것:** AASA 호스팅과 웹 폴백(`invite.web` 제한 포함), `notify_member_joined`·`notify_owner_transferred` worker kind(job은 pending으로 쌓인다), 가입 시 busy projection(`calendar_busy_facts` 없음), 공개 수준·검색·제안의 요청 제한 소비자, 초대·Party endpoint의 OpenAPI 등재
 
 ### P0에서 남은 것
 
@@ -86,7 +78,7 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 
 ## 다음 작업
 
-1. **P4(소유권 위임)**를 새 브랜치에서 착수한다(`.omc/plans/party-membership-implementation.md` P4). 이후 P5(탈퇴·강퇴·해산)·P8(계정 삭제 연동) 순이며, P8 전까지 위 계정 삭제 공백은 살아 있다.
+1. **P5(탈퇴·강퇴·해산)**를 새 브랜치에서 착수한다(`.omc/plans/party-membership-implementation.md` P5). 이후 P6~P7(동기화 전파·알림 job), P8(계정 삭제 연동) 순이며, P8 전까지 아래 계정 삭제 공백은 살아 있다.
 2. `calendar_busy_facts` 테이블은 아직 없다. T1의 기존 busy fact projection 생성은 캘린더 동기화 단계에서 연결해야 한다. 현재는 원본이 없어 projection 0건이 정상이다.
 3. 이후 의존성 순서대로 구현한다. Party membership → 공개 수준 → 캘린더 동기화 → 가능 시간 검색 → 제안·확정 → 캘린더 쓰기 → 알림.
 4. 상세 설계 10(결제)과 11(운영·출시 검증)은 위 구현 진행 후 다시 우선순위를 정한다.
@@ -94,6 +86,7 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 ## 유의 사항
 
 - 원본 MVP의 Google 연동과 결제는 장기 백로그로 보존하되 첫 출시 범위에서 제외한다.
+- 화면 설계 때 참고할 외부 디자인 레퍼런스는 `docs/design_references.md`에 모은다(사용자가 추가로 제공할 예정).
 - 기존 Swift 코드는 각 단계에서 계속 빌드·실행 가능해야 한다.
 - **현재 Swift 코드는 설계 1~9와 상당히 어긋나 있다.** 알림은 iOS·서버 양쪽에 전혀 없고 Notification Service Extension target도 없다. `CalendarService`에 destination calendar 선택·writer device·외부 쓰기 명령이 없다. hidden이 계산 입력에서도 제거되고, 활동 시간·시간대·검색 조건 모델이 없으며, Party가 모든 멤버의 공개 설정을 보유하고 proposal이 단순 응답 map의 `isConfirmed` 계산만 쓴다. 전체 차이는 각 설계의 "현재 구현 차이" 절에 있다.
 - 현재 앱 데이터는 메모리에만 있어 재실행 시 초기화된다.
