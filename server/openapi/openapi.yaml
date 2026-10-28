@@ -774,6 +774,90 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /v1/parties/{party_id}/availability/search:
+    post:
+      summary: Party 공통 가능 시간 검색
+      description: |
+        현재 Party의 모든 활성 멤버가 공통으로 가능한 시간만 돌려준다(docs/availability_search_design.md §4, §7.2).
+        멤버 ID·공개 수준·개별 활동 시간은 입력으로 받지 않는다(모르는 필드는 400). 계산은 공개 수준과
+        무관하게 private Busy facts를 쓴다. 응답과 오류에는 멤버 수, 가능 인원, 원인, 다른 멤버의 상태가 없다.
+
+        - 요청 제한: 사용자·Party당 분당 20회, 사용자 전체 분당 60회. 본문 검증 전에 센다.
+        - 기본값: start_date = time_zone 기준 오늘, end_date = 시작일 포함 14일째, duration_minutes 60,
+          max_results 20. time_zone은 필수다(서버는 기기 시간대를 모른다).
+        - 과거 start_date, end_date < start_date, 30~480분 30분 배수가 아닌 길이, 1~20이 아닌 max_results는
+          400 invalid_request. 시작일 포함 31일 초과나 end_date가 오늘+90일 이후면 400 search_range_invalid.
+        - 요청 날짜 범위의 UTC envelope가 모든 멤버의 active snapshot window 교집합 안에 없으면 400
+          search_range_invalid(어느 멤버인지 알리지 않는다).
+        - 슬롯은 RFC3339 UTC instant다. 같은 벽시계 시각이 DST fall-back으로 두 번 나올 수 있으므로 클라이언트는
+          약식 시간대(EDT/EST 등)와 함께 표시한다.
+        - calculation_version은 opaque 값이다. 제안 생성(설계 7)은 이 값과 같은 검색 조건(날짜를 명시한 값)을
+          보내야 하며, 입력이 바뀌었거나 valid_until이 지났으면 409 availability_result_stale이다.
+      operationId: searchPartyAvailability
+      tags: [availability]
+      parameters:
+        - name: party_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AvailabilitySearchRequest"
+      responses:
+        "200":
+          description: 모든 준비 조건을 충족한 결과. 공통 슬롯이 없으면 slots는 빈 배열이다.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AvailabilitySearchResponse"
+        "400":
+          description: |
+            invalid_request(형식·필드·한도), time_zone_invalid(지역 IANA 시간대가 아님),
+            search_range_invalid(31일 초과, 90일 snapshot 밖, 멤버 snapshot window 미포함).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "404":
+          description: 없는 Party, 해산된 Party, 비멤버, 떠난 멤버, 잘못된 id를 구분하지 않는다(code not_found).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: |
+            availability_setup_pending(한 명 이상 활동 시간 미설정) 또는 calendar_sync_pending(한 명 이상 캘린더가
+            ready가 아니거나 마지막 정상 sync가 6시간을 넘음). 둘 다면 setup이 우선한다. self는 호출자 본인 상태만이다.
+            availability_changed_retry는 검색 중 입력이 반복해서 바뀐 경우이며 self가 없다. 그대로 다시 검색한다.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/AvailabilityPendingError"
+                  - $ref: "#/components/schemas/ErrorResponse"
+        "423":
+          $ref: "#/components/responses/AccountLocked"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          description: |
+            availability_temporarily_unavailable(계산 기한 3초 초과, 부분 결과 없음) 또는 요청 제한 장치 장애(internal).
+            Retry-After 뒤 같은 조건으로 재시도한다.
+          headers:
+            Retry-After:
+              $ref: "#/components/headers/RetryAfter"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
 components:
   parameters:
     IdempotencyKey:
@@ -890,6 +974,60 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
 
   schemas:
+    AvailabilitySearchRequest:
+      type: object
+      required: [time_zone]
+      additionalProperties: false
+      properties:
+        start_date: {type: string, format: date, description: "time_zone 기준 날짜. 기본 오늘"}
+        end_date: {type: string, format: date, description: "시작일 포함. 기본 시작일 + 13일, 최대 시작일 + 30일·오늘 + 90일"}
+        duration_minutes: {type: integer, minimum: 30, maximum: 480, multipleOf: 30, default: 60}
+        time_zone: {type: string, maxLength: 64, description: "Area/City 형식의 IANA 시간대. 날짜와 30분 grid의 기준"}
+        max_results: {type: integer, minimum: 1, maximum: 20, default: 20}
+    AvailabilitySlot:
+      type: object
+      required: [start_at, end_at]
+      additionalProperties: false
+      properties:
+        start_at: {type: string, format: date-time, description: "UTC(Z) instant"}
+        end_at: {type: string, format: date-time, description: "UTC(Z) instant"}
+    AvailabilitySearchResponse:
+      type: object
+      required: [request_id, slots, calculation_version, generated_at, valid_until]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        slots:
+          type: array
+          maxItems: 20
+          description: 시작 시각 오름차순, 요청 시간대 날짜당 최대 3개.
+          items:
+            $ref: "#/components/schemas/AvailabilitySlot"
+        calculation_version: {type: string, description: "opaque. 내부 ID·version을 복원할 수 없다"}
+        generated_at: {type: string, format: date-time}
+        valid_until:
+          type: string
+          format: date-time
+          description: min(generated_at + 5분, 가장 이른 멤버 last sync + 6시간). 이후 제안 생성에 쓸 수 없다.
+    AvailabilitySelfState:
+      type: object
+      required: [activity, calendar]
+      additionalProperties: false
+      properties:
+        activity: {type: string, enum: [configured, unconfigured]}
+        calendar:
+          type: string
+          enum: [ready, not_connected, denied, revoked, syncing, source_required, error, stale]
+    AvailabilityPendingError:
+      type: object
+      required: [code, message, request_id, self]
+      additionalProperties: false
+      properties:
+        code: {type: string, enum: [availability_setup_pending, calendar_sync_pending]}
+        message: {type: string}
+        request_id: {type: string, format: uuid}
+        self:
+          $ref: "#/components/schemas/AvailabilitySelfState"
     AvailabilityIntervalInput:
       type: object
       required: [weekday, start_minute, end_minute]
@@ -1122,7 +1260,8 @@ components:
           type: string
           enum: [invalid_request, invalid_session, forbidden, not_found, version_conflict,
                  idempotency_mismatch, sync_cursor_expired, account_locked, rate_limited, internal,
-                 party_disbanded, owner_transfer_required]
+                 party_disbanded, owner_transfer_required, time_zone_invalid, search_range_invalid,
+                 availability_changed_retry, availability_temporarily_unavailable, availability_result_stale]
         message:
           type: string
           description: 사람이 읽는 짧은 설명. 클라이언트는 code로 분기한다.

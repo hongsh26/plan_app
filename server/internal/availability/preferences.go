@@ -1,6 +1,6 @@
 // Package availability는 설계 6(docs/availability_search_design.md)의 서버 쪽 공통 가능 시간이다.
-// A1 사용자별 활동 시간 저장·조회(이 파일), A3 검색 snapshot·calculationVersion(search_snapshot.go)이
-// 있다. 계산 엔진은 engine 하위 패키지에 있다.
+// A1 사용자별 활동 시간 저장·조회(이 파일), A3 검색 snapshot·calculationVersion(search_snapshot.go),
+// A4 Party 검색 API·캐시(search.go)가 있다. 계산 엔진은 engine 하위 패키지에 있다.
 //
 // 개인정보 규칙(§11, §12): 원시 활동 interval과 time zone은 본인 API 응답에만 싣는다. 다른 사용자
 // sync에 발행하지 않고, 본인 sync 변경에도 interval·time zone을 넣지 않으며, 로그와 오류 메시지에
@@ -67,6 +67,7 @@ type Handler struct {
 	now       func() time.Time
 	limiter   ratelimit.Allower
 	versioner *Versioner
+	cache     *resultCache
 }
 
 type Deps struct {
@@ -89,7 +90,8 @@ func NewHandler(d Deps) (*Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Handler{pool: d.Pool, logger: d.Logger, now: d.Now, limiter: d.Limiter, versioner: v}, nil
+	return &Handler{pool: d.Pool, logger: d.Logger, now: d.Now, limiter: d.Limiter, versioner: v,
+		cache: newResultCache(searchCacheSize)}, nil
 }
 
 // Versioner는 설계 7이 VerifyCalculationVersion을 부를 때 쓴다.
@@ -98,6 +100,7 @@ func (h *Handler) Versioner() *Versioner { return h.versioner }
 func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.Handler) {
 	mux.Handle("GET /v1/availability/preferences/me", require(http.HandlerFunc(h.getPreferences)))
 	mux.Handle("PUT /v1/availability/preferences/me", require(http.HandlerFunc(h.putPreferences)))
+	mux.Handle("POST /v1/parties/{party_id}/availability/search", require(http.HandlerFunc(h.search)))
 }
 
 // Interval은 API 응답의 정규형 활동 구간이다(engine.WeeklyInterval과 같은 필드). 분은 사용자 time zone의
