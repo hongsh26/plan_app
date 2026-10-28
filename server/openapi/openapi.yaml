@@ -279,15 +279,16 @@ paths:
       summary: 전체 snapshot과 cursor watermark
       description: |
         §7.2. 호출 사용자가 볼 수 있는 전체 상태를 entity 목록으로 준다. 각 entity는
-        증분 변경과 같은 모양이다(operation은 upsert). 클라이언트는 한 로컬 트랜잭션에서
+        증분 변경과 같은 모양이다(아래의 하한 항목을 빼면 operation은 upsert). 클라이언트는 한 로컬 트랜잭션에서
         기존 서버 투영을 이것으로 바꾸고 cursor를 cursor_watermark로 둔다.
 
         보장은 "최소 한 번 전달 + version 비교로 한 번 적용"이다. snapshot에 이미 반영된
         변경이 이후 증분으로 다시 올 수 있다. 클라이언트는 tombstone을 먼저 적용하고
         version이 더 큰 upsert만 적용한다.
 
-        entity는 upsert다. 단 호출자가 최근 30일 안에 끝낸 본인 멤버십은 version 있는 party_membership
-        tombstone 항목으로 온다. row를 만들지 않고 하한만 기록한다(SyncChange 규칙 (a)에 쓴다).
+        entity는 upsert다. 단 하한 전용 version 있는 tombstone 항목이 함께 온다. row를 만들지 않고 하한만 기록한다.
+        (1) 호출자가 최근 30일 안에 끝낸 본인 멤버십(SyncChange 규칙 (a)에 쓴다), (2) watermark 뒤에 upsert가 다시 올
+        수 있는데 이미 끝난 entity(끝난 초대·삭제된 projection 등).
       operationId: syncBootstrap
       tags: [sync]
       responses:
@@ -2021,7 +2022,7 @@ components:
           format: int64
           description: |
             upsert에는 필수다. 삭제·종료된 entity(Party projection·공개 설정·종료 멤버십·해산 Party·끝난 초대)의
-            tombstone은 version을 싣고, 클라이언트는 그보다 낮은 version 변경을 무시한다. null인 tombstone은
+            tombstone은 version을 싣고, 클라이언트는 그 version을 하한으로 기록해 하한 이하의 upsert를 무시한다. null인 tombstone은
             서버에 남아 있지만 수신자의 scope에서 빠진 entity(탈퇴자가 보던 Party·다른 멤버 entity)이며, 로컬 row만
             지우고 version 하한을 기록하지 않는다(재가입 시 같은 version으로 다시 온다).
         payload:

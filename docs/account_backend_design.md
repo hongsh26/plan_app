@@ -207,10 +207,10 @@ Party, 공개 설정, 제안 API는 후속 설계에서 추가하되 공통 멱�
 - **읽기는 settled horizon 아래만 반환한다.** 조회 트랜잭션은 `horizon = pg_snapshot_xmin(pg_current_snapshot())`을 구하고 `WHERE recipient_user_id = $1 AND (txid, ordinal) > cursor AND txid < horizon ORDER BY txid, ordinal`로 읽는다. `horizon` 미만의 트랜잭션은 전부 종료(커밋 또는 abort)되었으므로 아직 진행 중인 트랜잭션의 변경이 cursor 뒤에 나타날 수 없다.
 - `ordinal`은 트랜잭션 내부 counter이며 §5의 mutation transaction helper가 단독으로 발급한다. 개별 call site가 직접 세지 않는다.
 - 변경 payload는 type, id, operation, version과 entity의 **전체 투영**을 포함한다. 투영은 캘린더 상세와 token을 뺀 최소 필드 집합이지만, 같은 entity에 대해서는 bootstrap snapshot과 증분 변경이 언제나 같은 모양의 전체 투영을 싣는다. 바뀐 필드만 보내면 클라이언트에 병합 규칙이 필요하고, 로컬에 없는 entity의 일부 필드 upsert를 채울 수 없다. 클라이언트는 version이 더 큰 upsert를 받으면 payload로 로컬 entity를 통째로 바꾼다(2026-09-21 개정).
-- 삭제와 탈퇴는 tombstone으로 전달한다. 단 row가 남고 version이 오르는 상태 전이(예: 기기 폐기)는 `revoked` 같은 상태 필드를 담은 upsert로 전달한다. 스키마상 tombstone은 version을 가질 수 없어 version 비교로 순서를 정할 수 없기 때문이다(2026-09-21).
+- 삭제와 탈퇴는 tombstone으로 전달한다. 단 row가 남고 version이 오르는 상태 전이(예: 기기 폐기)는 `revoked` 같은 상태 필드를 담은 upsert로 전달한다. 당시 스키마상 tombstone은 version을 가질 수 없었기 때문이다(2026-09-21). migration 00014 이후 끝난(삭제·종료) entity의 tombstone은 version을 싣는다(아래 2026-10-28 개정).
 - 변경 피드는 기본 30일 보존한다. **정리 대상은 row의 `created_at`으로 고르지만, 410 판정은 시각이 아니라 위치로 한다.** 정리 작업은 지운 row 중 가장 뒤의 `(txid, ordinal)`을 같은 트랜잭션에서 정리 워터마크(`sync_prune_state`)로 기록하고, cursor가 워터마크 이하이면 `410 sync_cursor_expired`로 전체 재동기화를 요구한다. `created_at`은 트랜잭션 시작 시각이고 `txid`는 첫 쓰기 때 배정되어 두 순서가 어긋나므로, 시각으로 판정하면 "오래 열린 트랜잭션이 없다"는 가정이 필요하다. 위치로 판정하면 가정이 없다(2026-09-21 개정). `410`을 쓰는 다른 코드와 구별되도록 클라이언트는 상태 코드가 아니라 `code` 값으로 분기한다.
 - **피드 순서는 txid 순이지 직렬화 순서가 아니다(2026-10-28 개정).** txid는 트랜잭션 첫 쓰기(멱등성 INSERT)에서 배정되고 도메인 잠금은 그 뒤다. 그래서 먼저 txid를 받고 잠금을 기다린 트랜잭션의 변경이, 먼저 잠금을 잡고 커밋한 트랜잭션의 변경보다 앞에 올 수 있다. version 있는 변경은 version 비교로 순서와 무관하게 수렴한다. 다음 두 가지는 순서에 기대지 않도록 규칙을 둔다.
-  - 끝난(삭제·종료) entity의 tombstone은 마지막 upsert보다 큰 version을 싣는다. 초대도 같다(`used_count + 2`). 클라이언트는 그 version을 하한으로 기록하고 이하의 upsert를 무시한다.
+  - 끝난(삭제·종료) entity의 tombstone은 마지막 upsert보다 큰 version을 싣는다. 초대도 같다(`used_count + 2`). 클라이언트는 그 version을 하한으로 기록하고 하한 이하의 upsert를 무시한다.
   - Party 범위 변경(`party`, `party_membership`, `party_invite`, `party_visibility_setting`, `party_schedule_projection`)은 `scope_membership_id`, 즉 그 변경을 발행할 때의 수신자 멤버십 ID를 싣는다. 활성 멤버에게는 활성 멤버십, 방금 떠났거나 해산으로 끝난 수신자에게는 끝난 그 멤버십이다. bootstrap 항목도 호출자의 활성 멤버십을 싣는다. Party 밖 entity는 null이다.
   - **규칙 (a):** `scope_membership_id`가 이미 끝난 멤버십(그 `party_membership`의 version 있는 tombstone을 받아 하한이 기록된 ID)인 upsert는 버린다. 떠나기 전에 직렬화됐지만 탈퇴 tombstone 뒤에 도착한 변경이다.
   - **규칙 (b):** version 없는 tombstone(서버에는 남지만 수신자 scope에서 빠진 entity)은, 그 entity가 속한 Party에 tombstone의 `scope_membership_id`가 아닌 본인 활성 멤버십이 로컬에 있으면 무시한다. 재가입한 새 멤버십으로 이미 다시 받은 사본이다. 탈퇴·강퇴 트랜잭션은 본인 멤버십 tombstone을 scope tombstone보다 먼저 보낸다.
@@ -235,6 +235,7 @@ Party, 공개 설정, 제안 API는 후속 설계에서 추가하되 공통 멱�
 - tombstone을 먼저 적용해 삭제된 entity를 되살리지 않은 뒤 version이 더 큰 upsert만 적용한다.
 - snapshot 항목도 §7.1의 `scope_membership_id`를 싣고, 교체할 때 하한 기록은 비운다. 이후 증분은 §7.1 규칙 (a)(b)대로 적용한다(2026-10-28).
 - snapshot은 호출자가 변경 피드 보존 기간(30일) 안에 끝낸 본인 멤버십을 version 있는 `party_membership` tombstone 항목으로 함께 싣는다. 클라이언트는 row 없이 하한만 기록한다. 탈퇴는 snapshot에 반영됐지만 그보다 먼저 직렬화되고 txid가 watermark 뒤인 변경이 다시 올 때 규칙 (a)가 그 멤버십이 끝났음을 알아야 하기 때문이다(2026-10-28).
+- 같은 이유로 snapshot은 watermark 이상의 txid로 upsert가 기록된 entity 중 version 있는 tombstone이 있는 것의 하한(최대 tombstone version)을 tombstone 항목으로 싣는다. watermark 아래의 tombstone은 다시 오지 않는데 그보다 먼저 직렬화된 upsert는 다시 오므로, 하한 없이 교체하면 활성 멤버에게도 끝난 초대·projection이 되살아난다(2026-10-28).
 
 ### 7.3 iOS 로컬 상태
 

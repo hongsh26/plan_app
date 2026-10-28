@@ -300,8 +300,10 @@ func (s *partyStack) fetchBootstrapFloors(t *testing.T, token string) (map[entit
 		if !partyEntityTypes[c.EntityType] {
 			continue
 		}
-		if c.Operation == "tombstone" && c.EntityType == "party_membership" && c.Version != nil && c.Scope != nil {
-			floors[entityKey{c.EntityType, c.EntityID}] = *c.Version
+		if c.Operation == "tombstone" && c.Version != nil && c.Scope != nil {
+			if k := (entityKey{c.EntityType, c.EntityID}); *c.Version > floors[k] {
+				floors[k] = *c.Version
+			}
 			continue
 		}
 		if c.Operation != "upsert" || c.Version == nil || c.Scope == nil {
@@ -1184,5 +1186,69 @@ func TestBootstrapCarriesEndedMembershipFloors(t *testing.T) {
 	s.drain(t, noFloor)
 	if noFloor.count(p)["party"] != 1 {
 		t.Fatalf("재현 실패: 하한 없는 모델에도 Party가 되살아나지 않았다 %v", noFloor.count(p))
+	}
+}
+
+// 재현 6: 위임 T가 먼저 txid를 받고 수락 E가 먼저 커밋한 뒤, 그 사이 txid를 받은 열린 트랜잭션이 horizon을 붙잡은
+// 채 옛 방장이 새로 bootstrap한다. T의 초대 tombstone은 watermark 아래라 다시 오지 않고 E의 초대 upsert는 다시 온다.
+// 옛 방장은 활성 멤버라 규칙 (a)가 관여하지 않는다. snapshot이 그 초대의 하한을 실어야 되살아나지 않는다.
+func TestBootstrapCarriesTombstoneFloorsForRedeliveredUpserts(t *testing.T) {
+	s := newPartyStack(t)
+	a, b2, j := s.newUser(t, "r6.a"), s.newUser(t, "r6.b"), s.newUser(t, "r6.j")
+	aTok, aDev := s.signInDevice(t, a.subject)
+	bTok := s.signIn(t, b2.subject).token
+	jTok := s.signIn(t, j.subject).token
+	p := s.createParty(t, aTok, "R6")
+	_, inv1 := s.invite(t, aTok, p, "")
+	s.must(t, http.StatusCreated, http.MethodPost, "/v1/invites/"+inv1+"/accept", bTok, "", "")
+	invID, inv2 := s.invite(t, aTok, p, `{"max_uses":5}`)
+
+	v, _ := strconv.ParseInt(strings.Trim(s.partyETag(t, aTok, p), `"`), 10, 64)
+	blk := s.blockDevice(t, aDev)
+	transfer := s.async(t, http.MethodPost, "/v1/parties/"+p.String()+"/owner", aTok, `"`+strconv.FormatInt(v+1, 10)+`"`, `{"user_id":"`+b2.id.String()+`"}`)
+	blk.waitBlocked(t)
+	hold, err := s.pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hold.Rollback(context.Background()) }()
+	if _, err := hold.Exec(context.Background(), `SELECT pg_current_xact_id()`); err != nil {
+		t.Fatal(err)
+	}
+	s.must(t, http.StatusCreated, http.MethodPost, "/v1/invites/"+inv2+"/accept", jTok, "", "")
+	blk.release(t)
+	expectStatus(t, <-transfer, http.StatusOK)
+
+	id := uuid.MustParse(invID)
+	tombTx := s.txidOf(t, a.id, id, "tombstone")
+	var ac, noFloor *client
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		ac = s.newClient(t, "A", aTok, 0)
+		noFloor = s.newClient(t, "A(snapshot 하한 없음)", aTok, 0)
+		ca, _ := DecodeCursor(ac.cursor)
+		cn, _ := DecodeCursor(noFloor.cursor)
+		if ca.TxID > tombTx && cn.TxID > tombTx {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("watermark가 위임 txid를 넘지 않았다")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	ac.strictOrder, noFloor.strictOrder = false, false
+	noFloor.floors = map[entityKey]int64{}
+	if _, ok := ac.floors[entityKey{"party_invite", id}]; !ok {
+		t.Fatalf("snapshot에 초대 하한이 없다: %v", ac.floors)
+	}
+	if err := hold.Rollback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s.drain(t, ac)
+	s.converge(t, "bootstrap tombstone floors", ac)
+	ac.expect(t, "bootstrap tombstone floors", p, map[string]int{"party": 1, "party_membership": 3, "party_visibility_setting": 1})
+	s.drain(t, noFloor)
+	if noFloor.count(p)["party_invite"] != 1 {
+		t.Fatalf("재현 실패: 하한 없는 모델에도 초대가 되살아나지 않았다 %v", noFloor.count(p))
 	}
 }

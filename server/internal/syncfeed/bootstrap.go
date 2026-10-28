@@ -3,6 +3,7 @@ package syncfeed
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -86,6 +87,35 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID) (Snaps
 			for _, pr := range floors {
 				v, scope := pr.Version, pr.Scope
 				snap.Entities = append(snap.Entities, Change{EntityType: pr.EntityType, EntityID: pr.ID, Operation: "tombstone", Version: &v, Payload: json.RawMessage("null"), ScopeMembershipID: &scope})
+			}
+			// watermark 아래의 version 있는 tombstone은 다시 오지 않는데, 그보다 먼저 직렬화되고 txid가 watermark
+			// 이상인 같은 entity의 upsert는 다시 온다. snapshot 교체로 하한이 비워졌으므로 그런 entity의 하한을 싣는다
+			// (끝난 entity는 같은 ID로 되살아나지 않는다). 대상은 watermark 뒤 upsert가 있는 entity뿐이라 작다.
+			trows, err := tx.Query(ctx, `
+				SELECT t.entity_type, t.entity_id, max(t.entity_version), (array_agg(t.scope_membership_id ORDER BY t.txid DESC))[1]
+				  FROM sync_changes t
+				 WHERE t.recipient_user_id = $1 AND t.operation = 'tombstone' AND t.entity_version IS NOT NULL
+				   AND EXISTS (
+				       SELECT 1 FROM sync_changes u
+				        WHERE u.recipient_user_id = $1 AND u.entity_type = t.entity_type AND u.entity_id = t.entity_id
+				          AND u.operation = 'upsert' AND u.txid >= $2::text::xid8)
+				 GROUP BY t.entity_type, t.entity_id`, userID, strconv.FormatUint(horizon, 10))
+			if err != nil {
+				return err
+			}
+			for trows.Next() {
+				var ch Change
+				var v int64
+				if err := trows.Scan(&ch.EntityType, &ch.EntityID, &v, &ch.ScopeMembershipID); err != nil {
+					trows.Close()
+					return err
+				}
+				ch.Operation, ch.Version, ch.Payload = "tombstone", &v, json.RawMessage("null")
+				snap.Entities = append(snap.Entities, ch)
+			}
+			trows.Close()
+			if err := trows.Err(); err != nil {
+				return err
 			}
 			snap.Watermark = Cursor{Epoch: epoch, TxID: horizon, Ordinal: -1}
 			return nil

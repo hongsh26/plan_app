@@ -67,6 +67,11 @@ P·다른 M·다른 S, 그리고 당시의 초대 ∅)은 뒤에 오는 옛 upse
 3. **bootstrap 하한 항목:** snapshot은 호출자가 피드 보존 기간(30일) 안에 끝낸 본인 멤버십을 version 있는
    `party_membership` tombstone 항목으로 싣는다. snapshot 교체가 하한을 비우므로, 탈퇴는 snapshot에 반영됐지만 그보다
    먼저 직렬화되고 txid가 watermark 뒤인 변경이 다시 오면 규칙 (a)가 그 멤버십이 끝났음을 알아야 한다(재현 5).
+   **재검증 High 반영:** 같은 구조가 활성 멤버에게도 생긴다. watermark 아래의 version 있는 tombstone(위임의 초대 무효화,
+   hidden 전환의 projection 삭제)은 다시 오지 않는데 그보다 먼저 직렬화된 같은 entity의 upsert는 txid가 watermark 이상이라
+   다시 온다. 규칙 (a)는 활성 멤버에게 관여하지 않는다. 그래서 snapshot은 **watermark 이상 txid의 upsert가 이 수신자에게
+   기록된 entity 중 version 있는 tombstone이 있는 것**의 최대 tombstone version을 하한 항목으로 싣는다(`syncfeed/bootstrap.go`).
+   끝난 entity는 같은 ID로 되살아나지 않으므로 하한이 안전하고, 대상은 watermark 뒤 upsert가 있는 entity뿐이라 작다(재현 6).
 4. **클라이언트 규칙(설계 2 §7.1·§7.2 개정, OpenAPI `SyncChange` 설명·`scope_membership_id` 필드):**
    (a) scope가 끝난 멤버십(하한이 기록된 `party_membership` ID)인 upsert는 버린다.
    (b) version 없는 tombstone은 그 entity의 Party에 scope가 아닌 본인 활성 멤버십이 로컬에 있으면 무시한다.
@@ -113,6 +118,7 @@ P·다른 M·다른 S, 그리고 당시의 초대 ∅)은 뒤에 오는 옛 upse
     - `TestTransferRacingAcceptDoesNotResurrectInvite`: 옛 방장 피드에서 초대 tombstone 뒤에 수락 upsert가 오고 version 하한이 막는다. 옛 방장은 활성 멤버라 규칙 (a)(b)가 관여하지 않으므로 **대조군은 하한 없이 tombstone을 적용하는 모델**이며 그 모델은 bootstrap과 다름을 단언한다.
     - 대조군 단언 전에는 그 수신자의 sync_changes 마지막 위치까지 cursor가 넘을 때까지 읽는다(horizon 지연으로 일부만 받은 상태의 오판 방지). 재현 5는 horizon을 붙잡은 상태에서 watermark가 탈퇴 txid를 넘을 때까지 다시 bootstrap한다. party·calendar·availability 전체 테스트를 동시에 돌리며 재현 테스트 `-count=20` 통과.
     - `TestRenameRacingJoinDeliversNewName`: 이름 변경 upsert가 가입 부트스트랩보다 먼저(부모 없이) 와도 새 이름으로 수렴.
+    - `TestBootstrapCarriesTombstoneFloorsForRedeliveredUpserts`(재현 6): 재현 2 + horizon을 붙잡은 bootstrap. snapshot에 초대 하한이 있고 E의 초대 upsert가 다시 와도 버려진다. 하한 없는 모델은 초대가 되살아나고, 새 하한 쿼리를 끄면 실패함을 확인했다.
     - `TestBootstrapCarriesEndedMembershipFloors`: L과 E 사이 txid를 받은 열린 트랜잭션이 horizon을 붙잡은 채 bootstrap → snapshot은 Party 없음·하한 있음, E가 다시 와도 버려진다. snapshot 하한을 지운 모델은 Party가 되살아난다.
   - `TestSameDisplayNameIsNoop`(version 유지·재발행 0), `TestAccountDeletionAnonymizesNameForCoMembers`(삭제 worker 뒤 동료 모델 이름 = `탈퇴한 사용자` = bootstrap; 수정 제거 시 실패 확인).
   - 테스트 모델은 Party 범위 변경에 scope가 없으면, version 있는 tombstone이 로컬 version 이하이면 실패시킨다.
@@ -126,6 +132,7 @@ P·다른 M·다른 S, 그리고 당시의 초대 ∅)은 뒤에 오는 옛 upse
 
 - **iOS sync 적용기는 설계 2 §7.1 규칙 (a)(b)와 bootstrap 하한 항목을 구현해야 한다.** 이 테스트 모델(`party_sync_test.go` `client.apply`)이 기준 구현이다.
 - calculationVersion에서 membership·party version을 빼는 개선(4-2, 보고만).
+- 재검증 Low(미반영, 기능 영향 없음): `emitScoped`가 호출마다 Party 멤버십 이력을 한 번 읽는다(가입 부트스트랩처럼 entity마다 부르는 경로는 쿼리가 entity 수만큼). 필요하면 Party당 scope map을 한 번 구해 넘긴다. 정상 탈퇴에서 본인 멤버십 tombstone을 먼저 보내는 순서는 규칙 (b)가 scope 멤버십을 제외하므로 결과에 영향이 없다(순서 고정 테스트는 없다). 삭제 이름 전파 테스트는 API 역할 pool로 돈다(worker 역할도 default privileges로 같은 DML 권한).
 - `proposal` entity 발행(T5·T7 tombstone 포함) → 설계 7.
 - P8 계정 삭제: 강제 위임·해산(익명화 이름 전파는 이번에 했다).
 - 초대 만료 job(3-②의 tombstone 계약).
