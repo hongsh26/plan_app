@@ -85,7 +85,7 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 1. ✅ 개발용 로그인(`DEV_LOGIN_ENABLED=true`, 로컬 전용)과 `server/scripts/`(`run_api_dev.sh`, `demo_api.sh`)
 2. ✅ 캘린더 동기화 서버(설계 3): 연결·snapshot·Busy facts·busy projection·freshness(재검증 High 1·Med 4 반영, 후속 Low는 rec 참고). `docs/rec/2026-09-30_1749_calendar_sync_server.md`
 3. **공개 수준**(설계 5, `.omc/plans/party-visibility-implementation.md`): 서버 쪽 V1~V3 완료(탈퇴·강퇴·해산 cleanup 포함, `docs/rec/2026-10-14_2322_membership_end_cleanup.md`). 남은 것은 iOS(V3 캐시 삭제·scope 교체, V5 설정 화면)와 V6 privacy 스캔. **iOS 계약:** version 없는 tombstone은 version 하한을 남기지 않고, 탈퇴 큐는 200·410을 모두 완료로 처리한다. 서버 작업은 `main`에 병합됐다(`aed8b93`)
-4. **가능 시간 검색 서버**(설계 6, `.omc/plans/availability-search-implementation.md`): `calendar.FreshUsers`로 freshness gate, `calendar_busy_facts`로 계산
+4. **가능 시간 검색**(설계 6): 서버 A1~A4 완료(활동 시간 API, 계산 엔진, snapshot·freshness, 검색 API·캐시). rec `2026-10-28_1401`·`_1404`·`_1431`. 캘린더 `active_generation_usable` 플래그로 철회·source 변경 전 데이터가 검색·projection에 되살아나지 않는다. **남은 것:** A0 Swift 계약 테스트·A5 iOS(약식 시간대 표시 필수, tz가 Area/City가 아니면 도시 선택), A6 privacy 스캔·E2E, 설계 7에서 `VerifyCalculationVersionTx` 호출. **P8 차단:** 계정 삭제 시 활동 시간·캘린더 데이터도 지워야 한다
 5. **P6-lite + iOS 연동:** `bootstrap`이 Party·멤버십·projection을 내려주고 `GET /v1/parties`(내 Party 목록)를 추가한다(지금 bootstrap은 user·기기뿐). 그 뒤 iOS API 클라이언트·로그인·Party·초대·캘린더·가능 시간 화면. 디자인은 `docs/design_references.md`
 
 ## 유의 사항
