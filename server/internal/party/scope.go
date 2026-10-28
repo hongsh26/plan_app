@@ -9,6 +9,11 @@ import (
 	"plantogether/server/internal/platform/mutation"
 )
 
+// ScopedEntityTypes는 scope_membership_id를 싣는 Party 범위 entity type이다.
+func ScopedEntityTypes() []string {
+	return []string{entityParty, entityPartyMembership, entityPartyInvite, entityVisibilitySetting, entityScheduleProjection}
+}
+
 // emitScoped는 Party 범위 sync 변경을 수신자의 멤버십 ID(scope)와 함께 기록한다(account_backend_design.md
 // §7.1 2026-10-28 개정). Party 범위 변경은 모두 이 함수를 지난다.
 //

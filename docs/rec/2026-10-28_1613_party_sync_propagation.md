@@ -72,6 +72,18 @@ P·다른 M·다른 S, 그리고 당시의 초대 ∅)은 뒤에 오는 옛 upse
    다시 온다. 규칙 (a)는 활성 멤버에게 관여하지 않는다. 그래서 snapshot은 **watermark 이상 txid의 upsert가 이 수신자에게
    기록된 entity 중 version 있는 tombstone이 있는 것**의 최대 tombstone version을 하한 항목으로 싣는다(`syncfeed/bootstrap.go`).
    끝난 entity는 같은 ID로 되살아나지 않으므로 하한이 안전하고, 대상은 watermark 뒤 upsert가 있는 entity뿐이라 작다(재현 6).
+   **별도 리뷰 Med 반영(기기):** 기기 폐기는 tombstone이 아니라 revoked=true upsert라 snapshot에서 빠지고 위 하한에도 걸리지 않았다.
+   폐기 R(작은 txid)과 같은 기기의 push 갱신 U(큰 txid, 먼저 커밋, revoked=false) 역전 뒤 horizon을 붙잡은 bootstrap이면 U가
+   다시 와 폐기 기기가 되살아난다(재현 7). Party 밖 entity(user, device, availability_preference)는 **watermark 아래 이 수신자
+   행의 최대 version**을 하한으로 싣도록 일반화했다. 이 entity들은 version 없는 tombstone이 없고 version이 단조 증가한다.
+   Party 범위는 일반화하지 않았다. version 없는 scope tombstone 뒤 재가입이 같은 version을 다시 보내므로 upsert version
+   하한은 재가입 entity를 막는다.
+   - **availability_preference는 bootstrap에 넣지 않는다.** 이 변경은 구간·시간대 없는 본인 무효화 신호이고 클라이언트는
+     받으면 `GET /v1/availability/preferences/me`로 현재 값을 다시 읽는다. 옛 신호가 다시 와도 결과는 GET의 현재 값이라
+     되살아날 상태가 없다. 그래도 위 일반화로 watermark 뒤 옛 신호는 하한에 걸린다. snapshot에 넣으면 활동 시간 API와
+     sync가 같은 값을 두 경로로 갖게 돼 넣지 않았다.
+   - 30일 창의 기준 시각을 앱 시계에서 DB `now()`로 바꿨다. 창은 horizon이 보존 기간 이상 묶이지 않는다는 가정이며 §12
+     horizon lag 경보와 연결된다(설계 §7.2에 명시).
 4. **클라이언트 규칙(설계 2 §7.1·§7.2 개정, OpenAPI `SyncChange` 설명·`scope_membership_id` 필드):**
    (a) scope가 끝난 멤버십(하한이 기록된 `party_membership` ID)인 upsert는 버린다.
    (b) version 없는 tombstone은 그 entity의 Party에 scope가 아닌 본인 활성 멤버십이 로컬에 있으면 무시한다.
@@ -119,6 +131,7 @@ P·다른 M·다른 S, 그리고 당시의 초대 ∅)은 뒤에 오는 옛 upse
     - 대조군 단언 전에는 그 수신자의 sync_changes 마지막 위치까지 cursor가 넘을 때까지 읽는다(horizon 지연으로 일부만 받은 상태의 오판 방지). 재현 5는 horizon을 붙잡은 상태에서 watermark가 탈퇴 txid를 넘을 때까지 다시 bootstrap한다. party·calendar·availability 전체 테스트를 동시에 돌리며 재현 테스트 `-count=20` 통과.
     - `TestRenameRacingJoinDeliversNewName`: 이름 변경 upsert가 가입 부트스트랩보다 먼저(부모 없이) 와도 새 이름으로 수렴.
     - `TestBootstrapCarriesTombstoneFloorsForRedeliveredUpserts`(재현 6): 재현 2 + horizon을 붙잡은 bootstrap. snapshot에 초대 하한이 있고 E의 초대 upsert가 다시 와도 버려진다. 하한 없는 모델은 초대가 되살아나고, 새 하한 쿼리를 끄면 실패함을 확인했다.
+    - `TestBootstrapFloorKeepsRevokedDeviceRevoked`(재현 7): 기기 폐기 vs 같은 기기 push 갱신 역전 + horizon을 붙잡은 bootstrap. 하한 있는 기기 모델의 증분 결과가 새 bootstrap과 같고 하한 없는 모델은 폐기 기기가 되살아난다. 일반화를 끄면 실패함을 확인했다.
     - `TestBootstrapCarriesEndedMembershipFloors`: L과 E 사이 txid를 받은 열린 트랜잭션이 horizon을 붙잡은 채 bootstrap → snapshot은 Party 없음·하한 있음, E가 다시 와도 버려진다. snapshot 하한을 지운 모델은 Party가 되살아난다.
   - `TestSameDisplayNameIsNoop`(version 유지·재발행 0), `TestAccountDeletionAnonymizesNameForCoMembers`(삭제 worker 뒤 동료 모델 이름 = `탈퇴한 사용자` = bootstrap; 수정 제거 시 실패 확인).
   - 테스트 모델은 Party 범위 변경에 scope가 없으면, version 있는 tombstone이 로컬 version 이하이면 실패시킨다.

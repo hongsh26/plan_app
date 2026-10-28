@@ -288,7 +288,8 @@ paths:
 
         entity는 upsert다. 단 하한 전용 version 있는 tombstone 항목이 함께 온다. row를 만들지 않고 하한만 기록한다.
         (1) 호출자가 최근 30일 안에 끝낸 본인 멤버십(SyncChange 규칙 (a)에 쓴다), (2) watermark 뒤에 upsert가 다시 올
-        수 있는데 이미 끝난 entity(끝난 초대·삭제된 projection 등). 같은 entity의 하한 항목이 여러 개면 최대값을 쓴다.
+        수 있는 entity. Party 범위는 끝난 entity(끝난 초대·삭제된 projection 등)의 tombstone version, 그 밖(user, device,
+        availability_preference)은 watermark 아래 최대 version이다. 폐기한 기기가 옛 upsert로 되살아나지 않게 한다. 같은 entity의 하한 항목이 여러 개면 최대값을 쓴다.
         하한 항목의 scope_membership_id는 null일 수 있다(migration 00018 이전에 기록된 tombstone).
       operationId: syncBootstrap
       tags: [sync]

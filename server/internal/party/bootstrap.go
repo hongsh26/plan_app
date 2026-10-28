@@ -142,12 +142,13 @@ func BootstrapProjections(ctx context.Context, q Querier, userID uuid.UUID) ([]P
 // EndedMembershipFloors는 호출자가 since 이후 끝낸 멤버십을 bootstrap의 version 있는 tombstone 항목으로 준다
 // (account_backend_design.md §7.2 2026-10-28 개정). snapshot을 교체하면 하한 기록이 비워지는데, 탈퇴는 snapshot에
 // 반영됐지만 그보다 먼저 직렬화되고 txid가 watermark 뒤인 변경이 다시 오면 규칙 (a)가 그 멤버십이 끝났음을 알아야
-// 한다. since는 변경 피드 보존 기간이다. 그보다 오래된 변경은 다시 오지 않는다.
-func EndedMembershipFloors(ctx context.Context, q Querier, userID uuid.UUID, since time.Time) ([]Projection, error) {
+// 한다. window는 변경 피드 보존 기간이다. 기준 시각은 DB now()다. horizon이 window 이상 묶이지 않는다고 가정한다
+// (account_backend_design.md §12 horizon lag 경보가 30초에서 울린다).
+func EndedMembershipFloors(ctx context.Context, q Querier, userID uuid.UUID, window time.Duration) ([]Projection, error) {
 	rows, err := q.Query(ctx, `
 		SELECT id, version FROM party_memberships
-		 WHERE user_id = $1 AND status <> 'active' AND ended_at >= $2
-		 ORDER BY id`, userID, since)
+		 WHERE user_id = $1 AND status <> 'active' AND ended_at >= now() - make_interval(secs => $2)
+		 ORDER BY id`, userID, window.Seconds())
 	if err != nil {
 		return nil, err
 	}

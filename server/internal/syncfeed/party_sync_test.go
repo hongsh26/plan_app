@@ -1254,3 +1254,177 @@ func TestBootstrapCarriesTombstoneFloorsForRedeliveredUpserts(t *testing.T) {
 		t.Fatalf("재현 실패: 하한 없는 모델에도 초대가 되살아나지 않았다 %v", noFloor.count(p))
 	}
 }
+
+// ---- 기기 폐기 순서 역전 ----
+
+// deviceModel은 기기 목록 클라이언트 모델이다. 폐기는 revoked=true upsert로 오고 목록에서 뺀다(하한은 그 version).
+type deviceModel struct {
+	present map[uuid.UUID]int64
+	floors  map[uuid.UUID]int64
+	cursor  string
+}
+
+func (s *partyStack) bootstrapDevices(t *testing.T, token string, useFloors bool) *deviceModel {
+	t.Helper()
+	rec := s.req(t, http.MethodGet, "/v1/sync/bootstrap", token, "", "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Snapshot  []wireChange `json:"snapshot"`
+		Watermark string       `json:"cursor_watermark"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	m := &deviceModel{present: map[uuid.UUID]int64{}, floors: map[uuid.UUID]int64{}, cursor: body.Watermark}
+	for _, c := range body.Snapshot {
+		if c.EntityType != "device" || c.Version == nil {
+			continue
+		}
+		switch {
+		case c.Operation == "upsert":
+			m.present[c.EntityID] = *c.Version
+		case useFloors && *c.Version > m.floors[c.EntityID]:
+			m.floors[c.EntityID] = *c.Version
+		}
+	}
+	return m
+}
+
+func (m *deviceModel) apply(t *testing.T, ch wireChange) {
+	t.Helper()
+	if ch.EntityType != "device" || ch.Operation != "upsert" {
+		return
+	}
+	v := *ch.Version
+	if v <= m.floors[ch.EntityID] || v <= m.present[ch.EntityID] {
+		return
+	}
+	if revoked, _ := decodePayload(t, ch.Payload)["revoked"].(bool); revoked {
+		delete(m.present, ch.EntityID)
+		m.floors[ch.EntityID] = v
+		return
+	}
+	m.present[ch.EntityID] = v
+}
+
+// drainDevices는 사용자에게 기록된 변경을 모두 받을 때까지 읽는다.
+func (s *partyStack) drainDevices(t *testing.T, m *deviceModel, token string, userID uuid.UUID) {
+	t.Helper()
+	var maxTx string
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT max(txid)::text FROM sync_changes WHERE recipient_user_id = $1`, userID).Scan(&maxTx); err != nil {
+		t.Fatal(err)
+	}
+	last, _ := strconv.ParseUint(maxTx, 10, 64)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rec := s.req(t, http.MethodGet, "/v1/sync?cursor="+url.QueryEscape(m.cursor), token, "", "", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("sync = %d: %s", rec.Code, rec.Body.String())
+		}
+		var page struct {
+			Changes []wireChange `json:"changes"`
+			Cursor  string       `json:"cursor"`
+			HasMore bool         `json:"has_more"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &page)
+		for _, ch := range page.Changes {
+			m.apply(t, ch)
+		}
+		m.cursor = page.Cursor
+		cur, _ := DecodeCursor(m.cursor)
+		if !page.HasMore && cur.TxID > last {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("10초 안에 모든 변경을 받지 못했다")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// 재현 7: 기기 폐기 R이 먼저 txid를 받고, 같은 기기의 push 갱신 U(revoked=false, version +1)가 먼저 커밋한다. 그 사이
+// txid를 받은 열린 트랜잭션이 horizon을 붙잡은 채 다른 기기가 bootstrap하면 snapshot은 폐기 뒤(기기 없음)인데 U는
+// watermark 뒤라 다시 온다. snapshot이 그 기기의 하한(R의 version)을 실어야 폐기 기기가 되살아나지 않는다.
+func TestBootstrapFloorKeepsRevokedDeviceRevoked(t *testing.T) {
+	s := newPartyStack(t)
+	d := s.newUser(t, "r7.d")
+	t1, d1 := s.signInDevice(t, d.subject)
+	t2, d2 := s.signInDevice(t, d.subject)
+	var v int64
+	if err := s.pool.QueryRow(context.Background(), `SELECT version FROM devices WHERE id = $1`, d1).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+
+	blk := s.blockDevice(t, d2)
+	// U가 version을 1 올리므로 폐기는 그 다음 version을 If-Match로 보낸다.
+	revoke := s.async(t, http.MethodDelete, "/v1/devices/"+d1.String(), t2, `"`+strconv.FormatInt(v+1, 10)+`"`, "")
+	blk.waitBlocked(t)
+	hold, err := s.pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hold.Rollback(context.Background()) }()
+	if _, err := hold.Exec(context.Background(), `SELECT pg_current_xact_id()`); err != nil {
+		t.Fatal(err)
+	}
+	token := strings.Repeat("ab", 32)
+	s.must(t, http.StatusOK, http.MethodPut, "/v1/devices/"+d1.String()+"/push-token", t1, `"`+strconv.FormatInt(v, 10)+`"`,
+		`{"push_token":"`+token+`","push_environment":"sandbox","push_authorization":"authorized","time_sensitive_setting":"enabled"}`)
+	blk.release(t)
+	expectStatus(t, <-revoke, http.StatusNoContent)
+
+	// R의 변경(높은 version)이 U보다 작은 txid인지 확인한다.
+	var rTx, uTx string
+	if err := s.pool.QueryRow(context.Background(), `
+		SELECT (array_agg(txid::text ORDER BY entity_version DESC))[1], (array_agg(txid::text ORDER BY entity_version ASC))[1]
+		  FROM sync_changes WHERE recipient_user_id = $1 AND entity_id = $2 AND entity_version > $3`, d.id, d1, v).Scan(&rTx, &uTx); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := strconv.ParseUint(rTx, 10, 64)
+	u, _ := strconv.ParseUint(uTx, 10, 64)
+	if r >= u {
+		t.Fatalf("순서 역전이 일어나지 않았다: 폐기 txid %d, push 갱신 txid %d", r, u)
+	}
+
+	var withFloor, noFloor *deviceModel
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		withFloor, noFloor = s.bootstrapDevices(t, t2, true), s.bootstrapDevices(t, t2, false)
+		cw, _ := DecodeCursor(withFloor.cursor)
+		cn, _ := DecodeCursor(noFloor.cursor)
+		if cw.TxID > r && cn.TxID > r {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("watermark가 폐기 txid를 넘지 않았다")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, ok := withFloor.present[d1]; ok || withFloor.floors[d1] == 0 {
+		t.Fatalf("snapshot이 폐기 뒤 상태와 하한을 싣지 않았다: present %v floors %v", withFloor.present, withFloor.floors)
+	}
+	if err := hold.Rollback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s.drainDevices(t, withFloor, t2, d.id)
+	s.drainDevices(t, noFloor, t2, d.id)
+	fresh := s.bootstrapDevices(t, t2, true)
+	if !reflect.DeepEqual(keys(withFloor.present), keys(fresh.present)) {
+		t.Fatalf("증분 기기 목록 %v != bootstrap %v", keys(withFloor.present), keys(fresh.present))
+	}
+	if _, ok := noFloor.present[d1]; !ok {
+		t.Fatal("재현 실패: 하한 없는 모델에도 폐기 기기가 되살아나지 않았다")
+	}
+}
+
+func keys(m map[uuid.UUID]int64) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k.String())
+	}
+	sort.Strings(out)
+	return out
+}

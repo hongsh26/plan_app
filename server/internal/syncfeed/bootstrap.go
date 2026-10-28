@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -80,7 +79,7 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID) (Snaps
 				snap.Entities = append(snap.Entities, Change{EntityType: pr.EntityType, EntityID: pr.ID, Operation: "upsert", Version: &v, Payload: b, ScopeMembershipID: &scope})
 			}
 			// 최근 끝난 본인 멤버십은 하한 전용 tombstone 항목이다. 클라이언트는 row 없이 하한만 기록한다.
-			floors, err := party.EndedMembershipFloors(ctx, tx, userID, time.Now().Add(-Retention))
+			floors, err := party.EndedMembershipFloors(ctx, tx, userID, Retention)
 			if err != nil {
 				return err
 			}
@@ -88,9 +87,15 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID) (Snaps
 				v, scope := pr.Version, pr.Scope
 				snap.Entities = append(snap.Entities, Change{EntityType: pr.EntityType, EntityID: pr.ID, Operation: "tombstone", Version: &v, Payload: json.RawMessage("null"), ScopeMembershipID: &scope})
 			}
-			// watermark 아래의 version 있는 tombstone은 다시 오지 않는데, 그보다 먼저 직렬화되고 txid가 watermark
-			// 이상인 같은 entity의 upsert는 다시 온다. snapshot 교체로 하한이 비워졌으므로 그런 entity의 하한을 싣는다
-			// (끝난 entity는 같은 ID로 되살아나지 않는다). 대상은 watermark 뒤 upsert가 있는 entity뿐이라 작다.
+			// watermark 아래의 변경은 다시 오지 않는데, 그보다 먼저 직렬화되고 txid가 watermark 이상인 같은 entity의
+			// upsert는 다시 온다. snapshot 교체로 하한이 비워졌으므로 그런 entity의 하한을 싣는다. 대상은 watermark 뒤
+			// upsert가 있는 entity뿐이라 작다.
+			//   - Party 범위 entity: version 있는 tombstone의 최대 version. 끝난 entity는 같은 ID로 되살아나지 않는다.
+			//     version 없는 scope tombstone 뒤에는 재가입이 같은 version을 다시 보내므로 upsert version을 하한으로
+			//     쓰면 안 된다(그 경우는 규칙 (a)(b)가 맡는다).
+			//   - 그 밖(user, device, availability_preference): version 없는 tombstone이 없고 version이 단조 증가하므로
+			//     watermark 아래 이 수신자 행의 최대 version이 snapshot에 반영된 상태다. 기기 폐기는 revoked upsert라
+			//     snapshot에서 빠지므로 이 하한이 없으면 먼저 직렬화된 옛 upsert가 폐기 기기를 되살린다.
 			trows, err := tx.Query(ctx, `
 				WITH redelivered AS (
 				    SELECT DISTINCT entity_type, entity_id FROM sync_changes
@@ -100,8 +105,10 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID) (Snaps
 				  FROM redelivered r
 				  JOIN sync_changes t
 				    ON t.recipient_user_id = $1 AND t.entity_type = r.entity_type AND t.entity_id = r.entity_id
-				 WHERE t.operation = 'tombstone' AND t.entity_version IS NOT NULL
-				 GROUP BY t.entity_type, t.entity_id`, userID, strconv.FormatUint(horizon, 10))
+				 WHERE t.entity_version IS NOT NULL
+				   AND ((t.entity_type = ANY($3) AND t.operation = 'tombstone')
+				        OR (t.entity_type <> ALL($3) AND t.txid < $2::text::xid8))
+				 GROUP BY t.entity_type, t.entity_id`, userID, strconv.FormatUint(horizon, 10), party.ScopedEntityTypes())
 			if err != nil {
 				return err
 			}
