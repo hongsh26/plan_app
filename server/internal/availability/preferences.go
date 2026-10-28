@@ -1,5 +1,6 @@
 // Package availability는 설계 6(docs/availability_search_design.md)의 서버 쪽 공통 가능 시간이다.
-// 지금은 A1 사용자별 활동 시간 저장·조회만 있다. 계산 엔진은 engine 하위 패키지에 있다.
+// A1 사용자별 활동 시간 저장·조회(이 파일), A3 검색 snapshot·calculationVersion(search_snapshot.go)이
+// 있다. 계산 엔진은 engine 하위 패키지에 있다.
 //
 // 개인정보 규칙(§11, §12): 원시 활동 interval과 time zone은 본인 API 응답에만 싣는다. 다른 사용자
 // sync에 발행하지 않고, 본인 sync 변경에도 interval·time zone을 넣지 않으며, 로그와 오류 메시지에
@@ -61,10 +62,11 @@ const (
 var errInvalidInput = errors.New("availability: 입력이 올바르지 않다")
 
 type Handler struct {
-	pool    *pgxpool.Pool
-	logger  *slog.Logger
-	now     func() time.Time
-	limiter ratelimit.Allower
+	pool      *pgxpool.Pool
+	logger    *slog.Logger
+	now       func() time.Time
+	limiter   ratelimit.Allower
+	versioner *Versioner
 }
 
 type Deps struct {
@@ -73,14 +75,25 @@ type Deps struct {
 	Now    func() time.Time
 	// Limiter는 docs/rate_limit_design.md의 요청 제한이다. nil이면 제한하지 않는다.
 	Limiter ratelimit.Allower
+	// VersionSecret은 calculationVersion 키를 파생할 비밀(RATE_LIMIT_KEY)이다. 검색에 필수다.
+	VersionSecret []byte
 }
 
-func NewHandler(d Deps) *Handler {
+// NewHandler는 VersionSecret이 비어 있으면 오류다. 인스턴스마다 다른 키가 생기면 다른 인스턴스가 만든
+// calculationVersion을 검증하지 못하므로 임의 키로 대신하지 않는다.
+func NewHandler(d Deps) (*Handler, error) {
 	if d.Now == nil {
 		d.Now = time.Now
 	}
-	return &Handler{pool: d.Pool, logger: d.Logger, now: d.Now, limiter: d.Limiter}
+	v, err := NewVersioner(d.VersionSecret)
+	if err != nil {
+		return nil, err
+	}
+	return &Handler{pool: d.Pool, logger: d.Logger, now: d.Now, limiter: d.Limiter, versioner: v}, nil
 }
+
+// Versioner는 설계 7이 VerifyCalculationVersion을 부를 때 쓴다.
+func (h *Handler) Versioner() *Versioner { return h.versioner }
 
 func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.Handler) {
 	mux.Handle("GET /v1/availability/preferences/me", require(http.HandlerFunc(h.getPreferences)))

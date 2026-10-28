@@ -22,6 +22,7 @@ import (
 
 	"plantogether/server/internal/auth"
 	"plantogether/server/internal/availability/engine"
+	"plantogether/server/internal/party"
 	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/httpapi"
 	"plantogether/server/internal/platform/mutation"
@@ -43,6 +44,26 @@ type stack struct {
 	handler http.Handler
 	pool    *pgxpool.Pool
 	logs    *bytes.Buffer
+	avail   *Handler
+	clock   *testClock
+}
+
+// testClock은 검색 handler의 시각이다. 기본은 실제 시각이고 shift로 미래로 옮긴다.
+type testClock struct {
+	mu     sync.Mutex
+	offset time.Duration
+}
+
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Now().Add(c.offset)
+}
+
+func (c *testClock) shift(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.offset += d
 }
 
 // newStack은 인증·활동 시간·sync endpoint를 묶은 HTTP 스택이다. limited면 실제 요청 제한을 켠다.
@@ -63,7 +84,8 @@ func newStack(t *testing.T, limited bool) *stack {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deps := Deps{Pool: pool, Logger: logger}
+	clock := &testClock{}
+	deps := Deps{Pool: pool, Logger: logger, Now: clock.now, VersionSecret: bytes.Repeat([]byte{7}, 32)}
 	if limited {
 		// 테스트마다 무작위 HMAC 키를 써서 다른 실행의 bucket과 섞이지 않는다.
 		key := make([]byte, 32)
@@ -79,9 +101,14 @@ func newStack(t *testing.T, limited bool) *stack {
 	authHandler := auth.NewHandler(svc, logger)
 	mux := http.NewServeMux()
 	authHandler.Register(mux)
-	NewHandler(deps).Register(mux, authHandler.Require)
+	avail, err := NewHandler(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	avail.Register(mux, authHandler.Require)
+	party.NewHandler(party.Deps{Pool: pool, Logger: logger}).Register(mux, authHandler.Require)
 	syncfeed.NewHandler(syncfeed.Deps{Pool: pool, Logger: logger, RefKeyBox: box}).Register(mux, authHandler.Require)
-	return &stack{handler: httpapi.Wrap(logger, mux), pool: pool, logs: &logs}
+	return &stack{handler: httpapi.Wrap(logger, mux), pool: pool, logs: &logs, avail: avail, clock: clock}
 }
 
 type session struct {
@@ -108,6 +135,18 @@ func (s *stack) signIn(t *testing.T) session {
 func cleanupUser(t *testing.T, pool *pgxpool.Pool, userID uuid.UUID) {
 	t.Helper()
 	ctx := context.Background()
+	// 검색 테스트의 Party를 먼저 지운다. 멤버십 FK가 users 삭제를 막는다.
+	rows, err := pool.Query(ctx, `SELECT DISTINCT party_id FROM party_memberships WHERE user_id = $1`, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partyIDs, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range partyIDs {
+		cleanupParty(t, pool, id)
+	}
 	for _, sql := range []string{
 		`DELETE FROM sync_changes WHERE recipient_user_id = $1`,
 		`DELETE FROM idempotency_keys WHERE user_id = $1`,

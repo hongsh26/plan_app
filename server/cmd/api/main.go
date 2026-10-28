@@ -125,7 +125,12 @@ func run() error {
 	account.NewHandler(account.Deps{Pool: pool.Pool(), Logger: logger, Sealer: box, RefKeyBox: box, Limiter: limiter}).Register(mux, authHandler.Require)
 	party.NewHandler(party.Deps{Pool: pool.Pool(), Logger: logger, Limiter: limiter, ProjectionOpener: box}).Register(mux, authHandler.Require)
 	calendar.NewHandler(calendar.Deps{Pool: pool.Pool(), Logger: logger, Limiter: limiter, SecretBox: box}).Register(mux, authHandler.Require)
-	availability.NewHandler(availability.Deps{Pool: pool.Pool(), Logger: logger, Limiter: limiter}).Register(mux, authHandler.Require)
+	// calculationVersion 키는 RATE_LIMIT_KEY에서 HKDF로 파생한다(local은 config의 고정 기본 키).
+	availabilityHandler, err := availability.NewHandler(availability.Deps{Pool: pool.Pool(), Logger: logger, Limiter: limiter, VersionSecret: rateSettings.Key})
+	if err != nil {
+		return err
+	}
+	availabilityHandler.Register(mux, authHandler.Require)
 	syncfeed.NewHandler(syncfeed.Deps{Pool: pool.Pool(), Logger: logger, RefKeyBox: box}).Register(mux, authHandler.Require)
 
 	server := httpapi.NewServer(cfg.HTTPAddr, httpapi.WithClientIP(
