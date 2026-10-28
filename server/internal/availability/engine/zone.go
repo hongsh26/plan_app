@@ -1,6 +1,9 @@
 package engine
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // Date는 시간대가 없는 달력 날짜다(요청 시간대 또는 멤버 시간대 기준으로 해석한다).
 type Date struct {
@@ -45,8 +48,9 @@ const (
 //
 // 결과 개수: 1이면 정상, 2이면 DST 중복(fall-back), 0이면 존재하지 않는 시각(spring-forward gap)이다.
 // time.Date는 gap·중복에서 어느 쪽을 고를지 보장하지 않으므로 직접 판정한다. 벽시계 시각을 UTC로 본 값 w에서
-// 앞뒤 36시간의 offset을 후보로 모으고, w-offset을 다시 loc로 바꿨을 때 같은 벽시계 시각이 되는 것만 남긴다.
-// (36시간 안에 offset 전환이 세 번 이상 있는 시간대는 tzdb에 없다.)
+// w−36h, w, w+36h 세 시점의 offset을 후보로 모으고, w−offset을 다시 loc로 바꿨을 때 같은 벽시계 시각이 되는 것만 남긴다.
+// 가정: probe 창 [w−36h, w+36h] 안에 offset 전환이 2번 이상 없다. 이 가정이 맞으면 창 양 끝 offset이 전환 전후
+// offset을 모두 담는다(tzdb의 실제 시간대는 전환 간격이 이보다 훨씬 길다). gapEnd도 같은 가정을 쓴다.
 func localCandidates(d Date, minute int, loc *time.Location) (wall time.Time, cands []time.Time) {
 	wall = time.Date(d.Year, d.Month, d.Day, 0, minute, 0, 0, time.UTC)
 	offsets := make([]int, 0, 3)
@@ -62,9 +66,7 @@ func localCandidates(d Date, minute int, loc *time.Location) (wall time.Time, ca
 			cands = append(cands, t)
 		}
 	}
-	if len(cands) == 2 && cands[1].Before(cands[0]) {
-		cands[0], cands[1] = cands[1], cands[0]
-	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].Before(cands[j]) })
 	return wall, cands
 }
 

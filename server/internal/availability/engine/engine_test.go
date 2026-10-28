@@ -61,11 +61,13 @@ func allWeek(start, end int) []WeeklyInterval {
 	return w
 }
 
-// assertTransition은 fixture 날짜가 실제 DST 전환일인지 확인한다. tzdb 규칙이 바뀌면 테스트가 조용히 무의미해지지 않게 한다.
+// assertTransition은 fixture 날짜 앞뒤(전날 정오~다음 날 정오)에 실제 offset 전환이 있는지 확인한다.
+// tzdb 규칙이 바뀌면 테스트가 조용히 무의미해지지 않게 한다. 자정 전환 시간대도 다루도록
+// 존재하지 않을 수 있는 지역 자정 대신 정오를 기준점으로 쓴다.
 func assertTransition(t *testing.T, loc *time.Location, d Date) {
 	t.Helper()
-	_, before := time.Date(d.Year, d.Month, d.Day, 0, 0, 0, 0, loc).Zone()
-	_, after := time.Date(d.Year, d.Month, d.Day, 23, 0, 0, 0, loc).Zone()
+	_, before := time.Date(d.Year, d.Month, d.Day-1, 12, 0, 0, 0, loc).Zone()
+	_, after := time.Date(d.Year, d.Month, d.Day+1, 12, 0, 0, 0, loc).Zone()
 	if before == after {
 		t.Fatalf("%s %v is not a DST transition date", loc, d)
 	}
@@ -597,4 +599,144 @@ func containsStr(xs []string, x string) bool {
 		}
 	}
 	return false
+}
+
+func TestGridStartsSorted(t *testing.T) {
+	ny := mustLoc(t, "America/New_York")
+	got := gridStarts(date(2026, 11, 1), date(2026, 11, 1), ny)
+	if len(got) != 50 {
+		t.Fatalf("grid = %d, want 50", len(got))
+	}
+	for i := 1; i < len(got); i++ {
+		if !got[i-1].Before(got[i]) {
+			t.Fatalf("grid not strictly ascending at %d: %v, %v", i, got[i-1], got[i])
+		}
+	}
+}
+
+// 자정에 DST 전환이 있는 시간대: EndMinute 1440과 다음 날 00:00 구간 병합, envelope 끝.
+func TestMidnightDSTZones(t *testing.T) {
+	havana, santiago, beirut := mustLoc(t, "America/Havana"), mustLoc(t, "America/Santiago"), mustLoc(t, "Asia/Beirut")
+	sat, sun := 6, 7
+	cases := []struct {
+		name       string
+		loc        *time.Location
+		transition Date
+		from, to   Date // ExpandWeekly envelope 날짜 범위
+		weekly     []WeeklyInterval
+		want       []string
+		envWant    string // RequestEnvelope(from, from)
+	}{
+		{"Havana 3/8 자정 gap(00:00→01:00)", havana, date(2026, 3, 8), date(2026, 3, 7), date(2026, 3, 8),
+			[]WeeklyInterval{{sat, 22 * 60, 1440}, {sun, 0, 120}},
+			[]string{"2026-03-08T03:00:00Z/2026-03-08T06:00:00Z"},
+			"2026-03-07T05:00:00Z/2026-03-08T05:00:00Z"},
+		{"Havana 11/1 자정 overlap(00:00 두 번)", havana, date(2026, 11, 1), date(2026, 10, 31), date(2026, 11, 1),
+			[]WeeklyInterval{{sat, 22 * 60, 1440}, {sun, 0, 120}},
+			[]string{"2026-11-01T02:00:00Z/2026-11-01T07:00:00Z"},
+			"2026-10-31T04:00:00Z/2026-11-01T04:00:00Z"},
+		{"Santiago 9/6 자정 gap", santiago, date(2026, 9, 6), date(2026, 9, 5), date(2026, 9, 6),
+			[]WeeklyInterval{{sat, 22 * 60, 1440}, {sun, 0, 120}},
+			[]string{"2026-09-06T02:00:00Z/2026-09-06T05:00:00Z"},
+			"2026-09-05T04:00:00Z/2026-09-06T04:00:00Z"},
+		{"Beirut 3/29 자정 gap", beirut, date(2026, 3, 29), date(2026, 3, 28), date(2026, 3, 29),
+			[]WeeklyInterval{{sat, 22 * 60, 1440}, {sun, 0, 120}},
+			[]string{"2026-03-28T20:00:00Z/2026-03-28T23:00:00Z"},
+			"2026-03-27T22:00:00Z/2026-03-28T22:00:00Z"},
+		{"Beirut 10/24 자정 직전 overlap(23:00~24:00 두 번)", beirut, date(2026, 10, 24), date(2026, 10, 24), date(2026, 10, 25),
+			[]WeeklyInterval{{sat, 22 * 60, 1440}, {sun, 0, 60}},
+			[]string{"2026-10-24T19:00:00Z/2026-10-24T23:00:00Z"},
+			"2026-10-23T21:00:00Z/2026-10-24T22:00:00Z"}, // 25시간
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assertTransition(t, c.loc, c.transition)
+			assertIvs(t, ExpandWeekly(c.weekly, c.loc, RequestEnvelope(c.from, c.to, c.loc)), c.want)
+			assertIvs(t, []Interval{RequestEnvelope(c.from, c.from, c.loc)}, []string{c.envWant})
+		})
+	}
+
+	t.Run("Havana 자정 gap을 가로지르는 슬롯", func(t *testing.T) {
+		runCase(t, searchCase{
+			members: []Member{{Location: havana, Weekly: []WeeklyInterval{{sat, 22 * 60, 1440}, {sun, 0, 120}}}},
+			p:       Params{StartDate: date(2026, 3, 7), EndDate: date(2026, 3, 8), Duration: 2 * time.Hour, Location: havana, MaxResults: 20, Now: ts(t, "2026-01-01T00:00:00Z")},
+			raw:     true,
+			// 3/8 00:00·00:30은 존재하지 않아 건너뛰고, 01:00 CDT 시작은 활동 끝(02:00 CDT)을 넘는다.
+			want: []string{
+				"2026-03-08T03:00:00Z/2026-03-08T05:00:00Z", "2026-03-08T03:30:00Z/2026-03-08T05:30:00Z",
+				"2026-03-08T04:00:00Z/2026-03-08T06:00:00Z",
+			},
+		})
+	})
+}
+
+// Search 수준: 멤버 시간대만 DST 전환일인 경우와 30분 DST·+05:45 요청 시간대.
+func TestSearchDSTZones(t *testing.T) {
+	seoul, ny, lh, ktm := mustLoc(t, "Asia/Seoul"), mustLoc(t, "America/New_York"), mustLoc(t, "Australia/Lord_Howe"), mustLoc(t, "Asia/Kathmandu")
+	assertTransition(t, ny, date(2026, 3, 8))
+	assertTransition(t, ny, date(2026, 11, 1))
+	assertTransition(t, lh, date(2026, 10, 4))
+	assertTransition(t, lh, date(2026, 4, 5))
+	jan := ts(t, "2026-01-01T00:00:00Z")
+	p := func(loc *time.Location, d Date, dur time.Duration) Params {
+		return Params{StartDate: d, EndDate: d, Duration: dur, Location: loc, MaxResults: 20, Now: jan}
+	}
+	seoulAllDay := Member{Location: seoul, Weekly: allWeek(0, 1440)}
+	sun, mon := 7, 1
+
+	cases := []searchCase{
+		{
+			name:    "NY 멤버만 fall-back(일 00:00~03:00 = 4시간), 서울 요청",
+			members: []Member{seoulAllDay, {Location: ny, Weekly: []WeeklyInterval{{sun, 0, 180}}}},
+			p:       p(seoul, date(2026, 11, 1), time.Hour),
+			raw:     true,
+			want: []string{
+				"2026-11-01T04:00:00Z/2026-11-01T05:00:00Z", "2026-11-01T04:30:00Z/2026-11-01T05:30:00Z",
+				"2026-11-01T05:00:00Z/2026-11-01T06:00:00Z", "2026-11-01T05:30:00Z/2026-11-01T06:30:00Z",
+				"2026-11-01T06:00:00Z/2026-11-01T07:00:00Z", "2026-11-01T06:30:00Z/2026-11-01T07:30:00Z",
+				"2026-11-01T07:00:00Z/2026-11-01T08:00:00Z",
+			},
+		},
+		{
+			name:    "NY 멤버만 spring-forward(일 01:00~04:00 = 2시간), 서울 요청 Search",
+			members: []Member{seoulAllDay, {Location: ny, Weekly: []WeeklyInterval{{sun, 60, 240}}}},
+			p:       p(seoul, date(2026, 3, 8), time.Hour),
+			want: []string{
+				"2026-03-08T06:00:00Z/2026-03-08T07:00:00Z", "2026-03-08T06:30:00Z/2026-03-08T07:30:00Z",
+				"2026-03-08T07:00:00Z/2026-03-08T08:00:00Z",
+			},
+		},
+		{
+			name:    "Lord Howe 30분 gap 날: 02:00은 건너뛰고 02:30부터",
+			members: []Member{{Location: lh, Weekly: []WeeklyInterval{{sun, 60, 240}}}},
+			p:       p(lh, date(2026, 10, 4), time.Hour),
+			want: []string{
+				"2026-10-03T14:30:00Z/2026-10-03T15:30:00Z", // 01:00 +10:30
+				"2026-10-03T15:00:00Z/2026-10-03T16:00:00Z", // 01:30 +10:30
+				"2026-10-03T15:30:00Z/2026-10-03T16:30:00Z", // 02:30 +11
+			},
+		},
+		{
+			name:    "Lord Howe 30분 overlap 날: 01:30 두 occurrence",
+			members: []Member{{Location: lh, Weekly: []WeeklyInterval{{sun, 60, 180}}}},
+			p:       p(lh, date(2026, 4, 5), 30*time.Minute),
+			want: []string{
+				"2026-04-04T14:00:00Z/2026-04-04T14:30:00Z", // 01:00 +11
+				"2026-04-04T14:30:00Z/2026-04-04T15:00:00Z", // 01:30 +11
+				"2026-04-04T15:00:00Z/2026-04-04T15:30:00Z", // 01:30 +10:30
+			},
+		},
+		{
+			name: "Kathmandu 요청·멤버, grid 밖 Busy",
+			members: []Member{{Location: ktm, Weekly: []WeeklyInterval{{mon, 9 * 60, 12 * 60}}, // 03:15~06:15Z
+				Busy: []Interval{iv(t, "2026-11-09T04:00:00Z", "2026-11-09T04:30:00Z")}}}, // 09:45~10:15 NPT
+			p: p(ktm, date(2026, 11, 9), time.Hour),
+			want: []string{
+				"2026-11-09T04:45:00Z/2026-11-09T05:45:00Z", "2026-11-09T05:15:00Z/2026-11-09T06:15:00Z",
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) { runCase(t, c) })
+	}
 }

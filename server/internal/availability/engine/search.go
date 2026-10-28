@@ -73,6 +73,8 @@ func MemberFree(m Member, env Interval) []Interval {
 //   - 존재하지 않는 grid 시각(spring-forward gap)은 건너뛴다. gap 끝으로 옮기면 grid 밖 시작이 생기기 때문이다.
 //   - 중복 grid 시각(fall-back)은 두 occurrence를 모두 후보로 둔다. 둘 다 같은 벽시계 경계를 가진 서로 다른 시각이다.
 //
+// 벽시계 순서로 만들면 fall-back 날에는 UTC 순서가 어긋나므로(NY 11/1: 05:00Z, 06:00Z, 05:30Z …) 끝에서 정렬한다.
+//
 // UTC에서 30분씩 더하지 않고 벽시계 시각에서 계산하므로 +05:45 같은 시간대에서도 지역 00/30분에 맞는다.
 func gridStarts(startDate, endDate Date, loc *time.Location) []time.Time {
 	var out []time.Time
@@ -84,6 +86,7 @@ func gridStarts(startDate, endDate Date, loc *time.Location) []time.Time {
 			}
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Before(out[j]) })
 	return out
 }
 

@@ -49,6 +49,7 @@ func (d Date) AddDays(n int) Date / Before(o Date) bool / ISOWeekday() int
 `time.Date`는 gap·중복에서 어느 쪽을 고를지 보장하지 않으므로 직접 판정한다(`zone.go`).
 
 - 벽시계 시각을 UTC로 본 값 `w`에서 −36h/0/+36h 시점의 zone offset을 후보로 모은다.
+  가정: probe 창 `[w−36h, w+36h]` 안에 offset 전환이 2번 이상 없다(tzdb 실제 시간대의 전환 간격은 이보다 훨씬 길다).
 - 각 offset으로 `w − offset`을 만들고 `In(loc)` 왕복 시 같은 벽시계 시각인 것만 남긴다.
   - 1개: 정상, 2개: 중복(fall-back), 0개: 존재하지 않음(spring-forward gap).
 - 중복: 활동 시작·날짜 경계는 이른 occurrence(`asStart`), 활동 종료는 늦은 occurrence(`asEnd`)로 구간을 줄이지 않는다.
@@ -56,6 +57,10 @@ func (d Date) AddDays(n int) Date / Before(o Date) bool / ISOWeekday() int
   전환 뒤에 있고, 그 instant의 `ZoneBounds()` 시작이 전환 시각이다.
 - 변환 후 `start >= end`인 occurrence만 버린다. 같은 날 다른 구간은 영향받지 않는다.
 - 중복 규칙 때문에 같은 날 두 구간이 UTC에서 겹칠 수 있다(예: NY 11/1 00:00~01:00, 01:30~03:00). 확장 결과를 병합해 처리한다.
+  - **의도된 동작:** §3.3 "활동 구간을 축소하지 않는다" 규칙의 결과로, overlap 시간대 안에 있던 같은 날 구간 사이의
+    간격(위 예의 01:00~01:30)은 사라지고 그 시간은 가능으로 계산된다. 종료 01:00은 두 번째(EST, 06:00Z),
+    시작 01:30은 첫 번째(EDT, 05:30Z)를 쓰기 때문이다. `TestExpandWeeklyDST`의 "overlap으로 겹친 같은 날 구간은 병합"
+    케이스(결과 04:00~08:00Z)가 이 동작을 고정한다.
 - `EndMinute` 1440은 다음 날 00:00으로 해석한다(`asEnd` 규칙).
 
 ## Grid 결정
@@ -66,6 +71,14 @@ func (d Date) AddDays(n int) Date / Before(o Date) bool / ISOWeekday() int
   (NY 3/8은 46개 후보).
 - 중복 grid 시각(fall-back)은 **두 occurrence 모두** 후보다. 같은 벽시계 경계를 가진 서로 다른 시각이며,
   UI는 약식 time zone(EDT/EST)으로 구분한다(NY 11/1은 50개 후보). 날짜별 3개 제한은 그대로 적용된다.
+- `gridStarts`는 벽시계 순서로 만든 뒤 UTC 오름차순으로 정렬한다(fall-back 날에는 벽시계 순서와 UTC 순서가 다르다).
+
+## 표시 계약 (A4·iOS)
+
+- fall-back 날에는 같은 벽시계 시각의 슬롯이 하루 3개 안에 연달아 나올 수 있다
+  (예: NY 11/1, 활동 01:00 시작, 30분 약속 → 01:00 EDT, 01:30 EDT, 01:00 EST. 벽시계 `01:00`이 두 번 나온다).
+- 따라서 API는 슬롯을 반드시 RFC3339 UTC instant(`startAt`/`endAt`)로 반환하고, 지역 벽시계 문자열로 바꿔 보내지 않는다.
+- iOS는 슬롯 시각과 함께 약식 시간대(EDT/EST 등)를 반드시 표시해 같은 벽시계 시각의 두 슬롯을 구분한다.
 - 날짜 경계(envelope 끝, 날짜별 제한의 날짜 판정)는 `asStart` 규칙을 쓴다.
 - 가장 이른 시작 = `max(Now + 30분, StartDate 00:00)` 이상인 첫 grid 시각(올림). 정확히 경계면 그 시각을 쓴다.
 - 슬롯 종료 = 시작 + Duration(절대 시간). envelope 끝을 넘으면 제외한다.
@@ -85,6 +98,12 @@ func (d Date) AddDays(n int) Date / Before(o Date) bool / ISOWeekday() int
   MaxResults, 멤버 0명
 - `TestLeadTime`: 10:00:00 → 10:30, 10:00:01 → 11:00, 10:15 → 11:00, 시작일 이전 now, 오늘 모두 지남
 - `TestLimitPerDayStable`, `TestDeterministic`(멤버·Busy 순서 섞어도 같은 결과)
+- `TestGridStartsSorted`: fall-back 날 grid가 UTC 순으로 엄격히 오름차순
+- `TestMidnightDSTZones`: 자정 전환 시간대 Havana(3/8 gap, 11/1 overlap), Santiago(9/6 gap), Beirut(3/29 gap,
+  10/24 자정 직전 overlap)에서 EndMinute 1440과 다음 날 00:00 구간 병합, envelope 끝, Havana 자정 gap을 가로지르는 슬롯
+- `TestSearchDSTZones`: 서울 요청 + NY 멤버만 fall-back/spring-forward(Search 수준 교차), Lord Howe 30분 gap·overlap,
+  Kathmandu 요청·멤버와 grid 밖 Busy
+- DST fixture 확인 helper는 지역 자정 대신 전날 정오~다음 날 정오 offset을 비교한다(자정 전환 시간대 대응).
 - `TestPerformance31Days` + `BenchmarkSearch31Days20Members`: 5개 시간대 20명 × 31일 × 멤버당 Busy 60개, 매일 종일 활동.
   결과 20개가 나오고 어느 Busy와도 겹치지 않는지 확인한다. ≈ 1.1ms/op (Apple M2)
 
