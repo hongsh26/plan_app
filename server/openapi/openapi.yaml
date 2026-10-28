@@ -1,9 +1,11 @@
 openapi: 3.1.0
 
-# P1 인증 범위까지의 계약을 담는다.
+# 서버에 등록된 모든 route의 계약을 담는다.
 #
-# 담긴 것: 운영 health endpoint, 인증(§5), 계정·기기 조회와 변경, 계정 삭제 요청.
-# 아직 없는 것: POST /v1/sync(mutation 배치), calendar-write-commands.
+# 담긴 것: 운영 health endpoint, 인증(§5), 계정·기기, sync, Party·초대·멤버십·공개 수준·일정,
+# 캘린더 연결·snapshot, 활동 시간, 가능 시간 검색.
+# 아직 없는 것: POST /v1/sync(mutation 배치), 제안(설계 7), calendar-write-commands.
+# PUT /v1/calendar/connection 요청 본문 schema는 아직 없다. 응답과 실제 handler의 자동 대조도 아직 없다(§15).
 # 구현보다 계약을 먼저 적으면 handler와 어긋난 채로 남기 쉽다.
 #
 # 모든 mutation은 Idempotency-Key 헤더가 필수다(인증 endpoint 제외). 수정·삭제는
@@ -410,6 +412,332 @@ paths:
         "423":
           $ref: "#/components/responses/AccountLocked"
 
+  /v1/parties:
+    get:
+      summary: 내 Party 목록
+      description: |
+        호출자의 활성 멤버십이 있는 활성 Party만 준다(bootstrap scope와 같다). 떠났거나 해산된 Party는 없다.
+        각 항목은 Party, 호출자 본인의 멤버십, 활성 멤버 수다. 참여 한도가 20이라 페이지를 나누지 않는다.
+        순서는 호출자의 가입 시각 오름차순이다.
+      operationId: listMyParties
+      tags: [party]
+      responses:
+        "200":
+          description: 목록. 없으면 빈 배열.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartyListResponse"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    post:
+      summary: Party 생성
+      description: |
+        T1. 생성자는 방장이고 공개 수준은 busyOnly다. 소유 10개·참여 20개 한도를 넘으면 409
+        party_owned_limit_reached·party_joined_limit_reached. 이름은 앞뒤 공백을 지우고 연속 공백을 하나로
+        줄인 뒤 1~40 rune이다.
+      operationId: createParty
+      tags: [party]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PartyNameRequest"
+      responses:
+        "201":
+          description: 만든 Party. ETag는 Party version이다.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartyEnvelope"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "423":
+          $ref: "#/components/responses/AccountLocked"
+
+  /v1/parties/{id}:
+    get:
+      summary: Party 상세
+      description: 활성 멤버만 본다. 비멤버·떠난 멤버·해산된 Party는 모두 404다.
+      operationId: getParty
+      tags: [party]
+      parameters:
+        - $ref: "#/components/parameters/PartyID"
+      responses:
+        "200":
+          description: Party. ETag는 Party version이다.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartyEnvelope"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      summary: Party 이름 수정
+      description: 방장만 호출한다. If-Match는 Party version이다.
+      operationId: updateParty
+      tags: [party]
+      parameters:
+        - $ref: "#/components/parameters/PartyID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PartyNameRequest"
+      responses:
+        "200":
+          description: 수정된 Party. ETag는 새 Party version이다.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartyEnvelope"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "410":
+          $ref: "#/components/responses/PartyDisbanded"
+
+  /v1/parties/{id}/memberships:
+    get:
+      summary: 활성 멤버 목록
+      description: 활성 멤버만 본다. 활성 멤버십만 가입 시각 순서로 준다.
+      operationId: listPartyMemberships
+      tags: [party]
+      parameters:
+        - $ref: "#/components/parameters/PartyID"
+      responses:
+        "200":
+          description: 멤버 목록.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartyMembershipsResponse"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/parties/{id}/owner:
+    post:
+      summary: 방장 위임
+      description: |
+        T4. 방장만 호출한다. 대상은 같은 Party의 다른 활성 멤버여야 한다(아니면 400). 활성 초대는 모두
+        무효화되고 그 tombstone은 이전·새 방장에게만 간다. 응답은 위임 직후 Party다(요청자는 이제 일반 멤버).
+      operationId: transferPartyOwner
+      tags: [party]
+      parameters:
+        - $ref: "#/components/parameters/PartyID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              additionalProperties: false
+              properties:
+                user_id: {type: string, format: uuid}
+      responses:
+        "200":
+          description: 위임된 Party. ETag는 새 Party version이다.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartyEnvelope"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "410":
+          $ref: "#/components/responses/PartyDisbanded"
+
+  /v1/parties/{id}/invites:
+    post:
+      summary: 초대 생성
+      description: |
+        T2. 방장만 호출한다. token 원문은 이 201 응답에만 있다. 같은 Idempotency-Key 재전송은 메타데이터만
+        돌려주고 token은 없다(원문을 저장하지 않는다). 응답을 잃었으면 초대를 무효화하고 새로 만든다.
+        활성 초대 3개(409 party_invite_limit_reached), 시간당 10개(429), 정원(409 party_full) 제한이 있다.
+      operationId: createPartyInvite
+      tags: [party]
+      parameters:
+        - $ref: "#/components/parameters/PartyID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePartyInviteRequest"
+      responses:
+        "201":
+          description: 만든 초대(첫 응답에만 token).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartyInviteEnvelope"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "410":
+          $ref: "#/components/responses/PartyDisbanded"
+        "429":
+          description: 이 Party의 시간당 초대 생성 한도(10)를 넘었다. code rate_limited.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      summary: 활성 초대 목록
+      description: 방장만 본다. 만료 시각이 지나지 않은 active 초대만 준다. token 원문은 없다.
+      operationId: listPartyInvites
+      tags: [party]
+      parameters:
+        - $ref: "#/components/parameters/PartyID"
+      responses:
+        "200":
+          description: 초대 목록.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartyInvitesResponse"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          $ref: "#/components/responses/PartyDisbanded"
+
+  /v1/parties/{id}/invites/{invite_id}:
+    delete:
+      summary: 초대 무효화
+      description: 방장만 호출한다. 이미 active가 아니면 상태를 바꾸지 않고 현재 초대를 200으로 돌려준다.
+      operationId: revokePartyInvite
+      tags: [party]
+      parameters:
+        - $ref: "#/components/parameters/PartyID"
+        - name: invite_id
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: 무효화된(또는 이미 끝난) 초대.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartyInviteEnvelope"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "410":
+          $ref: "#/components/responses/PartyDisbanded"
+
+  /v1/invites/{token}/preview:
+    get:
+      summary: 초대 미리보기
+      description: |
+        Party 이름, 활성 멤버 수, 초대자 표시 이름만 준다. 만료·무효·소진·해산·미존재는 모두 같은 404다.
+        요청 제한(사용자 10/분, IP 30/분)은 token 형식 검사보다 먼저 센다.
+      operationId: previewInvite
+      tags: [party]
+      parameters:
+        - $ref: "#/components/parameters/InviteToken"
+      responses:
+        "200":
+          description: 미리보기.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvitePreviewEnvelope"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/invites/{token}/accept:
+    post:
+      summary: 초대 수락(가입)
+      description: |
+        T3. 신규 멤버는 같은 트랜잭션의 sync로 Party 단위 부트스트랩(party, 모든 활성 멤버십, 본인 공개 설정,
+        허용된 projection)을 받는다. 이미 활성 멤버면 409 already_member, 정원이면 409 party_full, 참여 한도면
+        409 party_joined_limit_reached. 만료·무효·소진·해산·미존재는 404다. 요청 제한(사용자 5/분, IP 30/분)은
+        같은 키의 재전송도 센다. 재전송은 현재 상태를 평가해 이미 떠났으면 404, 해산됐으면 410이다.
+      operationId: acceptInvite
+      tags: [party]
+      parameters:
+        - $ref: "#/components/parameters/InviteToken"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: 가입한 Party와 본인 멤버십. ETag는 Party version이다.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteAcceptEnvelope"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "410":
+          $ref: "#/components/responses/PartyDisbanded"
+        "423":
+          $ref: "#/components/responses/AccountLocked"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /v1/parties/{id}/visibility/me:
     get:
       summary: 내 Party 일정 공개 수준 조회
@@ -607,6 +935,20 @@ paths:
           $ref: "#/components/responses/NotFound"
 
   /v1/calendar/connection:
+    get:
+      summary: 내 캘린더 연결 조회
+      description: 본인 연결만 준다. 연결이 없으면 status disconnected, version 0, 빈 sources다.
+      operationId: getCalendarConnection
+      tags: [calendar]
+      responses:
+        "200":
+          description: 연결.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CalendarConnectionEnvelope"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
     put:
       summary: 캘린더 연결 상태·읽기 source·sync 기기 변경
       description: |
@@ -700,6 +1042,30 @@ paths:
       responses:
         "200": {description: snapshot 완료}
         "400": { $ref: "#/components/responses/InvalidRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/calendar/snapshots/{id}/abort:
+    post:
+      summary: 캘린더 snapshot 중단
+      description: |
+        sync 기기만 호출한다(아니면 403). 본문을 보내지 않는다. 열린 세션이면 staging을 지우고 aborted로 바꾼다.
+        연결이 syncing이면 쓸 수 있는 이전 generation이 있을 때만 ready, 아니면 selecting으로 돌린다. 이미 완료된
+        세션은 409 calendar_snapshot_state, 이미 중단된 세션은 그대로 200이다.
+      operationId: abortCalendarSnapshot
+      tags: [calendar]
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: 중단된 세션과 현재 연결.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CalendarSnapshotEnvelope"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
 
@@ -914,6 +1280,12 @@ components:
       in: path
       required: true
       schema: {type: string, format: uuid}
+    InviteToken:
+      name: token
+      in: path
+      required: true
+      description: 초대 token 원문(최대 128자). 접근 로그에 path가 남지 않게 프록시에서 마스킹한다.
+      schema: {type: string, minLength: 1, maxLength: 128}
 
   headers:
     RetryAfter:
@@ -1235,19 +1607,7 @@ components:
       properties:
         request_id: {type: string, format: uuid}
         party:
-          type: object
-          required: [id, name, status, version, member_limit, owner_membership_id, created_by_user_id, created_at, updated_at]
-          additionalProperties: false
-          properties:
-            id: {type: string, format: uuid}
-            name: {type: string}
-            status: {type: string, enum: [active, disbanded]}
-            version: {type: integer, format: int64}
-            member_limit: {type: integer}
-            owner_membership_id: {type: string, format: uuid}
-            created_by_user_id: {type: string, format: uuid}
-            created_at: {type: string, format: date-time}
-            updated_at: {type: string, format: date-time}
+          $ref: "#/components/schemas/Party"
 
     PartyMembershipEnvelope:
       type: object
@@ -1256,18 +1616,202 @@ components:
       properties:
         request_id: {type: string, format: uuid}
         membership:
+          $ref: "#/components/schemas/PartyMembership"
+
+    Party:
+      type: object
+      required: [id, name, status, version, member_limit, owner_membership_id, created_by_user_id, created_at, updated_at]
+      additionalProperties: false
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        status: {type: string, enum: [active, disbanded]}
+        version: {type: integer, format: int64}
+        member_limit: {type: integer}
+        owner_membership_id: {type: string, format: uuid}
+        created_by_user_id: {type: string, format: uuid}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+
+    PartyMembership:
+      type: object
+      required: [id, party_id, user_id, display_name, role, status, version, joined_at]
+      additionalProperties: false
+      properties:
+        id: {type: string, format: uuid}
+        party_id: {type: string, format: uuid}
+        user_id: {type: string, format: uuid}
+        display_name: {type: string}
+        role: {type: string, enum: [owner, member]}
+        status: {type: string, enum: [active, left, removed]}
+        version: {type: integer, format: int64}
+        joined_at: {type: string, format: date-time}
+
+    PartyNameRequest:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: {type: string, description: "정규화 뒤 1~40 rune"}
+
+    PartyListResponse:
+      type: object
+      required: [request_id, parties]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        parties:
+          type: array
+          items:
+            type: object
+            required: [party, membership, member_count]
+            additionalProperties: false
+            properties:
+              party:
+                $ref: "#/components/schemas/Party"
+              membership:
+                description: 호출자 본인의 활성 멤버십.
+                $ref: "#/components/schemas/PartyMembership"
+              member_count: {type: integer, minimum: 1, description: 활성 멤버 수}
+
+    PartyMembershipsResponse:
+      type: object
+      required: [request_id, memberships]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        memberships:
+          type: array
+          items:
+            $ref: "#/components/schemas/PartyMembership"
+
+    CreatePartyInviteRequest:
+      type: object
+      additionalProperties: false
+      description: 본문은 생략할 수 있다. 기본은 7일, 사용 횟수는 남은 정원(최대 10)이다.
+      properties:
+        expires_in_seconds: {type: integer, minimum: 3600, maximum: 2592000}
+        max_uses: {type: integer, minimum: 1, maximum: 10}
+
+    PartyInvite:
+      type: object
+      required: [id, party_id, status, expires_at, max_uses, used_count, created_at]
+      additionalProperties: false
+      properties:
+        id: {type: string, format: uuid}
+        party_id: {type: string, format: uuid}
+        status:
+          type: string
+          enum: [active, expired, revoked, exhausted]
+          description: 저장된 status가 active여도 expires_at이 지났으면 expired로 준다.
+        expires_at: {type: string, format: date-time}
+        max_uses: {type: integer}
+        used_count: {type: integer}
+        created_at: {type: string, format: date-time}
+        token: {type: string, description: 생성 201 첫 응답에만 있다.}
+
+    PartyInviteEnvelope:
+      type: object
+      required: [request_id, invite]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        invite:
+          $ref: "#/components/schemas/PartyInvite"
+
+    PartyInvitesResponse:
+      type: object
+      required: [request_id, invites]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        invites:
+          type: array
+          items:
+            $ref: "#/components/schemas/PartyInvite"
+
+    InvitePreviewEnvelope:
+      type: object
+      required: [request_id, preview]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        preview:
           type: object
-          required: [id, party_id, user_id, display_name, role, status, version, joined_at]
+          required: [party_name, member_count, inviter_display_name]
+          additionalProperties: false
+          properties:
+            party_name: {type: string}
+            member_count: {type: integer}
+            inviter_display_name: {type: string}
+
+    InviteAcceptEnvelope:
+      type: object
+      required: [request_id, party, membership]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        party:
+          $ref: "#/components/schemas/Party"
+        membership:
+          $ref: "#/components/schemas/PartyMembership"
+
+    CalendarConnection:
+      type: object
+      required: [status, sync_device_id, is_sync_device, active_generation, last_completed_sync_at, time_zone, sources, version]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [disconnected, permission_required, selecting, denied, restricted, revoked,
+                 needs_source_reselection, syncing, ready, error, stale]
+          description: 유효 상태다. ready인데 마지막 정상 sync가 6시간을 넘었으면 stale이다.
+        sync_device_id: {type: [string, "null"], format: uuid}
+        is_sync_device: {type: boolean, description: 요청 기기가 sync 기기인지}
+        active_generation: {type: integer, format: int64}
+        last_completed_sync_at: {type: [string, "null"], format: date-time}
+        time_zone: {type: [string, "null"]}
+        sources:
+          type: array
+          items:
+            type: object
+            required: [key, enabled]
+            additionalProperties: false
+            properties:
+              key: {type: string}
+              enabled: {type: boolean}
+        version: {type: integer, format: int64}
+
+    CalendarConnectionEnvelope:
+      type: object
+      required: [request_id, connection]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        connection:
+          $ref: "#/components/schemas/CalendarConnection"
+
+    CalendarSnapshotEnvelope:
+      type: object
+      required: [request_id, snapshot, connection]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        snapshot:
+          type: object
+          required: [id, revision, window_start, window_end, expected_pages, status, fact_count, generation]
           additionalProperties: false
           properties:
             id: {type: string, format: uuid}
-            party_id: {type: string, format: uuid}
-            user_id: {type: string, format: uuid}
-            display_name: {type: string}
-            role: {type: string, enum: [owner, member]}
-            status: {type: string, enum: [active, left, removed]}
-            version: {type: integer, format: int64}
-            joined_at: {type: string, format: date-time}
+            revision: {type: integer, format: int64}
+            window_start: {type: string, format: date-time}
+            window_end: {type: string, format: date-time}
+            expected_pages: {type: integer}
+            status: {type: string, enum: [open, completed, aborted]}
+            fact_count: {type: [integer, "null"]}
+            generation: {type: [integer, "null"], format: int64}
+        connection:
+          $ref: "#/components/schemas/CalendarConnection"
 
     HealthResponse:
       type: object
@@ -1290,7 +1834,10 @@ components:
           enum: [invalid_request, invalid_session, forbidden, not_found, version_conflict,
                  idempotency_mismatch, sync_cursor_expired, account_locked, rate_limited, internal,
                  party_disbanded, owner_transfer_required, time_zone_invalid, search_range_invalid,
-                 availability_changed_retry, availability_temporarily_unavailable, availability_result_stale]
+                 availability_changed_retry, availability_temporarily_unavailable, availability_result_stale,
+                 party_owned_limit_reached, party_joined_limit_reached, already_member, party_full,
+                 party_invite_limit_reached, calendar_state_invalid, calendar_source_required,
+                 calendar_snapshot_incomplete, calendar_snapshot_state]
         message:
           type: string
           description: 사람이 읽는 짧은 설명. 클라이언트는 code로 분기한다.
@@ -1448,7 +1995,14 @@ components:
       required: [entity_type, entity_id, operation, version, payload]
       additionalProperties: false
       properties:
-        entity_type: {type: string, description: "user, device, availability_preference(본인 전용 무효화) 등. 이후 도메인이 더한다"}
+        entity_type:
+          type: string
+          description: |
+            user, device, availability_preference(본인 전용 무효화), party, party_membership,
+            party_invite(현재 방장에게만), party_visibility_setting(본인 것만), party_schedule_projection.
+            이후 도메인이 더한다. 한 트랜잭션 안에서 party upsert는 그 하위 entity upsert보다 먼저 온다.
+            party_invite는 active인 것만 보내며 소진·무효화·위임·해산은 tombstone이다. 만료는 sync를 만들지
+            않으므로 클라이언트가 expires_at으로 숨긴다.
         entity_id: {type: string, format: uuid}
         operation: {type: string, enum: [upsert, tombstone]}
         version:
