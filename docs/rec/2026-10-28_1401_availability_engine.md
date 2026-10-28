@@ -34,6 +34,7 @@ func (d Date) AddDays(n int) Date / Before(o Date) bool / ISOWeekday() int
 - `Member.Busy`는 `calendar_busy_facts.start_at/end_at`(UTC)을 그대로 넣는다. all-day도 저장된 UTC 범위를 쓴다.
 - 입력 범위 검증(31일, 30~480분, 1~20개, 과거 날짜)은 호출자(A4) 책임이다. 엔진은 멤버 0명·Location nil·
   Duration ≤ 0·MaxResults ≤ 0이면 빈 결과를 반환한다.
+- 범위 밖이거나 start ≥ end인 `WeeklyInterval`은 오류 없이 건너뛴다. 규칙 검증·정규화는 A1 저장 시점 책임이다.
 - A3는 `RequestEnvelope`로 요청 UTC envelope를 구해 generation window 교집합 포함 여부를 검사한다.
 
 ## 파이프라인
@@ -84,7 +85,8 @@ func (d Date) AddDays(n int) Date / Before(o Date) bool / ISOWeekday() int
   MaxResults, 멤버 0명
 - `TestLeadTime`: 10:00:00 → 10:30, 10:00:01 → 11:00, 10:15 → 11:00, 시작일 이전 now, 오늘 모두 지남
 - `TestLimitPerDayStable`, `TestDeterministic`(멤버·Busy 순서 섞어도 같은 결과)
-- `TestPerformance31Days` + `BenchmarkSearch31Days20Members`: 20명 × 31일 × 멤버당 Busy 500개 ≈ 5.7ms/op (Apple M2)
+- `TestPerformance31Days` + `BenchmarkSearch31Days20Members`: 5개 시간대 20명 × 31일 × 멤버당 Busy 60개, 매일 종일 활동.
+  결과 20개가 나오고 어느 Busy와도 겹치지 않는지 확인한다. ≈ 1.1ms/op (Apple M2)
 
 ## 검증
 

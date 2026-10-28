@@ -506,7 +506,8 @@ func TestLimitPerDayStable(t *testing.T) {
 }
 
 // randomMembers는 성능·결정성 테스트용 고정 seed 입력이다.
-func randomMembers(t testing.TB, n, busyPerMember int, seed int64) []Member {
+// allDay면 매일 00:00~24:00 활동으로 두어 시간대가 달라도 공통 후보가 남게 한다.
+func randomMembers(t testing.TB, n, busyPerMember int, seed int64, allDay bool) []Member {
 	zones := []string{"Asia/Seoul", "America/New_York", "Europe/London", "Asia/Kathmandu", "Australia/Lord_Howe"}
 	r := rand.New(rand.NewSource(seed))
 	base := ts(t, "2026-10-25T00:00:00Z")
@@ -514,6 +515,10 @@ func randomMembers(t testing.TB, n, busyPerMember int, seed int64) []Member {
 	for i := range members {
 		var weekly []WeeklyInterval
 		for wd := 1; wd <= 7; wd++ {
+			if allDay {
+				weekly = append(weekly, WeeklyInterval{wd, 0, 1440})
+				continue
+			}
 			weekly = append(weekly, WeeklyInterval{wd, 0, 120}, WeeklyInterval{wd, 9 * 60, 13 * 60}, WeeklyInterval{wd, 18 * 60, 1440})
 		}
 		busy := make([]Interval, busyPerMember)
@@ -528,7 +533,7 @@ func randomMembers(t testing.TB, n, busyPerMember int, seed int64) []Member {
 
 func TestDeterministic(t *testing.T) {
 	seoul := mustLoc(t, "Asia/Seoul")
-	members := randomMembers(t, 3, 30, 7)
+	members := randomMembers(t, 3, 30, 7, false)
 	p := Params{StartDate: date(2026, 11, 1), EndDate: date(2026, 11, 30), Duration: time.Hour, Location: seoul, MaxResults: 20, Now: ts(t, "2026-10-28T00:00:00Z")}
 	first := fmtIvs(Search(members, p))
 	if len(first) == 0 {
@@ -553,18 +558,31 @@ func TestDeterministic(t *testing.T) {
 
 func TestPerformance31Days(t *testing.T) {
 	seoul := mustLoc(t, "Asia/Seoul")
-	members := randomMembers(t, 20, 500, 42)
+	members := randomMembers(t, 20, 60, 42, true)
 	p := Params{StartDate: date(2026, 11, 1), EndDate: date(2026, 12, 1), Duration: 30 * time.Minute, Location: seoul, MaxResults: 20, Now: ts(t, "2026-10-28T00:00:00Z")}
 	start := time.Now()
-	Search(members, p)
+	got := Search(members, p)
 	if el := time.Since(start); el > 2*time.Second {
 		t.Fatalf("20명·31일 검색이 %v 걸렸다", el)
+	}
+	// fixture가 실제 후보를 만들어 포함 검사와 날짜별 제한까지 거치는지 확인한다.
+	if len(got) != 20 {
+		t.Fatalf("slots = %d, want 20", len(got))
+	}
+	for _, s := range got {
+		for _, m := range members {
+			for _, b := range m.Busy {
+				if s.Start.Before(b.End) && b.Start.Before(s.End) {
+					t.Fatalf("slot %v overlaps busy %v", s, b)
+				}
+			}
+		}
 	}
 }
 
 func BenchmarkSearch31Days20Members(b *testing.B) {
 	seoul := mustLoc(b, "Asia/Seoul")
-	members := randomMembers(b, 20, 500, 42)
+	members := randomMembers(b, 20, 60, 42, true)
 	p := Params{StartDate: date(2026, 11, 1), EndDate: date(2026, 12, 1), Duration: 30 * time.Minute, Location: seoul, MaxResults: 20, Now: ts(b, "2026-10-28T00:00:00Z")}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
