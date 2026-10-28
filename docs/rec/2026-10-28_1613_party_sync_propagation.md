@@ -132,6 +132,7 @@ P·다른 M·다른 S, 그리고 당시의 초대 ∅)은 뒤에 오는 옛 upse
 
 - **iOS sync 적용기는 설계 2 §7.1 규칙 (a)(b)와 bootstrap 하한 항목을 구현해야 한다.** 이 테스트 모델(`party_sync_test.go` `client.apply`)이 기준 구현이다.
 - calculationVersion에서 membership·party version을 빼는 개선(4-2, 보고만).
+- bootstrap 하한 쿼리(`syncfeed/bootstrap.go`) 성능: watermark 뒤 upsert 집합을 먼저 구해 tombstone과 JOIN하도록 바꿨지만 인덱스는 `(recipient_user_id, txid, ordinal)`뿐이다. tombstone이 많은 사용자(잦은 해산·hidden 전환)에서 EXPLAIN으로 계획을 확인하고 필요하면 `(recipient_user_id, entity_type, entity_id)` index를 검토한다.
 - 재검증 Low 반영: `projectionBatch`로 생성·이름 수정·가입·위임·탈퇴의 party·멤버십·설정 upsert를 모아 entity당 한 번 읽고 `emitScoped`(scope 조회)를 트랜잭션 단계당 한 번 부른다. 위임 초대 tombstone도 한 번에 보낸다. 해산은 수신자별로 끊어 보내므로 멤버 수(최대 정원)만큼이다. `emitScoped`는 호출자 슬라이스를 복사해 고친다. 삭제 이름 전파 테스트는 worker 역할 pool로 돈다. 남은 참고: 정상 탈퇴에서 본인 멤버십 tombstone을 먼저 보내는 순서는 규칙 (b)가 scope 멤버십을 제외하므로 결과에 영향이 없다(순서 고정 테스트는 없다).
 - `proposal` entity 발행(T5·T7 tombstone 포함) → 설계 7.
 - P8 계정 삭제: 강제 위임·해산(익명화 이름 전파는 이번에 했다).
