@@ -258,7 +258,9 @@ type client struct {
 	// strictOrder이면 부모(party)보다 먼저 온 하위 entity upsert를 실패로 본다.
 	strictOrder bool
 	rules       bool
-	self        uuid.UUID
+	// floorless이면 version 있는 tombstone도 하한 없이 지우기만 한다(초대 version 하한의 대조군).
+	floorless bool
+	self      uuid.UUID
 	// shadow는 같은 변경을 규칙 없이 적용하는 대조군이다(nil이면 없음).
 	shadow *client
 }
@@ -328,12 +330,23 @@ func (s *partyStack) newClient(t *testing.T, name, token string, limit int) *cli
 
 // withShadow는 같은 bootstrap에서 시작해 규칙 (a)(b) 없이 적용하는 대조군을 붙인다.
 func (c *client) withShadow() *client {
-	sh := &client{name: c.name + "(규칙 없음)", self: c.self, model: map[entityKey]entity{}, floors: map[entityKey]int64{}}
+	return c.attachShadow("(규칙 없음)", false)
+}
+
+// withFloorlessShadow는 규칙 (a)(b)도 하한도 없는 대조군을 붙인다.
+func (c *client) withFloorlessShadow() *client {
+	return c.attachShadow("(하한 없음)", true)
+}
+
+func (c *client) attachShadow(suffix string, floorless bool) *client {
+	sh := &client{name: c.name + suffix, self: c.self, floorless: floorless, model: map[entityKey]entity{}, floors: map[entityKey]int64{}}
 	for k, e := range c.model {
 		sh.model[k] = e
 	}
 	for k, f := range c.floors {
-		sh.floors[k] = f
+		if !floorless {
+			sh.floors[k] = f
+		}
 	}
 	c.shadow = sh
 	return c
@@ -375,7 +388,7 @@ func (c *client) apply(t *testing.T, ch wireChange) {
 		}
 		c.model[k] = entity{version: *ch.Version, payload: payload}
 	case "tombstone":
-		if ch.Version != nil {
+		if ch.Version != nil && !c.floorless {
 			// 서버는 마지막 upsert보다 큰 version으로 tombstone을 보낸다. 로컬이 더 새로우면 서버 결함이다.
 			if cur, ok := c.model[k]; ok && cur.version >= *ch.Version {
 				t.Fatalf("%s: tombstone version %d가 로컬 version %d 이하다: %+v", c.name, *ch.Version, cur.version, ch)
@@ -847,9 +860,43 @@ func (s *partyStack) createParty(t *testing.T, token, name string) uuid.UUID {
 	return uuid.MustParse(s.must(t, http.StatusCreated, http.MethodPost, "/v1/parties", token, "", `{"name":"`+name+`"}`)["party"].(map[string]any)["id"].(string))
 }
 
-// convergeShadowDiverges는 규칙을 켠 모델이 bootstrap과 같고 규칙을 끈 대조군은 다르다는 것을 확인한다.
+// drain은 그 수신자에게 기록된 변경을 모두 받을 때까지 읽는다. converge는 bootstrap과 같아지는 즉시 끝나므로
+// 다른 패키지의 열린 트랜잭션이 horizon을 붙잡아 일부만 받은 상태에서 대조군 단언을 하면 흔들린다.
+func (s *partyStack) drain(t *testing.T, c *client) {
+	t.Helper()
+	recipient := c.self
+	var maxTx string
+	var maxOrd int32
+	if err := s.pool.QueryRow(context.Background(), `
+		SELECT txid::text, ordinal FROM sync_changes WHERE recipient_user_id = $1
+		 ORDER BY txid DESC, ordinal DESC LIMIT 1`, recipient).Scan(&maxTx, &maxOrd); err != nil {
+		t.Fatal(err)
+	}
+	last, err := strconv.ParseUint(maxTx, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		s.pull(t, c)
+		cur, err := DecodeCursor(c.cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cur.TxID > last || (cur.TxID == last && cur.Ordinal >= maxOrd) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: 10초 안에 모든 변경을 받지 못했다", c.name)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// convergeShadowDiverges는 모든 변경을 받은 뒤 규칙을 켠 모델이 bootstrap과 같고 대조군은 다르다는 것을 확인한다.
 func (s *partyStack) convergeShadowDiverges(t *testing.T, step string, c *client) {
 	t.Helper()
+	s.drain(t, c)
 	s.converge(t, step, c)
 	fresh, _ := s.fetchBootstrap(t, c.token)
 	if diffModels(c.shadow.model, fresh) == "" {
@@ -905,7 +952,7 @@ func TestTransferRacingAcceptDoesNotResurrectInvite(t *testing.T) {
 	_, inv1 := s.invite(t, aTok, p, "")
 	s.must(t, http.StatusCreated, http.MethodPost, "/v1/invites/"+inv1+"/accept", bTok, "", "")
 	invID, inv2 := s.invite(t, aTok, p, `{"max_uses":5}`)
-	ac := s.newClient(t, "A", aTok, 0)
+	ac := s.newClient(t, "A", aTok, 0).withFloorlessShadow()
 	ac.strictOrder = false
 	bc := s.newClient(t, "B", bTok, 0)
 	bc.strictOrder = false
@@ -923,7 +970,9 @@ func TestTransferRacingAcceptDoesNotResurrectInvite(t *testing.T) {
 	if tomb, up := s.txidOf(t, a.id, id, "tombstone"), s.txidOf(t, a.id, id, "upsert"); tomb >= up {
 		t.Fatalf("순서 역전이 일어나지 않았다: tombstone txid %d, upsert txid %d", tomb, up)
 	}
-	s.converge(t, "transfer vs accept", ac, bc)
+	// 옛 방장은 여전히 활성 멤버라 규칙 (a)(b)는 관여하지 않는다. 막는 것은 초대 tombstone의 version 하한이다.
+	s.convergeShadowDiverges(t, "transfer vs accept", ac)
+	s.converge(t, "transfer vs accept", bc)
 	ac.expect(t, "transfer vs accept", p, map[string]int{"party": 1, "party_membership": 3, "party_visibility_setting": 1})
 	if d := mutation.Retries() - retriesBefore; d != 0 {
 		t.Fatalf("mutation 재시도 %d회", d)
@@ -1102,9 +1151,25 @@ func TestBootstrapCarriesEndedMembershipFloors(t *testing.T) {
 	blk.release(t)
 	expectStatus(t, <-leave, http.StatusOK)
 
-	uc := s.newClient(t, "U", uTok, 0)
+	// 다른 패키지의 더 오래된 트랜잭션이 열려 있으면 watermark가 L 아래로 내려가 L이 다시 오고 스스로 하한을
+	// 남긴다. 그러면 재현이 되지 않으므로 watermark가 L 뒤일 때까지 다시 bootstrap한다.
+	leaveTx := s.txidOf(t, u.id, p, "tombstone")
+	var uc, noFloor *client
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		uc = s.newClient(t, "U", uTok, 0)
+		noFloor = s.newClient(t, "U(snapshot 하한 없음)", uTok, 0)
+		cu, _ := DecodeCursor(uc.cursor)
+		cn, _ := DecodeCursor(noFloor.cursor)
+		if cu.TxID > leaveTx && cn.TxID > leaveTx {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("watermark가 탈퇴 txid를 넘지 않았다")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	uc.strictOrder = false
-	noFloor := s.newClient(t, "U(snapshot 하한 없음)", uTok, 0)
 	noFloor.strictOrder = false
 	noFloor.floors = map[entityKey]int64{}
 	if len(uc.floors) == 0 || uc.count(p)["party"] != 0 {
@@ -1113,9 +1178,10 @@ func TestBootstrapCarriesEndedMembershipFloors(t *testing.T) {
 	if err := hold.Rollback(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	s.drain(t, uc)
 	s.converge(t, "bootstrap floors", uc)
 	uc.expect(t, "bootstrap floors", p, nil)
-	s.pull(t, noFloor)
+	s.drain(t, noFloor)
 	if noFloor.count(p)["party"] != 1 {
 		t.Fatalf("재현 실패: 하한 없는 모델에도 Party가 되살아나지 않았다 %v", noFloor.count(p))
 	}

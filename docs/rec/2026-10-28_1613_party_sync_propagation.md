@@ -58,7 +58,9 @@ P·다른 M·다른 S, 그리고 당시의 초대 ∅)은 뒤에 오는 옛 upse
 1. **초대 tombstone은 모두 version이 있다**: 무효화·소진·위임·해산 모두 `used_count + 2`(마지막 upsert `used_count + 1`보다
    1 큼, projection·설정의 "마지막 version + 1" 규칙과 같다). 초대는 다시 active가 되지 않아 하한이 안전하다.
 2. **`sync_changes.scope_membership_id`(migration 00018, nullable, FK 없음, down은 열 삭제):** 모든 Party 범위 변경이
-   `party.emitScoped`를 지나며 수신자의 이 Party 최신 멤버십(`joined_at DESC, id DESC`)을 채운다. 활성 멤버는 활성
+   `party.emitScoped`를 지나며 수신자의 이 Party 활성 멤버십, 없으면 가장 최근에 끝난 멤버십(`(status = 'active') DESC,
+   ended_at DESC NULLS LAST, id DESC`)을 채운다. `joined_at`은 생성 경로마다 DB 시계(T1)와 앱 시계(T3 `h.now()`)가 섞여
+   재가입 멤버십이 옛 멤버십보다 앞선다고 보장하지 못해 쓰지 않는다(틀리면 규칙 (a)가 재가입 뒤 변경을 모두 버린다). 활성 멤버는 활성
    멤버십, 방금 떠났거나 해산으로 끝난 수신자는 이 트랜잭션에서 끝난 그 멤버십, 재가입 뒤에는 새 멤버십이다.
    **sync_changes 행은 이미 수신자별(`recipient_user_id`)이라 값도 수신자별로 정확하다.** 수신자 멤버십이 없으면
    오류로 트랜잭션을 실패시킨다. bootstrap 항목은 호출자의 활성 멤버십을 싣는다. Party 밖 entity는 NULL이다.
@@ -108,7 +110,8 @@ P·다른 M·다른 S, 그리고 당시의 초대 ∅)은 뒤에 오는 옛 upse
   - `TestDisplayNameRacingAcceptConverges`: 이름 변경과 같은 Party 가입을 5회 동시 실행(비결정적 보조). 가입 전에 bootstrap한 가입자 모델이 증분만으로 최종 이름에 수렴, 재시도 0.
   - **결정적 순서 역전 재현.** 요청 기기의 `devices` row를 별도 트랜잭션이 `FOR UPDATE`로 잡으면 멱등성 INSERT가 heap에 쓴 뒤(txid 배정) FK 검사(KEY SHARE)에서 멈춘다. `pg_blocking_pids`로 그 대기를 확인한 뒤 다른 요청을 끝까지 실행하고 풀어 "txid는 작은데 나중에 직렬화된" 트랜잭션을 만든다. 각 테스트는 sync_changes txid로 역전이 실제로 일어났는지 먼저 단언한다(같은 key의 ON CONFLICT 대기는 xid 배정 전이라 쓸 수 없었다).
     - `TestLeaveRacingPartyChangeDoesNotResurrect`(탈퇴 vs Party 이름 변경 + 남은 멤버 표시 이름 변경), `TestRejoinRacingLeaveKeepsNewScope`(같은 사용자 재가입 vs 다른 기기 탈퇴): 규칙 모델 == bootstrap, **규칙 (a)(b)를 끈 대조군은 bootstrap과 다름**을 단언.
-    - `TestTransferRacingAcceptDoesNotResurrectInvite`: 옛 방장 피드에서 초대 tombstone 뒤에 수락 upsert가 오고 version 하한이 막는다.
+    - `TestTransferRacingAcceptDoesNotResurrectInvite`: 옛 방장 피드에서 초대 tombstone 뒤에 수락 upsert가 오고 version 하한이 막는다. 옛 방장은 활성 멤버라 규칙 (a)(b)가 관여하지 않으므로 **대조군은 하한 없이 tombstone을 적용하는 모델**이며 그 모델은 bootstrap과 다름을 단언한다.
+    - 대조군 단언 전에는 그 수신자의 sync_changes 마지막 위치까지 cursor가 넘을 때까지 읽는다(horizon 지연으로 일부만 받은 상태의 오판 방지). 재현 5는 horizon을 붙잡은 상태에서 watermark가 탈퇴 txid를 넘을 때까지 다시 bootstrap한다. party·calendar·availability 전체 테스트를 동시에 돌리며 재현 테스트 `-count=20` 통과.
     - `TestRenameRacingJoinDeliversNewName`: 이름 변경 upsert가 가입 부트스트랩보다 먼저(부모 없이) 와도 새 이름으로 수렴.
     - `TestBootstrapCarriesEndedMembershipFloors`: L과 E 사이 txid를 받은 열린 트랜잭션이 horizon을 붙잡은 채 bootstrap → snapshot은 Party 없음·하한 있음, E가 다시 와도 버려진다. snapshot 하한을 지운 모델은 Party가 되살아난다.
   - `TestSameDisplayNameIsNoop`(version 유지·재발행 0), `TestAccountDeletionAnonymizesNameForCoMembers`(삭제 worker 뒤 동료 모델 이름 = `탈퇴한 사용자` = bootstrap; 수정 제거 시 실패 확인).
