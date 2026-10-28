@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"plantogether/server/internal/auth"
+	"plantogether/server/internal/party"
 	"plantogether/server/internal/platform/audit"
 	"plantogether/server/internal/platform/httpapi"
 	"plantogether/server/internal/platform/mutation"
@@ -101,11 +102,13 @@ func (h *Handler) patchMe(w http.ResponseWriter, r *http.Request) {
 			 WHERE id = $1 RETURNING version`, p.UserID, name).Scan(&version); err != nil {
 			return mutation.Result{}, err
 		}
-		// 표시 이름은 앞으로 Party 멤버에게도 전파된다. 지금은 Party가 없으므로
-		// 본인의 다른 기기만 받는다.
 		if err := emitProjection(ctx, tx, p.UserID, func() (Projection, error) {
 			return UserProjection(ctx, tx, p.UserID)
 		}); err != nil {
+			return mutation.Result{}, err
+		}
+		// 같은 Party 멤버는 party_membership 투영의 display_name으로 받는다.
+		if err := party.PropagateDisplayName(ctx, tx, p.UserID); err != nil {
 			return mutation.Result{}, err
 		}
 		return mutation.Result{StatusCode: http.StatusOK, ResourceType: entityUser, ResourceID: p.UserID, ResourceVersion: version}, nil

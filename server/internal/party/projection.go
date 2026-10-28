@@ -53,20 +53,24 @@ func PartyProjection(ctx context.Context, q Querier, partyID uuid.UUID) (Project
 
 func MembershipProjection(ctx context.Context, q Querier, membershipID uuid.UUID) (Projection, error) {
 	var (
-		id, partyID, userID uuid.UUID
-		role, status        string
-		version             int64
-		joinedAt            time.Time
+		id, partyID, userID       uuid.UUID
+		role, status, displayName string
+		version                   int64
+		joinedAt                  time.Time
 	)
 	if err := q.QueryRow(ctx, `
-		SELECT id, party_id, user_id, role, status, version, joined_at
-		  FROM party_memberships WHERE id = $1`, membershipID).Scan(
-		&id, &partyID, &userID, &role, &status, &version, &joinedAt,
+		SELECT m.id, m.party_id, m.user_id, m.role, m.status, m.version, m.joined_at, u.display_name
+		  FROM party_memberships m
+		  JOIN users u ON u.id = m.user_id
+		 WHERE m.id = $1`, membershipID).Scan(
+		&id, &partyID, &userID, &role, &status, &version, &joinedAt, &displayName,
 	); err != nil {
 		return Projection{}, err
 	}
+	// display_name은 멤버 목록 화면이 sync만으로 그려지도록 싣는다(설계 4 §6 "표시 이름 공개"). 이름이 바뀌면
+	// PropagateDisplayName이 멤버십 version을 올려 다시 보낸다.
 	return Projection{EntityType: entityPartyMembership, ID: id, Version: version, Payload: map[string]any{
-		"party_id": partyID.String(), "user_id": userID.String(), "role": role,
+		"party_id": partyID.String(), "user_id": userID.String(), "display_name": displayName, "role": role,
 		"status": status, "joined_at": joinedAt.UTC().Format(time.RFC3339),
 	}}, nil
 }

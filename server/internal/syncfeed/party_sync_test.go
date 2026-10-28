@@ -27,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"plantogether/server/internal/account"
 	"plantogether/server/internal/auth"
 	"plantogether/server/internal/party"
 	"plantogether/server/internal/platform/appleid"
@@ -72,6 +73,7 @@ func newPartyStack(t *testing.T) *partyStack {
 	authHandler := auth.NewHandler(svc, logger)
 	mux := http.NewServeMux()
 	authHandler.Register(mux)
+	account.NewHandler(account.Deps{Pool: pool, Logger: logger, Sealer: box, RefKeyBox: box}).Register(mux, authHandler.Require)
 	party.NewHandler(party.Deps{Pool: pool, Logger: logger}).Register(mux, authHandler.Require)
 	NewHandler(Deps{Pool: pool, Logger: logger, RefKeyBox: box}).Register(mux, authHandler.Require)
 	return &partyStack{h: httpapi.Wrap(logger, mux), pool: pool}
@@ -244,6 +246,8 @@ type client struct {
 	model  map[entityKey]entity
 	floors map[entityKey]int64
 	pulled int
+	// strictOrder이면 부모(party)보다 먼저 온 하위 entity upsert를 실패로 본다.
+	strictOrder bool
 }
 
 type wireChange struct {
@@ -291,7 +295,7 @@ func decodePayload(t *testing.T, raw json.RawMessage) map[string]any {
 
 func (s *partyStack) newClient(t *testing.T, name, token string, limit int) *client {
 	t.Helper()
-	c := &client{name: name, token: token, limit: limit}
+	c := &client{name: name, token: token, limit: limit, strictOrder: true}
 	c.model, c.cursor = s.fetchBootstrap(t, token)
 	c.floors = map[entityKey]int64{}
 	return c
@@ -315,8 +319,9 @@ func (c *client) apply(t *testing.T, ch wireChange) {
 			return
 		}
 		payload := decodePayload(t, ch.Payload)
-		// 하위 entity upsert는 그 Party가 먼저 와 있어야 한다. 같은 트랜잭션 안에서도 party가 앞선다.
-		if pid, ok := payload["party_id"].(string); ok {
+		// 하위 entity upsert는 그 Party가 먼저 와 있어야 한다(한 트랜잭션 안에서 party가 앞선다). 동시 실행에서는
+		// 먼저 txid를 받고 나중에 직렬화된 트랜잭션의 변경이 앞에 올 수 있어 순차 시나리오에서만 본다.
+		if pid, ok := payload["party_id"].(string); ok && c.strictOrder {
 			if _, ok := c.model[entityKey{"party", uuid.MustParse(pid)}]; !ok {
 				t.Fatalf("%s: Party %s보다 하위 entity %s %s가 먼저 왔다", c.name, pid, ch.EntityType, ch.EntityID)
 			}
@@ -431,6 +436,16 @@ func (c *client) expect(t *testing.T, step string, partyID uuid.UUID, want map[s
 	}
 }
 
+func memberName(c *client, userID uuid.UUID) string {
+	for k, e := range c.model {
+		if k.typ == "party_membership" && e.payload["user_id"] == userID.String() {
+			name, _ := e.payload["display_name"].(string)
+			return name
+		}
+	}
+	return ""
+}
+
 // ---- Party API 도우미 ----
 
 func etagOf(rec *httptest.ResponseRecorder) string { return rec.Header().Get("ETag") }
@@ -521,6 +536,14 @@ func TestPartySyncIncrementalMatchesBootstrap(t *testing.T) {
 	s.converge(t, "busyOnly", all...)
 	a1.expect(t, "busyOnly", p, map[string]int{"party": 1, "party_membership": 2, "party_visibility_setting": 1, "party_schedule_projection": 2})
 
+	// 3-1. B의 표시 이름 변경. 같은 Party 멤버는 멤버십 투영의 display_name으로 받는다.
+	me := s.req(t, http.MethodGet, "/v1/me", bTok, "", "", "")
+	s.must(t, http.StatusOK, http.MethodPatch, "/v1/me", bTok, etagOf(me), `{"display_name":"B 새 이름"}`)
+	s.converge(t, "rename B", all...)
+	if got := memberName(a1, b.id); got != "B 새 이름" {
+		t.Fatalf("A1이 본 B 이름 = %q", got)
+	}
+
 	// 4. 이름 변경, 초대 2개 생성 후 1개 무효화. 초대는 방장(A)만 본다.
 	s.must(t, http.StatusOK, http.MethodPatch, "/v1/parties/"+p.String(), aTok, s.partyETag(t, aTok, p), `{"name":"P2"}`)
 	_, _ = s.invite(t, aTok, p, "")
@@ -579,5 +602,52 @@ func TestPartySyncIncrementalMatchesBootstrap(t *testing.T) {
 	}
 	if d := mutation.Retries() - retriesBefore; d != 0 {
 		t.Fatalf("mutation 재시도 %d회: 잠금 규약 위반", d)
+	}
+}
+
+// 이름 변경(users → parties FOR SHARE)과 같은 Party 가입(users → parties FOR UPDATE)이 동시에 일어나도 교착·재시도가
+// 없고, 신규 멤버가 결국 새 이름을 본다.
+func TestDisplayNameRacingAcceptConverges(t *testing.T) {
+	s := newPartyStack(t)
+	retriesBefore := mutation.Retries()
+	a := s.newUser(t, "race.a")
+	aTok := s.signIn(t, a.subject).token
+	p := uuid.MustParse(s.must(t, http.StatusCreated, http.MethodPost, "/v1/parties", aTok, "", `{"name":"R"}`)["party"].(map[string]any)["id"].(string))
+	_, tok := s.invite(t, aTok, p, `{"max_uses":10}`)
+
+	const n = 5
+	joiners := make([]string, n)
+	clients := make([]*client, n)
+	for i := range joiners {
+		joiners[i] = s.signIn(t, s.newUser(t, "race.j"+strconv.Itoa(i)).subject).token
+		// 가입 전에 bootstrap해 둔다. 이름은 증분으로만 받는다.
+		clients[i] = s.newClient(t, "J"+strconv.Itoa(i), joiners[i], 0)
+		clients[i].strictOrder = false
+	}
+	final := ""
+	for i := 0; i < n; i++ {
+		me := s.req(t, http.MethodGet, "/v1/me", aTok, "", "", "")
+		final = "A" + strconv.Itoa(i)
+		done := make(chan *httptest.ResponseRecorder, 2)
+		go func() {
+			done <- s.req(t, http.MethodPatch, "/v1/me", aTok, uuid.NewString(), etagOf(me), `{"display_name":"`+final+`"}`)
+		}()
+		go func(tk string) {
+			done <- s.req(t, http.MethodPost, "/v1/invites/"+tok+"/accept", tk, uuid.NewString(), "", "")
+		}(joiners[i])
+		for range 2 {
+			if rec := <-done; rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+				t.Fatalf("동시 요청 = %d: %s", rec.Code, rec.Body.String())
+			}
+		}
+	}
+	for i, cl := range clients {
+		s.converge(t, "race", cl)
+		if got := memberName(cl, a.id); got != final {
+			t.Fatalf("J%d가 본 A 이름 = %q, want %q", i, got, final)
+		}
+	}
+	if d := mutation.Retries() - retriesBefore; d != 0 {
+		t.Fatalf("mutation 재시도 %d회", d)
 	}
 }

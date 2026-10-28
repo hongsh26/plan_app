@@ -2002,7 +2002,8 @@ components:
             party_invite(현재 방장에게만), party_visibility_setting(본인 것만), party_schedule_projection.
             이후 도메인이 더한다. 한 트랜잭션 안에서 party upsert는 그 하위 entity upsert보다 먼저 온다.
             party_invite는 active인 것만 보내며 소진·무효화·위임·해산은 tombstone이다. 만료는 sync를 만들지
-            않으므로 클라이언트가 expires_at으로 숨긴다.
+            않으므로 클라이언트가 expires_at으로 숨긴다. party_membership payload는 display_name을 싣고 그
+            사용자가 이름을 바꾸면 멤버십 version이 올라 같은 Party 멤버 전원에게 다시 온다.
         entity_id: {type: string, format: uuid}
         operation: {type: string, enum: [upsert, tombstone]}
         version:
