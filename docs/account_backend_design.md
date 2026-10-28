@@ -236,6 +236,7 @@ Party, 공개 설정, 제안 API는 후속 설계에서 추가하되 공통 멱�
 - snapshot 항목도 §7.1의 `scope_membership_id`를 싣는다. 교체할 때 기존 하한 기록은 버리고 snapshot의 하한 항목(아래 두 가지)으로 다시 채운다. 이후 증분은 §7.1 규칙 (a)(b)대로 적용한다(2026-10-28).
 - snapshot은 호출자가 변경 피드 보존 기간(30일) 안에 끝낸 본인 멤버십을 version 있는 `party_membership` tombstone 항목으로 함께 싣는다. 클라이언트는 row 없이 하한만 기록한다. 탈퇴는 snapshot에 반영됐지만 그보다 먼저 직렬화되고 txid가 watermark 뒤인 변경이 다시 올 때 규칙 (a)가 그 멤버십이 끝났음을 알아야 하기 때문이다(2026-10-28).
 - 같은 이유로 snapshot은 watermark 이상의 txid로 upsert가 기록된 entity 중 version 있는 tombstone이 있는 것의 하한(최대 tombstone version)을 tombstone 항목으로 싣는다. watermark 아래의 tombstone은 다시 오지 않는데 그보다 먼저 직렬화된 upsert는 다시 오므로, 하한 없이 교체하면 활성 멤버에게도 끝난 초대·projection이 되살아난다(2026-10-28).
+- 하한 항목은 같은 entity에 여러 개 올 수 있다(두 규칙이 같은 끝난 멤버십을 고를 때). 클라이언트는 최대값을 쓴다. 하한 항목의 `scope_membership_id`는 null일 수 있다(migration 00018 이전 tombstone).
 
 ### 7.3 iOS 로컬 상태
 

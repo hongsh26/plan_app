@@ -300,7 +300,7 @@ func (s *partyStack) fetchBootstrapFloors(t *testing.T, token string) (map[entit
 		if !partyEntityTypes[c.EntityType] {
 			continue
 		}
-		if c.Operation == "tombstone" && c.Version != nil && c.Scope != nil {
+		if c.Operation == "tombstone" && c.Version != nil { // 하한 항목. 00018 이전 tombstone이면 scope가 null일 수 있다.
 			if k := (entityKey{c.EntityType, c.EntityID}); *c.Version > floors[k] {
 				floors[k] = *c.Version
 			}
