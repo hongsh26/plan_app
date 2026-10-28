@@ -235,9 +235,12 @@ Party, 공개 설정, 제안 API는 후속 설계에서 추가하되 공통 멱�
 - tombstone을 먼저 적용해 삭제된 entity를 되살리지 않은 뒤 version이 더 큰 upsert만 적용한다.
 - snapshot 항목도 §7.1의 `scope_membership_id`를 싣는다. 교체할 때 기존 하한 기록은 버리고 snapshot의 하한 항목(아래 두 가지)으로 다시 채운다. 이후 증분은 §7.1 규칙 (a)(b)대로 적용한다(2026-10-28).
 - snapshot은 호출자가 변경 피드 보존 기간(30일) 안에 끝낸 본인 멤버십을 version 있는 `party_membership` tombstone 항목으로 함께 싣는다. 클라이언트는 row 없이 하한만 기록한다. 탈퇴는 snapshot에 반영됐지만 그보다 먼저 직렬화되고 txid가 watermark 뒤인 변경이 다시 올 때 규칙 (a)가 그 멤버십이 끝났음을 알아야 하기 때문이다(2026-10-28).
-- 같은 이유로 snapshot은 watermark 이상의 txid로 이 수신자에게 upsert가 기록된 entity의 하한을 tombstone 항목으로 싣는다. watermark 아래의 변경은 다시 오지 않는데 그보다 먼저 직렬화된 upsert는 다시 오므로, 하한 없이 교체하면 끝난 초대·projection이나 폐기한 기기가 되살아난다(2026-10-28).
+- 같은 이유로 snapshot은 watermark 이상의 txid로 이 수신자에게 upsert가 기록된 entity 중 **snapshot에 없는 것**의 하한을 tombstone 항목으로 싣는다. watermark 아래의 변경은 다시 오지 않는데 그보다 먼저 직렬화된 upsert는 다시 오므로, 하한 없이 교체하면 끝난 초대·projection이나 폐기한 기기가 되살아난다(2026-10-28).
   - Party 범위 entity: version 있는 tombstone의 최대 version. version 없는 scope tombstone 뒤에는 재가입이 같은 version을 다시 보내므로 upsert version을 하한으로 쓰지 않는다(규칙 (a)(b)가 맡는다).
-  - 그 밖(user, device, availability_preference): watermark 아래 이 수신자 행의 최대 version. 이 entity들은 version 없는 tombstone이 없고 version이 단조 증가한다. snapshot에 그 entity가 있으면 snapshot version이 이미 이 값 이상이라 중복 하한은 무해하다.
+  - 그 밖(user, device, availability_preference): watermark 아래 이 수신자 행의 최대 version. 이 entity들은 version 없는 tombstone이 없고 version이 단조 증가한다. 실제로는 폐기된 기기처럼 snapshot에서 빠진 entity에만 남는다.
+  - snapshot에 있는 entity에는 하한 항목을 싣지 않는다. 순서가 역전되면 이 값이 snapshot upsert의 version과 같아져, "하한보다 큰 upsert만 적용" 규칙에서 본인 user나 살아 있는 기기가 사라지기 때문이다. snapshot에 있는 entity는 snapshot version이 로컬 version이 되어 다시 오는 옛 upsert를 version 비교만으로 막는다.
+  - Party 범위 type을 새로 만들면 서버의 Party 범위 type 목록(`party.ScopedEntityTypes`)에 넣어야 한다. 빠지면 비-Party 하한이 재가입한 entity를 막는다.
+- `availability_preference`는 snapshot에 없다(본인 무효화 신호). 클라이언트는 bootstrap 뒤 `GET /v1/availability/preferences/me`로 현재 값을 다시 읽는다. watermark 아래의 최신 신호는 다시 오지 않기 때문이다.
 - 30일 하한 창(끝난 본인 멤버십)과 피드 보존 기간은 horizon이 보존 기간 이상 묶이지 않는다는 가정 위에 있다. 기준 시각은 DB `now()`다. 이 가정은 §12의 sync horizon lag 경보(30초 초과)가 지킨다.
 - 하한 항목은 같은 entity에 여러 개 올 수 있다(두 규칙이 같은 끝난 멤버십을 고를 때). 클라이언트는 최대값을 쓴다. 하한 항목의 `scope_membership_id`는 null일 수 있다(migration 00018 이전 tombstone).
 

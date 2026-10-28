@@ -697,6 +697,29 @@ func TestPartySyncIncrementalMatchesBootstrap(t *testing.T) {
 	}
 	c1.expect(t, "disband", q, map[string]int{"party": 1, "party_membership": 1, "party_visibility_setting": 1, "party_schedule_projection": 1})
 
+	// scope를 실어 발행된 type은 모두 party.ScopedEntityTypes에 있어야 한다. 빠지면 bootstrap 하한이 그 type을
+	// 비-Party로 다뤄 재가입한 entity를 막는다.
+	scoped := map[string]bool{}
+	for _, typ := range party.ScopedEntityTypes() {
+		scoped[typ] = true
+	}
+	rows, err := s.pool.Query(context.Background(), `
+		SELECT DISTINCT entity_type FROM sync_changes
+		 WHERE scope_membership_id IS NOT NULL AND recipient_user_id = ANY($1)`, []uuid.UUID{a.id, b.id, c.id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var typ string
+		if err := rows.Scan(&typ); err != nil {
+			t.Fatal(err)
+		}
+		if !scoped[typ] {
+			t.Fatalf("scope를 실은 type %q가 party.ScopedEntityTypes에 없다", typ)
+		}
+	}
+	rows.Close()
+
 	if a2.pulled == 0 || b2.pulled == 0 {
 		t.Fatalf("늦은 세션이 증분을 받지 않았다: A2 %d, B2 %d", a2.pulled, b2.pulled)
 	}
@@ -1427,4 +1450,77 @@ func keys(m map[uuid.UUID]int64) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// 재현 8: 같은 사용자의 이름 변경 두 건이 역전되고(나중에 직렬화된 B가 작은 txid) horizon을 붙잡은 채 bootstrap하면,
+// 비-Party 하한(watermark 아래 최대 version)이 snapshot의 user upsert version과 같아진다. 서버는 snapshot에 있는
+// entity에는 하한 항목을 싣지 않는다. 실으면 "하한보다 큰 upsert만 적용" 규칙에서 본인 user가 사라진다.
+func TestBootstrapOmitsFloorsForSnapshotEntities(t *testing.T) {
+	s := newPartyStack(t)
+	u := s.newUser(t, "r8.u")
+	t1, _ := s.signInDevice(t, u.subject)
+	t2, d2 := s.signInDevice(t, u.subject)
+	var v int64
+	if err := s.pool.QueryRow(context.Background(), `SELECT version FROM users WHERE id = $1`, u.id).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+
+	blk := s.blockDevice(t, d2)
+	later := s.async(t, http.MethodPatch, "/v1/me", t2, `"`+strconv.FormatInt(v+1, 10)+`"`, `{"display_name":"나중"}`)
+	blk.waitBlocked(t)
+	hold, err := s.pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hold.Rollback(context.Background()) }()
+	if _, err := hold.Exec(context.Background(), `SELECT pg_current_xact_id()`); err != nil {
+		t.Fatal(err)
+	}
+	s.must(t, http.StatusOK, http.MethodPatch, "/v1/me", t1, `"`+strconv.FormatInt(v, 10)+`"`, `{"display_name":"먼저"}`)
+	blk.release(t)
+	expectStatus(t, <-later, http.StatusOK)
+
+	var laterTx, earlierTx string
+	if err := s.pool.QueryRow(context.Background(), `
+		SELECT (array_agg(txid::text ORDER BY entity_version DESC))[1], (array_agg(txid::text ORDER BY entity_version ASC))[1]
+		  FROM sync_changes WHERE recipient_user_id = $1 AND entity_type = 'user' AND entity_version > $2`, u.id, v).Scan(&laterTx, &earlierTx); err != nil {
+		t.Fatal(err)
+	}
+	lt, _ := strconv.ParseUint(laterTx, 10, 64)
+	et, _ := strconv.ParseUint(earlierTx, 10, 64)
+	if lt >= et {
+		t.Fatalf("순서 역전이 일어나지 않았다: 나중 txid %d, 먼저 txid %d", lt, et)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rec := s.req(t, http.MethodGet, "/v1/sync/bootstrap", t1, "", "", "")
+		var body struct {
+			Snapshot  []wireChange `json:"snapshot"`
+			Watermark string       `json:"cursor_watermark"`
+		}
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &body) != nil {
+			t.Fatalf("bootstrap = %d", rec.Code)
+		}
+		if cur, _ := DecodeCursor(body.Watermark); cur.TxID <= lt {
+			if time.Now().After(deadline) {
+				t.Fatal("watermark가 나중 변경 txid를 넘지 않았다")
+			}
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		var userUpsert *int64
+		for _, c := range body.Snapshot {
+			if c.EntityType == "user" && c.EntityID == u.id {
+				if c.Operation == "tombstone" {
+					t.Fatalf("snapshot에 있는 user에 하한 항목 v%d가 함께 실렸다", *c.Version)
+				}
+				userUpsert = c.Version
+			}
+		}
+		if userUpsert == nil || *userUpsert != v+2 {
+			t.Fatalf("snapshot user version = %v, want %d", userUpsert, v+2)
+		}
+		return
+	}
 }

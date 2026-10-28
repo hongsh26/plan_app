@@ -79,6 +79,13 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID) (Snaps
 				snap.Entities = append(snap.Entities, Change{EntityType: pr.EntityType, EntityID: pr.ID, Operation: "upsert", Version: &v, Payload: b, ScopeMembershipID: &scope})
 			}
 			// 최근 끝난 본인 멤버십은 하한 전용 tombstone 항목이다. 클라이언트는 row 없이 하한만 기록한다.
+			// 하한 항목은 snapshot에 없는 entity에만 싣는다. snapshot upsert와 같은 version의 하한이 함께 가면 "하한보다
+			// 큰 upsert만 적용" 규칙에서 살아 있는 entity(본인 user, 살아 있는 기기)가 사라진다. snapshot에 있는 entity는
+			// snapshot version이 로컬 version이 되어 다시 오는 옛 upsert를 version 비교만으로 막는다.
+			inSnapshot := make(map[[2]string]bool, len(snap.Entities))
+			for _, e := range snap.Entities {
+				inSnapshot[[2]string{e.EntityType, e.EntityID.String()}] = true
+			}
 			floors, err := party.EndedMembershipFloors(ctx, tx, userID, Retention)
 			if err != nil {
 				return err
@@ -93,6 +100,8 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID) (Snaps
 			//   - Party 범위 entity: version 있는 tombstone의 최대 version. 끝난 entity는 같은 ID로 되살아나지 않는다.
 			//     version 없는 scope tombstone 뒤에는 재가입이 같은 version을 다시 보내므로 upsert version을 하한으로
 			//     쓰면 안 된다(그 경우는 규칙 (a)(b)가 맡는다).
+			//   - Party 범위 type을 새로 만들면 party.ScopedEntityTypes에 넣어야 한다. 빠지면 아래 비-Party 분기로 떨어져
+			//     재가입한 entity를 하한으로 막는다(party_sync_test가 발행된 scope type을 대조한다).
 			//   - 그 밖(user, device, availability_preference): version 없는 tombstone이 없고 version이 단조 증가하므로
 			//     watermark 아래 이 수신자 행의 최대 version이 snapshot에 반영된 상태다. 기기 폐기는 revoked upsert라
 			//     snapshot에서 빠지므로 이 하한이 없으면 먼저 직렬화된 옛 upsert가 폐기 기기를 되살린다.
@@ -118,6 +127,9 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID) (Snaps
 				if err := trows.Scan(&ch.EntityType, &ch.EntityID, &v, &ch.ScopeMembershipID); err != nil {
 					trows.Close()
 					return err
+				}
+				if inSnapshot[[2]string{ch.EntityType, ch.EntityID.String()}] {
+					continue
 				}
 				ch.Operation, ch.Version, ch.Payload = "tombstone", &v, json.RawMessage("null")
 				snap.Entities = append(snap.Entities, ch)
