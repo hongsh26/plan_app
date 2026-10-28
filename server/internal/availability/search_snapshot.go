@@ -261,28 +261,42 @@ func readSearchState(ctx context.Context, q Querier, partyID, callerID uuid.UUID
 }
 
 // calendarState는 한 멤버의 캘린더 준비 상태다. stale은 저장하지 않고 now로 계산한다
-// (calendar.FreshUsers와 같은 기준: last_completed_sync_at + 6h > now이어야 fresh).
-// ready여도 active generation의 window row가 없으면(session 24시간 정리, calendar.Prune) 범위를 확인할 수
-// 없으므로 stale로 본다. 재동기화가 새 window를 만든다.
+// (last_completed_sync_at + 6h > now이어야 fresh, calendar.FreshUsers와 같은 경계).
+//
+// 계산 가능(ready) 조건: source_status ∈ {ready, syncing} AND active_generation > 0 AND fresh AND active
+// generation의 window row가 있다. syncing은 재동기화 중에도 마지막 정상 generation을 유지하는 상태라(설계 3
+// §6, §9의 sync pending 목록에 없다) 그 generation으로 계산한다. 진행 중 업로드는 staging에만 있고 계산은
+// active generation facts만 읽으므로 섞이지 않는다. calendar.FreshUsers(ready만 인정)는 다른 소비자가 쓰므로
+// 바꾸지 않고 여기서 판정한다.
+//
+// self 표시: 계산 가능하면 syncing이어도 ready다(본인이 할 일이 없다). 쓸 수 있는 이전 generation이 없는
+// syncing(첫 연결, 또는 이전 generation이 stale·window 없음)은 syncing이다. ready인데 stale이거나 window row가
+// 없으면(session 24시간 정리, calendar.Prune) stale이다.
 func calendarState(c connRow, exists bool, now time.Time) string {
 	if !exists {
 		return SelfCalendarNotConnected
 	}
+	usable := c.generation > 0 && c.lastSync != nil && c.lastSync.Add(calendar.FreshnessWindow).After(now) &&
+		c.windowStart != nil && c.windowEnd != nil
 	switch c.status {
 	case "ready":
-		if c.lastSync == nil || !c.lastSync.Add(calendar.FreshnessWindow).After(now) ||
-			c.windowStart == nil || c.windowEnd == nil {
+		if !usable {
 			return SelfCalendarStale
 		}
 		return SelfCalendarReady
+	case "syncing":
+		if usable {
+			return SelfCalendarReady
+		}
+		return SelfCalendarSyncing
+	case "selecting":
+		return SelfCalendarSyncing
 	case "disconnected":
 		return SelfCalendarNotConnected
 	case "permission_required", "denied", "restricted":
 		return SelfCalendarDenied
 	case "revoked":
 		return SelfCalendarRevoked
-	case "selecting", "syncing":
-		return SelfCalendarSyncing
 	case "needs_source_reselection":
 		return SelfCalendarSourceNeeded
 	default:

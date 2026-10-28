@@ -3,6 +3,7 @@ package availability
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -222,7 +223,7 @@ func TestSearchPendingStatesExposeOnlySelf(t *testing.T) {
 	s.mustSearch(t, a, p.ID, body)
 	for status, want := range map[string]string{
 		"revoked": SelfCalendarRevoked, "denied": SelfCalendarDenied, "restricted": SelfCalendarDenied,
-		"permission_required": SelfCalendarDenied, "error": SelfCalendarError, "syncing": SelfCalendarSyncing,
+		"permission_required": SelfCalendarDenied, "error": SelfCalendarError, "selecting": SelfCalendarSyncing,
 		"needs_source_reselection": SelfCalendarSourceNeeded, "disconnected": SelfCalendarNotConnected,
 	} {
 		if _, err := s.pool.Exec(context.Background(), `UPDATE calendar_connections SET source_status = $2 WHERE id = $1`, connC, status); err != nil {
@@ -706,4 +707,107 @@ func TestSearchTodayAcceptsWindowStartingBeforeNow(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertError(t, s.search(t, a, p.ID, `{"time_zone":"Asia/Seoul"}`), http.StatusBadRequest, CodeRangeInvalid)
+}
+
+// 재동기화 중(syncing)이어도 이전 generation이 fresh면 그 generation으로 계산한다. 진행 중 업로드의
+// staging facts는 섞이지 않고, 업로드가 complete되어 generation이 바뀌면 이전 version은 stale이다.
+func TestSearchDuringResyncUsesActiveGeneration(t *testing.T) {
+	s := newStack(t, false)
+	ctx := context.Background()
+	params := testParams(t, "Asia/Seoul")
+	env := envOf(t, params)
+	body := paramsBody(params)
+	a := s.readyMember(t, "Asia/Seoul")
+	b := s.readyMember(t, "Asia/Seoul", engine.Interval{Start: env.Start.Add(10 * time.Hour), End: env.Start.Add(12 * time.Hour)})
+	p := s.newParty(t, a)
+	s.join(t, b, p)
+	before := s.mustSearch(t, a, p.ID, body)
+	if len(before.Slots) == 0 {
+		t.Fatal("결과가 비었다")
+	}
+
+	// b가 재동기화를 시작한다: 연결 syncing, 열린 session revision 2와 envelope 전체를 덮는 staging fact.
+	var connB uuid.UUID
+	if err := s.pool.QueryRow(ctx, `SELECT id FROM calendar_connections WHERE user_id = $1`, b.UserID).Scan(&connB); err != nil {
+		t.Fatal(err)
+	}
+	ws, we := defaultWindow()
+	sessionID := uuid.New()
+	key := uuid.New()
+	for _, q := range []struct {
+		sql  string
+		args []any
+	}{
+		{`UPDATE calendar_connections SET source_status = 'syncing' WHERE id = $1`, []any{connB}},
+		{`INSERT INTO calendar_snapshot_sessions (id, connection_id, revision, window_start, window_end, expected_pages)
+		  VALUES ($1, $2, 2, $3, $4, 1)`, []any{sessionID, connB, ws, we}},
+		{`INSERT INTO calendar_snapshot_pages (session_id, page, fact_count) VALUES ($1, 0, 1)`, []any{sessionID}},
+		{`INSERT INTO calendar_snapshot_facts_staging (session_id, page, source_event_key, start_at, end_at, all_day, time_zone, availability)
+		  VALUES ($1, 0, $2, $3, $4, false, 'Asia/Seoul', 'busy')`, []any{sessionID, key[:], env.Start.Add(-time.Hour), env.End.Add(time.Hour)}},
+	} {
+		if _, err := s.pool.Exec(ctx, q.sql, q.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.avail.cache = newResultCache(searchCacheSize) // 캐시가 아니라 계산으로 같은 결과인지 본다
+	during := s.mustSearch(t, a, p.ID, body)
+	if fmt.Sprint(during.Slots) != fmt.Sprint(before.Slots) {
+		t.Fatal("업로드 중 staging facts가 결과에 섞였다")
+	}
+	if s.avail.cache.hitCount() != 0 {
+		t.Fatal("cache를 거쳤다")
+	}
+	// syncing 전환만으로는 version이 바뀌지 않는다(generation 기준).
+	if err := s.verify(t, p.ID, a, params, before.CalculationVersion, time.Now()); err != nil {
+		t.Fatalf("syncing 중 이전 version 검증 = %v", err)
+	}
+
+	// complete: staging을 generation 2 facts로 승격하고 연결을 ready·generation 2로 바꾼다(snapshot.go와 같은 변화).
+	for _, q := range []struct {
+		sql  string
+		args []any
+	}{
+		{`DELETE FROM calendar_busy_facts WHERE connection_id = $1`, []any{connB}},
+		{`INSERT INTO calendar_busy_facts (connection_id, source_event_key, user_id, generation, start_at, end_at, all_day, time_zone, availability)
+		  SELECT $1, source_event_key, $3, 2, start_at, end_at, all_day, time_zone, availability
+		    FROM calendar_snapshot_facts_staging WHERE session_id = $2`, []any{connB, sessionID, b.UserID}},
+		{`UPDATE calendar_snapshot_sessions SET status = 'completed', generation = 2, fact_count = 1, completed_at = now() WHERE id = $1`, []any{sessionID}},
+		{`UPDATE calendar_connections SET source_status = 'ready', active_generation = 2, last_completed_sync_at = now() WHERE id = $1`, []any{connB}},
+	} {
+		if _, err := s.pool.Exec(ctx, q.sql, q.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.verify(t, p.ID, a, params, before.CalculationVersion, time.Now()); !errors.Is(err, ErrResultStale) {
+		t.Fatalf("complete 뒤 이전 version = %v, want stale", err)
+	}
+	after := s.mustSearch(t, a, p.ID, body)
+	if len(after.Slots) != 0 || after.CalculationVersion == before.CalculationVersion {
+		t.Fatalf("새 generation 결과 = %d개", len(after.Slots))
+	}
+
+	// 다시 syncing인데 이전 generation이 stale이면 pending이고 본인은 syncing이다.
+	if _, err := s.pool.Exec(ctx, `UPDATE calendar_connections SET source_status = 'syncing', last_completed_sync_at = now() - interval '7 hours' WHERE id = $1`, connB); err != nil {
+		t.Fatal(err)
+	}
+	assertPending(t, s.search(t, b, p.ID, body), CodeSyncPending, SelfState{Activity: StatusConfigured, Calendar: SelfCalendarSyncing})
+	assertPending(t, s.search(t, a, p.ID, body), CodeSyncPending, SelfState{Activity: StatusConfigured, Calendar: SelfCalendarReady})
+}
+
+// 첫 연결의 syncing(이전 정상 generation 없음)은 계속 pending이다.
+func TestSearchFirstSyncingIsPending(t *testing.T) {
+	s := newStack(t, false)
+	body := paramsBody(testParams(t, "Asia/Seoul"))
+	a := s.readyMember(t, "Asia/Seoul")
+	c := s.signIn(t)
+	s.setPrefs(t, c, "Asia/Seoul", allDay)
+	if _, err := s.pool.Exec(context.Background(), `
+		INSERT INTO calendar_connections (id, user_id, source_status, active_generation, time_zone)
+		VALUES ($1, $2, 'syncing', 0, 'Asia/Seoul')`, uuid.New(), c.UserID); err != nil {
+		t.Fatal(err)
+	}
+	p := s.newParty(t, a)
+	s.join(t, c, p)
+	assertPending(t, s.search(t, c, p.ID, body), CodeSyncPending, SelfState{Activity: StatusConfigured, Calendar: SelfCalendarSyncing})
+	assertPending(t, s.search(t, a, p.ID, body), CodeSyncPending, SelfState{Activity: StatusConfigured, Calendar: SelfCalendarReady})
 }

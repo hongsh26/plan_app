@@ -832,7 +832,8 @@ paths:
         "409":
           description: |
             availability_setup_pending(한 명 이상 활동 시간 미설정) 또는 calendar_sync_pending(한 명 이상 캘린더가
-            ready가 아니거나 마지막 정상 sync가 6시간을 넘음). 둘 다면 setup이 우선한다. self는 호출자 본인 상태만이다.
+            계산 가능하지 않음: ready 또는 재동기화 중(syncing)이면서 이전 정상 generation이 있고 마지막 정상 sync가
+            6시간 이내여야 한다). 둘 다면 setup이 우선한다. self는 호출자 본인 상태만이다.
             availability_changed_retry는 검색 중 입력이 반복해서 바뀐 경우이며 self가 없다. 그대로 다시 검색한다.
           content:
             application/json:
