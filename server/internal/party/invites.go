@@ -456,7 +456,7 @@ func (h *Handler) acceptInvite(w http.ResponseWriter, r *http.Request) {
 		if joined >= 20 {
 			return mutation.Result{}, errJoinedLimitReached
 		}
-		// 8~10. 멤버십, 공개 수준, projection.
+		// 8~9. 멤버십, 공개 수준. projection(10)은 sync 발행 뒤에 만든다.
 		membershipID, settingID := uuid.New(), uuid.New()
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO party_memberships (id, party_id, user_id, role, invite_id, joined_at, created_at, updated_at)
@@ -466,9 +466,6 @@ func (h *Handler) acceptInvite(w http.ResponseWriter, r *http.Request) {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO party_visibility_settings (id, party_id, user_id, visibility_level)
 			VALUES ($1, $2, $3, 'busyOnly')`, settingID, partyID, p.UserID); err != nil {
-			return mutation.Result{}, err
-		}
-		if err := createBusyOnlyProjections(ctx, tx, partyID, p.UserID); err != nil {
 			return mutation.Result{}, err
 		}
 		// 11. 사용 횟수. 소진되면 exhausted.
@@ -485,6 +482,11 @@ func (h *Handler) acceptInvite(w http.ResponseWriter, r *http.Request) {
 		}
 		// 13. sync. 신규 멤버에게는 Party 단위 부트스트랩, 기존 멤버에게는 변경분, 방장에게는 초대 사용 횟수.
 		if err := h.emitJoin(ctx, tx, partyID, inviteID, membershipID, settingID, p.UserID); err != nil {
+			return mutation.Result{}, err
+		}
+		// 10. 신규 멤버의 projection. 상위 entity 발행 뒤에 만들어 활성 멤버 전원(신규 멤버 포함)에게
+		// party·멤버십 다음 순서로 upsert가 간다. calendar connection 잠금도 가장 마지막이 된다.
+		if err := createBusyOnlyProjections(ctx, tx, partyID, p.UserID); err != nil {
 			return mutation.Result{}, err
 		}
 		// 14. 알림 job. payload에는 식별자만 담는다(§7.4).
@@ -552,7 +554,7 @@ func (h *Handler) emitJoin(ctx context.Context, tx *mutation.Tx, partyID, invite
 		return err
 	}
 	// 다른 멤버의 허용된 projection도 부트스트랩으로 받는다(설계 4 §5.5 T3 13단계). 신규 멤버 본인의
-	// projection은 RebuildBusyProjections가 이미 활성 멤버 전원에게 발행했다.
+	// projection은 emitJoin 뒤의 RebuildBusyProjections가 활성 멤버 전원에게 발행한다.
 	if err := emitPartyProjectionsTo(ctx, tx, newUserID, partyID, newUserID); err != nil {
 		return err
 	}

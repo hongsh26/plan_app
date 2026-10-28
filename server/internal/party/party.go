@@ -150,13 +150,15 @@ func (h *Handler) createParty(w http.ResponseWriter, r *http.Request) {
 			VALUES ($1, $2, $3, 'busyOnly')`, settingID, partyID, p.UserID); err != nil {
 			return mutation.Result{}, err
 		}
-		if err := createBusyOnlyProjections(ctx, tx, partyID, p.UserID); err != nil {
-			return mutation.Result{}, err
-		}
+		// 상위 entity(party, 멤버십, 설정)를 projection보다 먼저 발행한다. 클라이언트가 한 페이지 안에서
+		// 부모 없는 projection을 먼저 받지 않게 한다.
 		for _, id := range []uuid.UUID{partyID, membershipID, settingID} {
 			if err := emitProjection(ctx, tx, p.UserID, id); err != nil {
 				return mutation.Result{}, err
 			}
+		}
+		if err := createBusyOnlyProjections(ctx, tx, partyID, p.UserID); err != nil {
+			return mutation.Result{}, err
 		}
 		createdID = partyID
 		return mutation.Result{StatusCode: http.StatusCreated, ResourceType: entityParty, ResourceID: partyID, ResourceVersion: 1}, nil
