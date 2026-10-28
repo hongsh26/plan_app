@@ -236,11 +236,19 @@ func readSearchState(ctx context.Context, q Querier, partyID, callerID uuid.UUID
 		return nil, &PendingError{Code: CodeSyncPending, Self: self}
 	}
 
-	// 모든 active generation window의 UTC 교집합이 envelope 전체를 덮어야 한다. 누락 구간을 free로
-	// 해석하지 않는다(§4). 어느 멤버가 부족한지는 알리지 않는다.
+	// 모든 active generation window의 UTC 교집합이 envelope를 덮어야 한다. 누락 구간을 free로 해석하지
+	// 않는다(§4). 어느 멤버가 부족한지는 알리지 않는다.
+	//
+	// 하한은 max(envelope 시작, now)다. 멤버 window는 그 멤버 시간대의 오늘 00:00부터라(설계 3 §6) 요청
+	// 시간대가 더 서쪽이면 오늘 검색의 envelope 시작보다 늦다. [envelope 시작, now)는 이미 지나 후보가
+	// 없고(lead time), now 이후 슬롯과 겹치는 일정은 window 경계를 가로질러도 업로드되므로 누락이 아니다.
+	lower := env.Start
+	if now.After(lower) {
+		lower = now
+	}
 	for i, m := range st.members {
 		c := st.conns[m.userID]
-		if c.windowStart.After(env.Start) || c.windowEnd.Before(env.End) {
+		if c.windowStart.After(lower) || c.windowEnd.Before(env.End) {
 			return nil, errRangeNotCovered
 		}
 		until := c.lastSync.Add(calendar.FreshnessWindow)

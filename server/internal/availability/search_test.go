@@ -677,3 +677,33 @@ func TestSearchTimeoutMapsTo503(t *testing.T) {
 		t.Fatal("Retry-After가 없다")
 	}
 }
+
+// 오늘 검색: 멤버 window는 그 멤버 시간대의 오늘 00:00부터라 요청 시간대 오늘 00:00보다 늦을 수 있다.
+// 이미 지난 [envelope 시작, now)는 후보가 없으므로 포함 검사의 하한은 max(envelope 시작, now)다.
+func TestSearchTodayAcceptsWindowStartingBeforeNow(t *testing.T) {
+	s := newStack(t, false)
+	params := testParams(t, "Asia/Seoul")
+	params.StartDate = params.StartDate.AddDays(-2) // 오늘
+	params.EndDate = params.StartDate.AddDays(13)
+	env := envOf(t, params)
+	now := time.Now()
+	a := s.readyMember(t, "Asia/Seoul")
+	b := s.signIn(t)
+	s.setPrefs(t, b, "Asia/Seoul", allDay)
+	_, we := defaultWindow()
+	mid := env.Start.Add(now.Sub(env.Start) / 2)
+	s.seedCalendar(t, b.UserID, now.Add(-time.Hour), mid, we)
+	p := s.newParty(t, a)
+	s.join(t, b, p)
+
+	s.mustSearch(t, a, p.ID, `{"time_zone":"Asia/Seoul"}`)
+	s.mustSearch(t, a, p.ID, paramsBody(params))
+
+	// window가 now보다 늦게 시작하면 앞으로 올 구간이 빠졌으므로 여전히 400이다.
+	if _, err := s.pool.Exec(context.Background(), `
+		UPDATE calendar_snapshot_sessions SET window_start = $2
+		 WHERE connection_id = (SELECT id FROM calendar_connections WHERE user_id = $1)`, b.UserID, now.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	assertError(t, s.search(t, a, p.ID, `{"time_zone":"Asia/Seoul"}`), http.StatusBadRequest, CodeRangeInvalid)
+}
