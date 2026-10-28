@@ -203,14 +203,28 @@ func TestSearchCalendarTransitionsThroughAPI(t *testing.T) {
 	s.calComplete(t, b, s.calCreate(t, b, next()), 0)
 	v = ok("철회 뒤 새 complete").CalculationVersion
 
-	// error → snapshot 생성(syncing)
+	// ready → error: error 자체는 계산하지 않는다(409). error → snapshot 생성(syncing)은 마지막 정상 generation을
+	// 유지하므로(설계 3 §5.2, 철회 이력 없음) 검색 200이고 이전 version도 그대로다.
 	s.calPut(t, b, `{"status":"error"}`)
 	pending("오류", SelfCalendarError)
+	stale("오류 중", v)
 	errSync := s.calCreate(t, b, next())
-	pending("오류 뒤 재동기화 중", SelfCalendarSyncing)
-	stale("오류 뒤 재동기화 중", v)
+	ok("오류 뒤 재동기화 중")
+	if err := s.verify(t, p.ID, a, params, v, time.Now()); err != nil {
+		t.Fatalf("오류 뒤 재동기화 중 이전 version = %v", err)
+	}
 	s.calComplete(t, b, errSync, 0)
 	v = ok("오류 뒤 새 complete").CalculationVersion
+
+	// 철회 → error: 철회에서 플래그가 내려갔으므로 error → syncing이어도 계산하지 않는다.
+	s.calPut(t, b, `{"status":"revoked"}`)
+	s.calPut(t, b, `{"status":"error"}`)
+	pending("철회 뒤 오류", SelfCalendarError)
+	revokedErr := s.calCreate(t, b, next())
+	pending("철회 뒤 오류 뒤 재동기화 중", SelfCalendarSyncing)
+	stale("철회 뒤 오류 뒤 재동기화 중", v)
+	s.calComplete(t, b, revokedErr, 0)
+	v = ok("철회 뒤 오류 뒤 새 complete").CalculationVersion
 
 	// ready에서 status 없이 source만 바꾸면 새 complete 전까지 계산하지 않는다.
 	s.calPut(t, b, `{"sources":[{"key":"cal-2","enabled":true}]}`)

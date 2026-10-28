@@ -30,15 +30,16 @@ func (s *stack) disband(t *testing.T, token string, partyID uuid.UUID, key strin
 	return s.mut(t, http.MethodPost, "/v1/parties/"+partyID.String()+"/disband", token, key, `"`+strconv.FormatInt(version, 10)+`"`, "")
 }
 
-// seedReadyCalendar는 사용자에게 ready 연결과 Busy fact 하나를 만든다. 이후 Party 생성·가입이
+// seedReadyCalendar는 사용자에게 ready 연결과 Busy fact 하나를 만든다. snapshot complete를 거친 상태와 같게
+// active_generation_usable도 true다(migration 00017). 이후 Party 생성·가입이
 // 실제 경로(§5.5.1)로 busyOnly projection을 만든다.
 func seedReadyCalendar(t *testing.T, s *stack, userID string) {
 	t.Helper()
 	ctx := context.Background()
 	connID := uuid.New()
 	if _, err := s.pool.Exec(ctx, `
-		INSERT INTO calendar_connections (id, user_id, source_status, active_generation, last_completed_sync_at, time_zone)
-		VALUES ($1, $2, 'ready', 1, now(), 'Asia/Seoul')`, connID, userID); err != nil {
+		INSERT INTO calendar_connections (id, user_id, source_status, active_generation, active_generation_usable, last_completed_sync_at, time_zone)
+		VALUES ($1, $2, 'ready', 1, true, now(), 'Asia/Seoul')`, connID, userID); err != nil {
 		t.Fatal(err)
 	}
 	start := time.Now().UTC().Truncate(time.Hour).Add(24 * time.Hour)

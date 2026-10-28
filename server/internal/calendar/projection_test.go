@@ -958,37 +958,167 @@ func TestAbortAfterRevokeDoesNotReviveGeneration(t *testing.T) {
 	}
 }
 
-// error → 업로드(syncing) → abort는 selecting이 되고, 비노출 상태이므로 projection도 즉시 지운다.
-func TestAbortToSelectingHidesProjections(t *testing.T) {
+// 플래그 기반 가시성(migration 00017): 비노출 상태·source 변경으로 내려간 active generation은 어떤 재구성
+// 경로로도 다시 보이지 않고, 새 complete에서만 복구된다. error는 마지막 정상 데이터를 유지한다(설계 3 §5.2).
+type flagCase struct {
+	s     *stack
+	t     *testing.T
+	alice session
+	bob   session
+	p     partyRef
+	rev   int64
+}
+
+func newFlagCase(t *testing.T) *flagCase {
 	s := newStack(t)
-	alice := s.signIn(t, "cal.ae."+uuid.NewString())
-	bob := s.signIn(t, "cal.ae."+uuid.NewString())
-	s.enableCalendar(t, alice)
-	p := s.newParty(t, alice)
-	s.join(t, bob, p)
-	s.sync(t, alice, 1, []fact{mkFact(1, 1, 10), mkFact(2, 2, 10)}, 10)
-	c := s.connection(t, alice)
-	if rec := s.mut(t, http.MethodPut, "/v1/calendar/connection", alice.AccessToken, `{"status":"error"}`, itoa(c.Version)); rec.Code != http.StatusOK {
-		t.Fatal(rec.Body.String())
+	c := &flagCase{s: s, t: t, alice: s.signIn(t, "cal.fl."+uuid.NewString()), bob: s.signIn(t, "cal.fl."+uuid.NewString())}
+	s.enableCalendar(t, c.alice)
+	c.p = s.newParty(t, c.alice)
+	s.join(t, c.bob, c.p)
+	c.resync(true)
+	return c
+}
+
+// resync는 새 revision으로 facts 2개를 올리고 complete한다.
+func (c *flagCase) resync(expectVisible bool) {
+	c.t.Helper()
+	c.rev++
+	c.s.sync(c.t, c.alice, c.rev, []fact{mkFact(1, 1, 10), mkFact(2, 2, 10)}, 10)
+	if expectVisible {
+		c.expect("complete", 2, true)
 	}
-	if s.projections(t, p.ID, alice.UserID) != 2 {
-		t.Fatal("사전 조건: error는 마지막 정상 projection을 유지한다")
+}
+
+func (c *flagCase) put(body string) {
+	c.t.Helper()
+	conn := c.s.connection(c.t, c.alice)
+	if rec := c.s.mut(c.t, http.MethodPut, "/v1/calendar/connection", c.alice.AccessToken, body, itoa(conn.Version)); rec.Code != http.StatusOK {
+		c.t.Fatalf("PUT %s = %d: %s", body, rec.Code, rec.Body.String())
 	}
-	rec := s.createSnapshot(t, alice, 2, 0)
+}
+
+func (c *flagCase) create() uuid.UUID {
+	c.t.Helper()
+	c.rev++
+	rec := c.s.createSnapshot(c.t, c.alice, c.rev, 0)
 	if rec.Code != http.StatusCreated {
-		t.Fatal(rec.Body.String())
+		c.t.Fatalf("snapshot 생성 = %d: %s", rec.Code, rec.Body.String())
 	}
-	id := decode[snapEnv](t, rec).Snapshot.ID
-	if rec := s.mut(t, http.MethodPost, "/v1/calendar/snapshots/"+id.String()+"/abort", alice.AccessToken, "", ""); rec.Code != http.StatusOK {
-		t.Fatal(rec.Body.String())
+	return decode[snapEnv](c.t, rec).Snapshot.ID
+}
+
+// changeVisibility는 실제 공개 수준 API로 projection 재구성을 일으킨다(busyOnly ↔ details 교대).
+func (c *flagCase) changeVisibility() {
+	c.t.Helper()
+	var level string
+	var ver int64
+	if err := c.s.pool.QueryRow(context.Background(), `SELECT visibility_level, version FROM party_visibility_settings WHERE party_id = $1 AND user_id = $2`,
+		c.p.ID, c.alice.UserID).Scan(&level, &ver); err != nil {
+		c.t.Fatal(err)
 	}
-	if st := s.connection(t, alice).Status; st != "selecting" {
-		t.Fatalf("status = %s, want selecting", st)
+	next := "details"
+	if level == "details" {
+		next = "busyOnly"
 	}
-	if n := s.projections(t, p.ID, alice.UserID); n != 0 {
-		t.Fatalf("selecting인데 projection = %d", n)
+	if rec := c.s.mut(c.t, http.MethodPatch, "/v1/parties/"+c.p.ID.String()+"/visibility/me", c.alice.AccessToken,
+		`{"visibility_level":"`+next+`","share_location":false}`, itoa(ver)); rec.Code != http.StatusOK && rec.Code != http.StatusAccepted {
+		c.t.Fatalf("공개 수준 변경 = %d: %s", rec.Code, rec.Body.String())
 	}
-	if n := s.changes(t, bob.UserID, "tombstone"); n != 2 {
-		t.Fatalf("bob tombstone = %d", n)
+}
+
+func (c *flagCase) expect(name string, projections int, fresh bool) {
+	c.t.Helper()
+	if n := c.s.projections(c.t, c.p.ID, c.alice.UserID); n != projections {
+		c.t.Fatalf("%s: projection = %d, want %d", name, n, projections)
 	}
+	id := uuid.MustParse(c.alice.UserID)
+	m, err := FreshUsers(context.Background(), c.s.pool, []uuid.UUID{id}, time.Now())
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	if m[id] != fresh {
+		c.t.Fatalf("%s: fresh = %v, want %v", name, m[id], fresh)
+	}
+}
+
+func TestProjectionVisibilityRequiresUsableGeneration(t *testing.T) {
+	t.Run("철회 뒤 error는 비노출", func(t *testing.T) {
+		c := newFlagCase(t)
+		c.put(`{"status":"revoked"}`)
+		c.expect("철회", 0, false)
+		c.put(`{"status":"error"}`)
+		c.expect("철회 → error", 0, false)
+		c.changeVisibility()
+		c.expect("철회 → error 뒤 재구성", 0, false)
+		c.create()
+		c.expect("철회 → error → 업로드", 0, false)
+		c.changeVisibility()
+		c.expect("철회 → error → 업로드 중 재구성", 0, false)
+		c.resync(true)
+	})
+	t.Run("철회 뒤 업로드 중 재구성은 비노출", func(t *testing.T) {
+		c := newFlagCase(t)
+		c.put(`{"status":"revoked"}`)
+		c.put(`{"status":"selecting"}`)
+		c.create()
+		if st := c.s.connection(t, c.alice).Status; st != "syncing" {
+			t.Fatalf("status = %s", st)
+		}
+		c.changeVisibility()
+		c.expect("업로드 중 공개 수준 변경", 0, false)
+		p2 := c.s.newParty(t, c.alice)
+		if n := c.s.projections(t, p2.ID, c.alice.UserID); n != 0 {
+			t.Fatalf("업로드 중 새 Party projection = %d", n)
+		}
+		c.resync(true)
+		if n := c.s.projections(t, p2.ID, c.alice.UserID); n != 2 {
+			t.Fatalf("complete 뒤 새 Party projection = %d", n)
+		}
+	})
+	t.Run("source만 바꾸면 즉시 비노출", func(t *testing.T) {
+		c := newFlagCase(t)
+		before := c.s.changes(t, c.bob.UserID, "tombstone")
+		c.put(`{"sources":[{"key":"cal-2","enabled":true}]}`)
+		if st := c.s.connection(t, c.alice).Status; st != "ready" {
+			t.Fatalf("status = %s", st)
+		}
+		c.expect("source 변경", 0, false)
+		if n := c.s.changes(t, c.bob.UserID, "tombstone") - before; n != 2 {
+			t.Fatalf("bob tombstone = %d", n)
+		}
+		c.changeVisibility()
+		c.expect("source 변경 뒤 재구성", 0, false)
+		c.resync(true)
+		// 같은 목록 재전송은 변경이 아니다.
+		c.put(`{"sources":[{"key":"cal-2","enabled":true}]}`)
+		c.expect("같은 source 재전송", 2, true)
+	})
+	t.Run("정상 재동기화 중 재구성은 유지", func(t *testing.T) {
+		c := newFlagCase(t)
+		c.create()
+		if st := c.s.connection(t, c.alice).Status; st != "syncing" {
+			t.Fatalf("status = %s", st)
+		}
+		c.changeVisibility()
+		c.expect("재동기화 중 재구성", 2, false) // FreshUsers는 ready만 인정한다(의미 유지)
+		p2 := c.s.newParty(t, c.alice)
+		if n := c.s.projections(t, p2.ID, c.alice.UserID); n != 2 {
+			t.Fatalf("재동기화 중 새 Party projection = %d", n)
+		}
+	})
+	t.Run("ready → error는 projection 유지, error → 업로드 → abort는 ready", func(t *testing.T) {
+		c := newFlagCase(t)
+		c.put(`{"status":"error"}`)
+		c.expect("ready → error", 2, false)
+		c.changeVisibility()
+		c.expect("error 중 재구성", 2, false)
+		id := c.create()
+		if rec := c.s.mut(t, http.MethodPost, "/v1/calendar/snapshots/"+id.String()+"/abort", c.alice.AccessToken, "", ""); rec.Code != http.StatusOK {
+			t.Fatal(rec.Body.String())
+		}
+		if st := c.s.connection(t, c.alice).Status; st != "ready" {
+			t.Fatalf("abort 뒤 status = %s", st)
+		}
+		c.expect("error → 업로드 → abort", 2, true)
+	})
 }

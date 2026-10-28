@@ -76,19 +76,22 @@ func RebuildBusyProjectionsWithDetails(ctx context.Context, tx *mutation.Tx, use
 		connID     uuid.UUID
 		status     string
 		generation int64
+		usable     bool
 	)
 	lockClause := "FOR SHARE"
 	if connectionLocked {
 		lockClause = ""
 	}
 	err := tx.QueryRow(ctx, `
-		SELECT id, source_status, active_generation FROM calendar_connections
-		 WHERE user_id = $1 `+lockClause, userID).Scan(&connID, &status, &generation)
+		SELECT id, source_status, active_generation, active_generation_usable FROM calendar_connections
+		 WHERE user_id = $1 `+lockClause, userID).Scan(&connID, &status, &generation, &usable)
 	hasConn := err == nil
 	if err != nil && !isNoRows(err) {
 		return err
 	}
-	visible := hasConn && visibleStatuses[status] && generation > 0
+	// 노출 상태여도 active generation을 쓸 수 없으면(철회·source 변경 뒤 새 complete 전) 비노출이다
+	// (migration 00017, 설계 3 §5.2·§12의 "fresh 해제·projection 비노출" 보완).
+	visible := hasConn && visibleStatuses[status] && generation > 0 && usable
 
 	rows, err := tx.Query(ctx, `
 		SELECT m.party_id, s.visibility_level, s.share_location, s.version

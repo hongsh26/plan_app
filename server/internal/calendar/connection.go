@@ -201,10 +201,11 @@ func (h *Handler) putConnection(w http.ResponseWriter, r *http.Request) {
 			gen     int64
 			version int64
 			syncDev *uuid.UUID
+			usable  bool
 		)
 		err := tx.QueryRow(ctx, `
-			SELECT id, source_status, active_generation, version, sync_device_id
-			  FROM calendar_connections WHERE user_id = $1 FOR UPDATE`, p.UserID).Scan(&id, &status, &gen, &version, &syncDev)
+			SELECT id, source_status, active_generation, version, sync_device_id, active_generation_usable
+			  FROM calendar_connections WHERE user_id = $1 FOR UPDATE`, p.UserID).Scan(&id, &status, &gen, &version, &syncDev, &usable)
 		if isNoRows(err) {
 			// If-Match가 있는데 연결이 없다. 낡은 version이다(현재 0).
 			return mutation.Result{}, &mutation.VersionConflictError{Current: 0}
@@ -244,8 +245,8 @@ func (h *Handler) putConnection(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		oldVisible := visible(status, gen)
-		newVisible := visible(newStatus, gen)
+		// sourcesChanged는 아래에서 정해지므로 newVisible은 그 뒤에 계산한다.
+		oldVisible := visible(status, gen, usable)
 
 		// 진행 중이던 snapshot은 상태가 syncing을 벗어나면 이어갈 수 없다. 열린 session을 폐기해 늦은
 		// complete가 철회·거부된 연결을 되살리지 못하게 한다(complete도 상태를 다시 확인한다).
@@ -278,6 +279,12 @@ func (h *Handler) putConnection(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// 비노출 상태로 가거나 source 선택이 바뀌면 active generation을 계산·노출에 더 쓰지 않는다. 다시 true가
+		// 되는 길은 snapshot complete뿐이다(migration 00017). ready ↔ error, error → syncing에서는 유지한다
+		// (error·syncing은 마지막 정상 데이터를 유지한다, 설계 3 §5.2).
+		newUsable := usable && !hidesProjections(newStatus) && !sourcesChanged
+		newVisible := visible(newStatus, gen, newUsable)
+
 		var revokedAt any
 		if hidesProjections(newStatus) && newStatus != "disconnected" && newStatus != "selecting" && newStatus != "permission_required" {
 			revokedAt = h.now()
@@ -300,12 +307,10 @@ func (h *Handler) putConnection(w http.ResponseWriter, r *http.Request) {
 			       time_zone = COALESCE($4, time_zone),
 			       last_completed_sync_at = CASE WHEN $2 = 'disconnected' THEN NULL ELSE last_completed_sync_at END,
 			       revoked_at = CASE WHEN $5::timestamptz IS NOT NULL THEN COALESCE(revoked_at, $5) ELSE NULL END,
-			       -- ready·syncing 밖으로 가거나 source 선택이 바뀌면 active generation을 계산에 쓰지 않는다.
-			       -- 다시 true가 되는 길은 snapshot complete뿐이다(migration 00017).
-			       active_generation_usable = active_generation_usable AND $2 IN ('ready', 'syncing') AND NOT $6::boolean,
+			       active_generation_usable = $6,
 			       version = version + 1, updated_at = now()
 			 WHERE id = $1
-			RETURNING version`, id, newStatus, syncDev, tz, revokedAt, sourcesChanged).Scan(&newVersion); err != nil {
+			RETURNING version`, id, newStatus, syncDev, tz, revokedAt, newUsable).Scan(&newVersion); err != nil {
 			return mutation.Result{}, err
 		}
 
@@ -360,8 +365,9 @@ func sourcesDiffer(ctx context.Context, tx *mutation.Tx, connID uuid.UUID, next 
 	return false, nil
 }
 
-func visible(status string, gen int64) bool {
-	return gen > 0 && (status == "ready" || status == "syncing" || status == "error")
+// visible은 party.RebuildBusyProjections의 가시성 판정과 같아야 한다: 노출 상태 AND active generation 사용 가능.
+func visible(status string, gen int64, usable bool) bool {
+	return usable && gen > 0 && (status == "ready" || status == "syncing" || status == "error")
 }
 
 func validateConnectionRequest(req putConnectionRequest) error {
