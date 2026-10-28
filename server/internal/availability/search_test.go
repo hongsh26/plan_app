@@ -416,7 +416,10 @@ func TestSearchDefaults(t *testing.T) {
 func TestSearchRateLimitBeforeValidation(t *testing.T) {
 	s := newStack(t, true)
 	a := s.signIn(t)
+	b := s.signIn(t)
 	partyID := uuid.New()
+	// 아래 요청 82회가 모두 한 분 창 안에 들어가야 한다.
+	awaitSafeWindow(time.Minute, 15*time.Second)
 	for i := 0; i < 20; i++ {
 		assertError(t, s.post(t, searchPath(partyID), a.AccessToken, "", `not json`), http.StatusBadRequest, httpapi.CodeInvalidRequest)
 	}
@@ -427,7 +430,6 @@ func TestSearchRateLimitBeforeValidation(t *testing.T) {
 	}
 
 	// 사용자 전체 60회: 새 사용자는 Party id가 매번 달라도 60회 뒤 사용자 전체 한도로 429다.
-	b := s.signIn(t)
 	for i := 0; i < 60; i++ {
 		rec := s.post(t, searchPath(uuid.New()), b.AccessToken, "", `{}`)
 		if rec.Code == http.StatusTooManyRequests {

@@ -697,13 +697,19 @@ func TestRawIntervalsStayPrivate(t *testing.T) {
 }
 
 // 새 소비자는 Require 다음, 입력 검증 앞에서 센다. 한도를 넘으면 잘못된 본문도 400이 아니라 429다.
-func TestRateLimitBeforeValidation(t *testing.T) {
-	// 고정 창 경계에 걸리면 한 테스트의 요청이 두 창에 나뉜다.
-	if remaining := time.Minute - time.Duration(time.Now().UnixNano())%time.Minute; remaining < 3*time.Second {
+// awaitSafeWindow는 고정 창 경계까지 margin보다 적게 남았으면 경계를 지날 때까지 기다린다. 창은 epoch 기준
+// date_bin이라 경계에 걸리면 한 테스트의 요청이 두 창에 나뉘어 한도 단언이 어긋난다. margin은 세는 요청 전체가
+// 끝나는 데 걸리는 시간보다 넉넉해야 하고, 호출은 첫 번째로 세는 요청 바로 앞에 둔다.
+func awaitSafeWindow(window, margin time.Duration) {
+	if remaining := window - time.Duration(time.Now().UnixNano())%window; remaining < margin {
 		time.Sleep(remaining + 100*time.Millisecond)
 	}
+}
+
+func TestRateLimitBeforeValidation(t *testing.T) {
 	s := newStack(t, true)
 	u := s.signIn(t)
+	awaitSafeWindow(time.Minute, 10*time.Second)
 	for i := range ratelimit.LimitAvailabilityPrefWrite.Count {
 		if rec := s.put(t, u.AccessToken, "", "", `{}`); rec.Code != http.StatusBadRequest {
 			t.Fatalf("%d번째 = %d: %s", i, rec.Code, rec.Body.String())

@@ -276,7 +276,9 @@ func TestSearchCacheKeyUsesFirstGridStart(t *testing.T) {
 func TestSearchRateLimitSubjectNormalization(t *testing.T) {
 	s := newStack(t, true)
 	a := s.signIn(t)
+	b := s.signIn(t)
 	id := uuid.New()
+	awaitSafeWindow(time.Minute, 10*time.Second)
 	for i := 0; i < 20; i++ {
 		path := searchPath(id)
 		if i%2 == 1 {
@@ -286,7 +288,6 @@ func TestSearchRateLimitSubjectNormalization(t *testing.T) {
 	}
 	assertError(t, s.post(t, searchPath(id), a.AccessToken, "", `{}`), http.StatusTooManyRequests, httpapi.CodeRateLimited)
 
-	b := s.signIn(t)
 	for i := 0; i < 20; i++ {
 		s.post(t, fmt.Sprintf("/v1/parties/bad-%d/availability/search", i), b.AccessToken, "", `{}`)
 	}

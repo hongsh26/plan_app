@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -56,6 +57,10 @@ func TestDeleteMeLimitCountsFailedAttemptsAndAuditsOnce(t *testing.T) {
 
 	u := s.signIn(t, "rl.delete."+uuid.NewString())
 
+	// 한 시간 고정 창(epoch 기준) 경계에 걸리면 시도가 두 창에 나뉜다.
+	if remaining := time.Hour - time.Duration(time.Now().UnixNano())%time.Hour; remaining < 5*time.Second {
+		time.Sleep(remaining + 100*time.Millisecond)
+	}
 	// 낡은 If-Match라 매번 409지만 시도는 센다.
 	for i := 0; i < 3; i++ {
 		assertError(t, s.mut(t, http.MethodDelete, "/v1/me", u.AccessToken, "del-"+strconv.Itoa(i), `"99"`, ``),
