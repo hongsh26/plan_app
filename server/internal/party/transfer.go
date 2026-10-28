@@ -154,9 +154,9 @@ func (h *Handler) transferOwner(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		// 초대 entity는 방장만 본다(§6, §9.2). 무효화 tombstone은 이전 방장과 새 방장에게만 간다.
-		for _, inviteID := range revoked {
+		for _, inv := range revoked {
 			for _, recipient := range []uuid.UUID{p.UserID, targetUserID} {
-				if err := tx.EmitChange(ctx, mutation.Change{Recipient: recipient, EntityType: entityPartyInvite, EntityID: inviteID}); err != nil {
+				if err := tx.EmitChange(ctx, inviteTombstone(recipient, inv.id, inv.used)); err != nil {
 					return mutation.Result{}, err
 				}
 			}
@@ -188,10 +188,15 @@ func (h *Handler) transferOwner(w http.ResponseWriter, r *http.Request) {
 	writePartyResponse(w, r, party, out.StatusCode)
 }
 
-// revokeActiveInvites는 Party의 active 초대를 모두 revoked로 바꾸고 그 ID를 돌려준다.
+type revokedInvite struct {
+	id   uuid.UUID
+	used int16
+}
+
+// revokeActiveInvites는 Party의 active 초대를 모두 revoked로 바꾸고 그 ID와 사용 횟수를 돌려준다.
 // 만료 시각이 지났어도 저장된 status가 active면 함께 바꾼다. 행을 id 순으로 잠가 다른
 // 트랜잭션과 잠금 순서가 어긋나지 않게 한다.
-func revokeActiveInvites(ctx context.Context, tx *mutation.Tx, partyID uuid.UUID, now time.Time) ([]uuid.UUID, error) {
+func revokeActiveInvites(ctx context.Context, tx *mutation.Tx, partyID uuid.UUID, now time.Time) ([]revokedInvite, error) {
 	rows, err := tx.Query(ctx, `
 		WITH locked AS (
 			SELECT id FROM party_invites
@@ -203,18 +208,18 @@ func revokeActiveInvites(ctx context.Context, tx *mutation.Tx, partyID uuid.UUID
 		   SET status = 'revoked', revoked_at = $2, updated_at = $2
 		  FROM locked
 		 WHERE i.id = locked.id
-		RETURNING i.id`, partyID, now)
+		RETURNING i.id, i.used_count`, partyID, now)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var ids []uuid.UUID
+	var out []revokedInvite
 	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
+		var r revokedInvite
+		if err := rows.Scan(&r.id, &r.used); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		out = append(out, r)
 	}
-	return ids, rows.Err()
+	return out, rows.Err()
 }

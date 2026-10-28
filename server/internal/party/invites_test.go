@@ -446,3 +446,55 @@ func TestConcurrentAcceptLastSeatWithoutRetries(t *testing.T) {
 		t.Fatalf("mutation.Retries %d -> %d", before, after)
 	}
 }
+
+// 초대 tombstone(무효화·소진·위임·해산)은 모두 version을 싣고 그 값은 같은 수신자에게 보낸 어떤 upsert보다
+// 크다. 피드가 txid 순이라 먼저 직렬화된 수락의 upsert가 tombstone 뒤에 와도 하한에 막힌다.
+func TestInviteTombstonesAreVersionedAboveUpserts(t *testing.T) {
+	s := newStack(t)
+	owner := s.signIn(t, "invtomb.owner."+uuid.NewString())
+	m1 := s.signIn(t, "invtomb.m1."+uuid.NewString())
+	m2 := s.signIn(t, "invtomb.m2."+uuid.NewString())
+	p := s.createNamedParty(t, owner.AccessToken, "invtomb-create", "T")
+
+	// 소진: 2회용 초대를 두 명이 수락한다.
+	two := s.mustInvite(t, owner.AccessToken, p.ID, "invtomb-two", `{"max_uses":2}`)
+	for i, tok := range []string{m1.AccessToken, m2.AccessToken} {
+		if rec := s.accept(t, tok, two.Token, "invtomb-acc-"+strconv.Itoa(i)); rec.Code != http.StatusCreated {
+			t.Fatalf("accept = %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	// 무효화.
+	revoked := s.mustInvite(t, owner.AccessToken, p.ID, "invtomb-rev", "")
+	if rec := s.mut(t, http.MethodDelete, "/v1/parties/"+p.ID.String()+"/invites/"+revoked.ID.String(), owner.AccessToken, "invtomb-del", "", ""); rec.Code != http.StatusOK {
+		t.Fatalf("revoke = %d", rec.Code)
+	}
+	// 위임으로 무효화.
+	_ = s.mustInvite(t, owner.AccessToken, p.ID, "invtomb-tr-inv", "")
+	cur, _ := loadPartyByID(t.Context(), s.pool, p.ID)
+	if rec := s.transfer(t, owner.AccessToken, p.ID, "invtomb-tr", cur.Version, m1.UserID); rec.Code != http.StatusOK {
+		t.Fatalf("transfer = %d: %s", rec.Code, rec.Body.String())
+	}
+	// 해산으로 무효화.
+	_ = s.mustInvite(t, m1.AccessToken, p.ID, "invtomb-ds-inv", "")
+	cur, _ = loadPartyByID(t.Context(), s.pool, p.ID)
+	if rec := s.disband(t, m1.AccessToken, p.ID, "invtomb-ds", cur.Version); rec.Code != http.StatusOK {
+		t.Fatalf("disband = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var total, bad int
+	if err := s.pool.QueryRow(t.Context(), `
+		SELECT count(*),
+		       count(*) FILTER (WHERE t.entity_version IS NULL OR t.entity_version <= COALESCE((
+		           SELECT max(u.entity_version) FROM sync_changes u
+		            WHERE u.recipient_user_id = t.recipient_user_id AND u.entity_id = t.entity_id
+		              AND u.entity_type = 'party_invite' AND u.operation = 'upsert'), 0))
+		  FROM sync_changes t
+		  JOIN party_invites i ON i.id = t.entity_id
+		 WHERE t.entity_type = 'party_invite' AND t.operation = 'tombstone' AND i.party_id = $1`, p.ID).Scan(&total, &bad); err != nil {
+		t.Fatal(err)
+	}
+	// 소진 1(방장) + 무효화 1 + 위임 2(이전·새 방장) + 해산 1(방장).
+	if total != 5 || bad != 0 {
+		t.Fatalf("초대 tombstone %d건 중 version 없음·upsert 이하 %d건", total, bad)
+	}
+}

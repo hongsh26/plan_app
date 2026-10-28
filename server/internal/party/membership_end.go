@@ -378,8 +378,8 @@ func disbandPartyTx(ctx context.Context, tx *mutation.Tx, partyID uuid.UUID, mem
 		}
 		// 초대는 방장만 본다(§9.2).
 		if m.role == "owner" {
-			for _, id := range revoked {
-				changes = append(changes, mutation.Change{Recipient: m.userID, EntityType: entityPartyInvite, EntityID: id})
+			for _, inv := range revoked {
+				changes = append(changes, inviteTombstone(m.userID, inv.id, inv.used))
 			}
 		}
 		for _, d := range deletedSettings {

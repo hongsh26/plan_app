@@ -2010,10 +2010,10 @@ components:
           type: [integer, "null"]
           format: int64
           description: |
-            upsert에는 필수다. 삭제·종료된 entity(Party projection·공개 설정·종료 멤버십·해산 Party)의
+            upsert에는 필수다. 삭제·종료된 entity(Party projection·공개 설정·종료 멤버십·해산 Party·끝난 초대)의
             tombstone은 version을 싣고, 클라이언트는 그보다 낮은 version 변경을 무시한다. null인 tombstone은
-            서버에 남아 있지만 수신자의 scope에서 빠진 entity(탈퇴자가 보던 Party·다른 멤버 entity)나 version이
-            없는 entity(초대)이며, 로컬 row만 지우고 version 하한을 기록하지 않는다(재가입 시 같은 version으로 다시 온다).
+            서버에 남아 있지만 수신자의 scope에서 빠진 entity(탈퇴자가 보던 Party·다른 멤버 entity)이며, 로컬 row만
+            지우고 version 하한을 기록하지 않는다(재가입 시 같은 version으로 다시 온다).
         payload:
           type: object
           description: 최소 projection. 캘린더 상세와 token은 담지 않는다.

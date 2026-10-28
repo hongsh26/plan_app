@@ -298,7 +298,7 @@ func (h *Handler) revokeInvite(w http.ResponseWriter, r *http.Request) {
 				 WHERE id = $1`, inviteID, now); err != nil {
 				return mutation.Result{}, err
 			}
-			if err := tx.EmitChange(ctx, mutation.Change{Recipient: p.UserID, EntityType: entityPartyInvite, EntityID: inviteID}); err != nil {
+			if err := tx.EmitChange(ctx, inviteTombstone(p.UserID, inviteID, used)); err != nil {
 				return mutation.Result{}, err
 			}
 		}
@@ -559,18 +559,18 @@ func (h *Handler) emitJoin(ctx context.Context, tx *mutation.Tx, partyID, invite
 		return err
 	}
 	// 방장에게만 초대 변경. token은 payload에 없다. 이번 수락으로 소진됐으면 bootstrap(활성 초대만)과
-	// 같아지도록 upsert가 아니라 tombstone이다. 초대에는 version 열이 없어 다른 초대 tombstone처럼
-	// version 없이 보낸다.
+	// 같아지도록 upsert가 아니라 tombstone이다.
 	for _, m := range members {
 		if m.role != "owner" {
 			continue
 		}
 		var status string
-		if err := tx.QueryRow(ctx, `SELECT status FROM party_invites WHERE id = $1`, inviteID).Scan(&status); err != nil {
+		var used int16
+		if err := tx.QueryRow(ctx, `SELECT status, used_count FROM party_invites WHERE id = $1`, inviteID).Scan(&status, &used); err != nil {
 			return err
 		}
 		if status != "active" {
-			return tx.EmitChange(ctx, mutation.Change{Recipient: m.userID, EntityType: entityPartyInvite, EntityID: inviteID})
+			return tx.EmitChange(ctx, inviteTombstone(m.userID, inviteID, used))
 		}
 		return emitInviteUpsert(ctx, tx, m.userID, inviteID)
 	}

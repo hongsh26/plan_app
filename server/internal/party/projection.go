@@ -6,6 +6,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"plantogether/server/internal/platform/mutation"
 )
 
 const (
@@ -95,12 +97,21 @@ func VisibilitySettingProjection(ctx context.Context, q Querier, settingID uuid.
 	}}, nil
 }
 
+// inviteTombstone은 초대 무효화·소진 tombstone이다. version은 마지막 upsert(used_count + 1)보다 1 크다
+// (projection·설정의 "마지막 version + 1" 규칙과 같다). 초대는 다시 active가 되지 않으므로 하한을 남겨도 된다.
+// 피드는 txid 순이라 먼저 직렬화된 수락의 upsert가 무효화 tombstone 뒤에 올 수 있는데, 그 upsert의 version은
+// 이 값보다 낮아 하한에 막힌다.
+func inviteTombstone(recipient, inviteID uuid.UUID, usedCount int16) mutation.Change {
+	v := int64(usedCount) + 2
+	return mutation.Change{Recipient: recipient, EntityType: entityPartyInvite, EntityID: inviteID, Version: &v, Tombstone: true}
+}
+
 // InviteProjection은 방장에게만 보내는 초대 투영이다. token과 token_hash는 넣지 않는다.
 //
 // party_invites에는 version 열이 없다(migration 00010). sync upsert는 entity_version이
 // 필요하므로 used_count + 1을 쓴다. 초대의 upsert는 생성(0회 사용)과 수락(사용 횟수 증가)
-// 뿐이고 각 수락은 used_count를 정확히 1 올리므로 단조 증가한다. 무효화는 tombstone이라
-// version이 필요 없다.
+// 뿐이고 각 수락은 used_count를 정확히 1 올리므로 단조 증가한다. 무효화·소진 tombstone은 이보다 1 큰
+// version을 싣는다(inviteTombstone).
 func InviteProjection(ctx context.Context, q Querier, inviteID uuid.UUID) (Projection, error) {
 	var (
 		id, partyID, createdBy uuid.UUID
