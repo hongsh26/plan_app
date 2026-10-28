@@ -362,3 +362,15 @@ func TestLimiterOutageFollowsScopeMode(t *testing.T) {
 	assertError(t, s.do(t, http.MethodPost, "/v1/auth/refresh", "", map[string]string{"refresh_token": "wrong"}),
 		http.StatusUnauthorized, httpapi.CodeInvalidSession)
 }
+
+// 내 Party 목록은 사용자당 분당 60회다. 한도는 판정 뒤 조회보다 먼저다.
+func TestListPartiesLimit(t *testing.T) {
+	s := newLimitedStack(t, false)
+	u := s.signIn(t, "rl.list."+uuid.NewString())
+	for i := 0; i < ratelimit.LimitPartyList.Count; i++ {
+		if rec := s.do(t, http.MethodGet, "/v1/parties", u.AccessToken, nil); rec.Code != http.StatusOK {
+			t.Fatalf("%d번째 = %d: %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	assertRateLimited(t, s.do(t, http.MethodGet, "/v1/parties", u.AccessToken, nil))
+}

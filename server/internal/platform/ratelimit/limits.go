@@ -20,6 +20,7 @@ const (
 	ScopeCalendarSnapshot      = "calendar.snapshot"
 	ScopeCalendarPage          = "calendar.page"
 	ScopePartyVisibilityUpdate = "party.visibility.update"
+	ScopePartyList             = "party.list"
 	ScopeAvailabilityPrefRead  = "availability.preferences.read"
 	ScopeAvailabilityPrefWrite = "availability.preferences.write"
 	ScopeAvailabilitySearch    = "availability.search"
@@ -39,6 +40,7 @@ var (
 	LimitCalendarSnapshot      = Limit{Count: 10, Window: time.Minute}       // snapshot 생성, 사용자당 (잠정)
 	LimitCalendarPage          = Limit{Count: 300, Window: time.Minute}      // page 업로드, 사용자당 (잠정)
 	LimitPartyVisibilityUpdate = Limit{Count: 10, Window: time.Minute}       // 사용자·Party당
+	LimitPartyList             = Limit{Count: 60, Window: time.Minute}       // 내 Party 목록, 사용자당 (잠정)
 	LimitAvailabilityPrefRead  = Limit{Count: 60, Window: time.Minute}       // 활동 시간 조회, 사용자당 (잠정)
 	LimitAvailabilityPrefWrite = Limit{Count: 10, Window: time.Minute}       // 활동 시간 교체, 사용자당 (잠정)
 	LimitAvailabilitySearch    = Limit{Count: 20, Window: time.Minute}       // 가능 시간 검색, 사용자·Party당 (availability_search_design.md §7.2)

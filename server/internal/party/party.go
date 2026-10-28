@@ -74,6 +74,7 @@ func NewHandler(d Deps) *Handler {
 
 func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.Handler) {
 	mux.Handle("POST /v1/parties", require(http.HandlerFunc(h.createParty)))
+	mux.Handle("GET /v1/parties", require(http.HandlerFunc(h.listParties)))
 	mux.Handle("GET /v1/parties/{id}", require(http.HandlerFunc(h.getParty)))
 	mux.Handle("PATCH /v1/parties/{id}", require(http.HandlerFunc(h.patchParty)))
 	mux.Handle("GET /v1/parties/{id}/memberships", require(http.HandlerFunc(h.listMemberships)))
@@ -241,6 +242,69 @@ func (h *Handler) patchParty(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.writePartyForOwner(w, r, out.ResourceID, p.UserID, out.StatusCode)
+}
+
+type partyListItem struct {
+	Party       partyResponse      `json:"party"`
+	Membership  membershipResponse `json:"membership"`
+	MemberCount int                `json:"member_count"`
+}
+
+type partyListEnvelope struct {
+	RequestID string          `json:"request_id"`
+	Parties   []partyListItem `json:"parties"`
+}
+
+// listParties는 GET /v1/parties다. 호출자의 활성 멤버십이 있는 활성 Party만, 호출자 본인의 멤버십과
+// 활성 멤버 수와 함께 돌려준다. 참여 한도가 20이라 페이지를 나누지 않는다. 떠났거나 해산된 Party는
+// 없다(bootstrap scope와 같다).
+func (h *Handler) listParties(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.PrincipalFrom(r.Context())
+	// 본인 데이터 읽기라 남용 표면이 작다. 제한 장치 장애로 첫 화면이 막히지 않게 open이다.
+	if _, ok := ratelimit.Enforce(w, r, h.limiter, ratelimit.ModeOpen,
+		ratelimit.UserRule(ratelimit.ScopePartyList, ratelimit.LimitPartyList, p.UserID)); !ok {
+		return
+	}
+	rows, err := h.pool.Query(r.Context(), `
+		SELECT p.id, p.name, p.status, p.version, p.member_limit, p.owner_membership_id,
+		       p.created_by_user_id, p.created_at, p.updated_at,
+		       m.id, m.user_id, u.display_name, m.role, m.status, m.version, m.joined_at,
+		       (SELECT count(*) FROM party_memberships a WHERE a.party_id = p.id AND a.status = 'active')
+		  FROM party_memberships m
+		  JOIN parties p ON p.id = m.party_id
+		  JOIN users u ON u.id = m.user_id
+		 WHERE m.user_id = $1 AND m.status = 'active' AND p.status = 'active'
+		 ORDER BY m.joined_at, p.id`, p.UserID)
+	if err != nil {
+		h.writeDomainError(w, r, "party.list", err)
+		return
+	}
+	defer rows.Close()
+	out := partyListEnvelope{RequestID: httpapi.RequestID(r.Context()).String(), Parties: []partyListItem{}}
+	for rows.Next() {
+		var (
+			it                             partyListItem
+			createdAt, updatedAt, joinedAt time.Time
+		)
+		if err := rows.Scan(&it.Party.ID, &it.Party.Name, &it.Party.Status, &it.Party.Version, &it.Party.MemberLimit,
+			&it.Party.OwnerMembershipID, &it.Party.CreatedByUserID, &createdAt, &updatedAt,
+			&it.Membership.ID, &it.Membership.UserID, &it.Membership.DisplayName, &it.Membership.Role,
+			&it.Membership.Status, &it.Membership.Version, &joinedAt, &it.MemberCount); err != nil {
+			h.writeDomainError(w, r, "party.list", err)
+			return
+		}
+		it.Party.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+		it.Party.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+		it.Membership.PartyID = it.Party.ID
+		it.Membership.JoinedAt = joinedAt.UTC().Format(time.RFC3339)
+		out.Parties = append(out.Parties, it)
+	}
+	if err := rows.Err(); err != nil {
+		h.writeDomainError(w, r, "party.list", err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	httpapi.WriteJSON(w, http.StatusOK, out)
 }
 
 type membershipResponse struct {
