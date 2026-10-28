@@ -55,7 +55,69 @@ type fx struct {
 	user uuid.UUID
 }
 
+// pruneLockKey는 sync 정리 워터마크를 다루는 테스트 사이의 advisory lock 키다.
+//
+// 정리 워터마크(sync_prune_state)는 DB 전체에 하나다. 정리 테스트는 방금 만든 row를 40일 전으로 바꿔 지우므로
+// 워터마크가 "지금"에 가까운 txid로 오른다. 그동안 다른 패키지(또는 같은 DB를 쓰는 다른 실행)의 열린 트랜잭션이
+// horizon을 붙잡고 있으면 bootstrap watermark(= horizon)가 정리 워터마크 이하가 되어 첫 증분 읽기부터 410이다.
+// 운영에서는 워터마크가 30일 넘은 row로만 오르므로 이 상태가 생기지 않는다(30일 열린 트랜잭션이 필요하다).
+//
+// 그래서 cursor를 읽는 테스트는 이 키를 공유로, 정리 테스트는 배타로 잡고, 정리 테스트는 끝나면 워터마크를 시작
+// 전 값으로 되돌린다. 지운 row는 정리 테스트 자신의 합성 row뿐이라 되돌려도 다른 cursor가 놓치는 변경이 없다.
+const pruneLockKey int64 = 0x53594e4350524e45 // "SYNCPRNE"
+
+// holdPruneLock은 테스트가 끝날 때까지 advisory lock을 잡는다. 세션 잠금이라 전용 연결을 쓰고 끝나면 풀고 반납한다.
+func holdPruneLock(t *testing.T, pool *pgxpool.Pool, exclusive bool) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, unlock := "pg_advisory_lock_shared", "pg_advisory_unlock_shared"
+	if exclusive {
+		lock, unlock = "pg_advisory_lock", "pg_advisory_unlock"
+	}
+	if _, err := conn.Exec(ctx, `SELECT `+lock+`($1)`, pruneLockKey); err != nil {
+		conn.Release()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = conn.Exec(context.Background(), `SELECT `+unlock+`($1)`, pruneLockKey)
+		conn.Release()
+	})
+}
+
+// newFx는 cursor를 읽는 테스트용이다. 정리 테스트와 겹치지 않게 공유 잠금을 잡는다.
 func newFx(t *testing.T) *fx {
+	t.Helper()
+	f := newFxUnlocked(t)
+	holdPruneLock(t, f.pool, false)
+	return f
+}
+
+// newPruneFx는 정리 테스트용이다. 배타 잠금을 잡고 끝나면 정리 워터마크를 시작 전 값으로 되돌린다.
+func newPruneFx(t *testing.T) *fx {
+	t.Helper()
+	f := newFxUnlocked(t)
+	holdPruneLock(t, f.pool, true)
+	var txid string
+	var ordinal int32
+	if err := f.pool.QueryRow(context.Background(),
+		`SELECT pruned_through_txid::text, pruned_through_ordinal FROM sync_prune_state`).Scan(&txid, &ordinal); err != nil {
+		t.Fatal(err)
+	}
+	// Cleanup은 역순이라 잠금을 풀기 전에 되돌린다.
+	t.Cleanup(func() {
+		if _, err := f.pool.Exec(context.Background(), `
+			UPDATE sync_prune_state SET pruned_through_txid = $1::text::xid8, pruned_through_ordinal = $2`, txid, ordinal); err != nil {
+			t.Errorf("정리 워터마크를 되돌리지 못했다: %v", err)
+		}
+	})
+	return f
+}
+
+func newFxUnlocked(t *testing.T) *fx {
 	t.Helper()
 	pool := pgtest.Pool(t, pgtest.APIRoleURLEnv)
 	f := &fx{pool: pool, user: uuid.New()}
@@ -224,7 +286,7 @@ func TestReadPaginatesWithoutLossOrDuplicates(t *testing.T) {
 // 있으므로 이어 받으면 무언가 빠졌다는 사실조차 모르게 된다. 워터마크 뒤의 cursor는
 // 영향이 없다.
 func TestReadRejectsCursorAtOrBeforePruneWatermark(t *testing.T) {
-	f := newFx(t)
+	f := newPruneFx(t)
 	ctx := context.Background()
 	before := f.watermark(t)
 	old := f.emit(t, f.pool)
@@ -533,7 +595,7 @@ func TestIncrementalPayloadIsFullProjection(t *testing.T) {
 // 정리가 워터마크보다 앞(작은 txid)의 row를 지울 수 있다. 그때 워터마크를 그 위치로
 // 덮으면 이미 410이어야 할 cursor가 되살아나 첫 정리에서 지운 row를 건너뛴다.
 func TestPruneWatermarkNeverMovesBackward(t *testing.T) {
-	f := newFx(t)
+	f := newPruneFx(t)
 	ctx := context.Background()
 	older := f.emit(t, f.pool) // B: 작은 txid
 	newer := f.emit(t, f.pool) // A: 큰 txid
@@ -575,7 +637,7 @@ func TestPruneWatermarkNeverMovesBackward(t *testing.T) {
 // 역할에 빠진 권한이 운영에서야 드러난다. batch를 여러 번 나눠 돌아도 끝에는 지운 row가
 // 모두 워터마크 이하다.
 func TestPruneAsWorkerRoleAcrossBatches(t *testing.T) {
-	f := newFx(t)
+	f := newPruneFx(t)
 	worker := pgtest.Pool(t, pgtest.WorkerRoleURLEnv)
 	ctx := context.Background()
 

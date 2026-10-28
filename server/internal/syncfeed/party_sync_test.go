@@ -60,6 +60,8 @@ type partyStack struct {
 func newPartyStack(t *testing.T) *partyStack {
 	t.Helper()
 	pool := pgtest.Pool(t, pgtest.APIRoleURLEnv)
+	// cursor를 읽으므로 정리 테스트와 겹치지 않게 한다(feed_test.go pruneLockKey).
+	holdPruneLock(t, pool, false)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	tokens, err := auth.NewAccessTokens(bytes.Repeat([]byte{4}, 32), nil)
 	if err != nil {
