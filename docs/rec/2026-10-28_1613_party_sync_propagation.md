@@ -138,7 +138,8 @@ P·다른 M·다른 S, 그리고 당시의 초대 ∅)은 뒤에 오는 옛 upse
     - 대조군 단언 전에는 그 수신자의 sync_changes 마지막 위치까지 cursor가 넘을 때까지 읽는다(horizon 지연으로 일부만 받은 상태의 오판 방지). 재현 5는 horizon을 붙잡은 상태에서 watermark가 탈퇴 txid를 넘을 때까지 다시 bootstrap한다. party·calendar·availability 전체 테스트를 동시에 돌리며 재현 테스트 `-count=20` 통과.
     - `TestRenameRacingJoinDeliversNewName`: 이름 변경 upsert가 가입 부트스트랩보다 먼저(부모 없이) 와도 새 이름으로 수렴.
     - `TestBootstrapCarriesTombstoneFloorsForRedeliveredUpserts`(재현 6): 재현 2 + horizon을 붙잡은 bootstrap. snapshot에 초대 하한이 있고 E의 초대 upsert가 다시 와도 버려진다. 하한 없는 모델은 초대가 되살아나고, 새 하한 쿼리를 끄면 실패함을 확인했다.
-    - `TestBootstrapOmitsFloorsForSnapshotEntities`(재현 8): 같은 사용자의 이름 변경 두 건 역전 + horizon을 붙잡은 bootstrap. snapshot에 user upsert(최신 version)만 있고 하한 항목은 없다. 제외를 끄면 실패함을 확인했다.
+    - `TestBootstrapOmitsFloorsForSnapshotEntities`(재현 8): 같은 사용자의 이름 변경 두 건 역전 + horizon을 붙잡은 bootstrap. snapshot에 user upsert(최신 version)만 있고 하한 항목은 없으며, 실제 클라이언트처럼 한 저장소에 적용(하한 먼저)한 모델의 증분 결과가 새 bootstrap과 같다. 제외를 끄면 명시 단언을 빼도 모델에서 user가 사라져 실패함을 확인했다.
+    - 테스트 모델은 snapshot의 하한 항목과 upsert를 같은 저장소에 적용한다(Party 모델 `fetchBootstrapFloors`, 기기·user 모델 `bootstrapEntities`). 비교 기준은 snapshot의 upsert만이다.
     - `TestBootstrapFloorKeepsRevokedDeviceRevoked`(재현 7): 기기 폐기 vs 같은 기기 push 갱신 역전 + horizon을 붙잡은 bootstrap. 하한 있는 기기 모델의 증분 결과가 새 bootstrap과 같고 하한 없는 모델은 폐기 기기가 되살아난다. 일반화를 끄면 실패함을 확인했다.
     - `TestBootstrapCarriesEndedMembershipFloors`: L과 E 사이 txid를 받은 열린 트랜잭션이 horizon을 붙잡은 채 bootstrap → snapshot은 Party 없음·하한 있음, E가 다시 와도 버려진다. snapshot 하한을 지운 모델은 Party가 되살아난다.
   - `TestSameDisplayNameIsNoop`(version 유지·재발행 0), `TestAccountDeletionAnonymizesNameForCoMembers`(삭제 worker 뒤 동료 모델 이름 = `탈퇴한 사용자` = bootstrap; 수정 제거 시 실패 확인).

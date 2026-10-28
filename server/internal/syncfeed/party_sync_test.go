@@ -274,14 +274,23 @@ type wireChange struct {
 	Scope      *uuid.UUID      `json:"scope_membership_id"`
 }
 
+// fetchBootstrap은 비교 기준인 snapshot의 upsert entity만 준다(하한 항목은 적용하지 않는다).
 func (s *partyStack) fetchBootstrap(t *testing.T, token string) (map[entityKey]entity, string) {
 	t.Helper()
-	m, _, w := s.fetchBootstrapFloors(t, token)
-	return m, w
+	raw, _, _, w := s.fetchBootstrapAll(t, token)
+	return raw, w
 }
 
-// fetchBootstrapFloors는 snapshot의 entity와 하한 전용 tombstone 항목(최근 끝난 본인 멤버십)을 함께 준다.
+// fetchBootstrapFloors는 실제 클라이언트처럼 snapshot을 한 저장소에 적용한 결과다. §7.2대로 tombstone(하한 항목)을
+// 먼저 적용하고 하한보다 큰 upsert만 적용한다. 서버가 snapshot upsert와 같거나 큰 하한을 함께 보내면 그 entity가
+// 빠져 기준(fetchBootstrap)과 달라진다.
 func (s *partyStack) fetchBootstrapFloors(t *testing.T, token string) (map[entityKey]entity, map[entityKey]int64, string) {
+	t.Helper()
+	_, applied, floors, w := s.fetchBootstrapAll(t, token)
+	return applied, floors, w
+}
+
+func (s *partyStack) fetchBootstrapAll(t *testing.T, token string) (map[entityKey]entity, map[entityKey]entity, map[entityKey]int64, string) {
 	t.Helper()
 	rec := s.req(t, http.MethodGet, "/v1/sync/bootstrap", token, "", "", "")
 	if rec.Code != http.StatusOK {
@@ -294,7 +303,7 @@ func (s *partyStack) fetchBootstrapFloors(t *testing.T, token string) (map[entit
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	out := map[entityKey]entity{}
+	raw := map[entityKey]entity{}
 	floors := map[entityKey]int64{}
 	for _, c := range body.Snapshot {
 		if !partyEntityTypes[c.EntityType] {
@@ -309,9 +318,16 @@ func (s *partyStack) fetchBootstrapFloors(t *testing.T, token string) (map[entit
 		if c.Operation != "upsert" || c.Version == nil || c.Scope == nil {
 			t.Fatalf("bootstrap entity가 scope 있는 upsert가 아니다: %+v", c)
 		}
-		out[entityKey{c.EntityType, c.EntityID}] = entity{version: *c.Version, payload: decodePayload(t, c.Payload)}
+		raw[entityKey{c.EntityType, c.EntityID}] = entity{version: *c.Version, payload: decodePayload(t, c.Payload)}
 	}
-	return out, floors, body.Watermark
+	applied := map[entityKey]entity{}
+	for k, e := range raw {
+		if f, ok := floors[k]; ok && e.version <= f {
+			continue // 같은 저장소에서 하한이 snapshot upsert를 이긴다.
+		}
+		applied[k] = e
+	}
+	return raw, applied, floors, body.Watermark
 }
 
 func decodePayload(t *testing.T, raw json.RawMessage) map[string]any {
@@ -1282,12 +1298,21 @@ func TestBootstrapCarriesTombstoneFloorsForRedeliveredUpserts(t *testing.T) {
 
 // deviceModel은 기기 목록 클라이언트 모델이다. 폐기는 revoked=true upsert로 오고 목록에서 뺀다(하한은 그 version).
 type deviceModel struct {
+	typ     string
 	present map[uuid.UUID]int64
 	floors  map[uuid.UUID]int64
 	cursor  string
+	// raw는 snapshot의 upsert만 담은 비교 기준이다.
+	raw map[uuid.UUID]int64
 }
 
 func (s *partyStack) bootstrapDevices(t *testing.T, token string, useFloors bool) *deviceModel {
+	return s.bootstrapEntities(t, token, "device", useFloors)
+}
+
+// bootstrapEntities는 한 type의 entity를 실제 클라이언트처럼 한 저장소에 적용한다. 하한 항목을 먼저 기록하고
+// 하한보다 큰 upsert만 넣는다(§7.2).
+func (s *partyStack) bootstrapEntities(t *testing.T, token, typ string, useFloors bool) *deviceModel {
 	t.Helper()
 	rec := s.req(t, http.MethodGet, "/v1/sync/bootstrap", token, "", "", "")
 	if rec.Code != http.StatusOK {
@@ -1300,16 +1325,19 @@ func (s *partyStack) bootstrapDevices(t *testing.T, token string, useFloors bool
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	m := &deviceModel{present: map[uuid.UUID]int64{}, floors: map[uuid.UUID]int64{}, cursor: body.Watermark}
+	m := &deviceModel{typ: typ, present: map[uuid.UUID]int64{}, floors: map[uuid.UUID]int64{}, raw: map[uuid.UUID]int64{}, cursor: body.Watermark}
 	for _, c := range body.Snapshot {
-		if c.EntityType != "device" || c.Version == nil {
+		if c.EntityType == typ && c.Version != nil && c.Operation == "tombstone" && useFloors && *c.Version > m.floors[c.EntityID] {
+			m.floors[c.EntityID] = *c.Version
+		}
+	}
+	for _, c := range body.Snapshot {
+		if c.EntityType != typ || c.Version == nil || c.Operation != "upsert" {
 			continue
 		}
-		switch {
-		case c.Operation == "upsert":
+		m.raw[c.EntityID] = *c.Version
+		if *c.Version > m.floors[c.EntityID] {
 			m.present[c.EntityID] = *c.Version
-		case useFloors && *c.Version > m.floors[c.EntityID]:
-			m.floors[c.EntityID] = *c.Version
 		}
 	}
 	return m
@@ -1317,7 +1345,7 @@ func (s *partyStack) bootstrapDevices(t *testing.T, token string, useFloors bool
 
 func (m *deviceModel) apply(t *testing.T, ch wireChange) {
 	t.Helper()
-	if ch.EntityType != "device" || ch.Operation != "upsert" {
+	if ch.EntityType != m.typ || ch.Operation != "upsert" {
 		return
 	}
 	v := *ch.Version
@@ -1435,8 +1463,8 @@ func TestBootstrapFloorKeepsRevokedDeviceRevoked(t *testing.T) {
 	s.drainDevices(t, withFloor, t2, d.id)
 	s.drainDevices(t, noFloor, t2, d.id)
 	fresh := s.bootstrapDevices(t, t2, true)
-	if !reflect.DeepEqual(keys(withFloor.present), keys(fresh.present)) {
-		t.Fatalf("증분 기기 목록 %v != bootstrap %v", keys(withFloor.present), keys(fresh.present))
+	if !reflect.DeepEqual(keys(withFloor.present), keys(fresh.raw)) {
+		t.Fatalf("증분 기기 목록 %v != bootstrap %v", keys(withFloor.present), keys(fresh.raw))
 	}
 	if _, ok := noFloor.present[d1]; !ok {
 		t.Fatal("재현 실패: 하한 없는 모델에도 폐기 기기가 되살아나지 않았다")
@@ -1521,6 +1549,20 @@ func TestBootstrapOmitsFloorsForSnapshotEntities(t *testing.T) {
 		if userUpsert == nil || *userUpsert != v+2 {
 			t.Fatalf("snapshot user version = %v, want %d", userUpsert, v+2)
 		}
-		return
+		break
+	}
+	// 실제 클라이언트처럼 snapshot을 한 저장소에 적용하고(하한 먼저) 다시 오는 옛 이름 변경까지 받은 뒤에도 본인
+	// user가 최신 version으로 남아 새 bootstrap과 같아야 한다.
+	m := s.bootstrapEntities(t, t1, "user", true)
+	if m.present[u.id] != v+2 {
+		t.Fatalf("snapshot 적용 뒤 user = v%d, want v%d (하한 %v)", m.present[u.id], v+2, m.floors)
+	}
+	if err := hold.Rollback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s.drainDevices(t, m, t1, u.id)
+	fresh := s.bootstrapEntities(t, t1, "user", true)
+	if !reflect.DeepEqual(m.present, fresh.raw) {
+		t.Fatalf("증분 user %v != bootstrap %v", m.present, fresh.raw)
 	}
 }
