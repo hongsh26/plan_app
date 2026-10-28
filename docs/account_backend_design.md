@@ -13,6 +13,7 @@
 - 설계 9(알림)가 요구한 3건을 §7.2, §7.3, §8에 반영했다(§17).
 - P0 검토에서 §8의 "외부 identity 하나는 **활성** 사용자 하나에만 연결된다"의 `활성`이 구현으로 옮겨지지 않은 것을 발견했다. 삭제된 사용자가 identity row를 계속 보유하면 같은 Apple 계정의 재가입이 영구히 막혀 §10 7단계의 "재로그인을 새 계정 생성 흐름으로 처리한다"와 충돌한다. §10 7단계에 identity row 물리 삭제를 명시하고 §8 불변식과 §14 인수 조건을 보강했다.
 - 구현 착수 시 §7.1의 sync 변경 피드 순서 키를 `BIGSERIAL`에서 `(txid, ordinal)`로 바꿨다. `BIGSERIAL`은 번호 순서와 커밋 순서를 일치시키지 않아 먼저 번호를 받고 나중에 커밋한 트랜잭션의 변경이 영구 유실되는 경로가 있었다. §7.1, §7.2, §8, §12, §14, §15와 `party_membership_design.md` §9.2를 함께 갱신했다.
+- 2026-10-28: §7.1·§7.2에 Party 범위 변경의 `scope_membership_id`와 클라이언트 적용 규칙 (a)(b)를 추가했다. txid가 Party 잠금 전에 배정돼 피드 순서가 직렬화 순서와 어긋날 수 있고, 그러면 version 없는 tombstone 뒤에 먼저 직렬화된 트랜잭션의 upsert가 와 떠난 멤버의 캐시에 Party가 되살아났다. 근거·재현·탈락한 대안은 `docs/rec/2026-10-28_1613_party_sync_propagation.md`.
 
 이 설계는 계정, 세션, 기기, 서버 데이터 소유권, 동기화, 비동기 작업과 배포 경계를 확정한다. Party의 초대·역할·탈퇴 정책은 후속 설계에서 확정하며, 캘린더 공개·동기화 세부 계약은 `docs/calendar_privacy_sync_design.md`를 따른다.
 
@@ -208,6 +209,12 @@ Party, 공개 설정, 제안 API는 후속 설계에서 추가하되 공통 멱�
 - 변경 payload는 type, id, operation, version과 entity의 **전체 투영**을 포함한다. 투영은 캘린더 상세와 token을 뺀 최소 필드 집합이지만, 같은 entity에 대해서는 bootstrap snapshot과 증분 변경이 언제나 같은 모양의 전체 투영을 싣는다. 바뀐 필드만 보내면 클라이언트에 병합 규칙이 필요하고, 로컬에 없는 entity의 일부 필드 upsert를 채울 수 없다. 클라이언트는 version이 더 큰 upsert를 받으면 payload로 로컬 entity를 통째로 바꾼다(2026-09-21 개정).
 - 삭제와 탈퇴는 tombstone으로 전달한다. 단 row가 남고 version이 오르는 상태 전이(예: 기기 폐기)는 `revoked` 같은 상태 필드를 담은 upsert로 전달한다. 스키마상 tombstone은 version을 가질 수 없어 version 비교로 순서를 정할 수 없기 때문이다(2026-09-21).
 - 변경 피드는 기본 30일 보존한다. **정리 대상은 row의 `created_at`으로 고르지만, 410 판정은 시각이 아니라 위치로 한다.** 정리 작업은 지운 row 중 가장 뒤의 `(txid, ordinal)`을 같은 트랜잭션에서 정리 워터마크(`sync_prune_state`)로 기록하고, cursor가 워터마크 이하이면 `410 sync_cursor_expired`로 전체 재동기화를 요구한다. `created_at`은 트랜잭션 시작 시각이고 `txid`는 첫 쓰기 때 배정되어 두 순서가 어긋나므로, 시각으로 판정하면 "오래 열린 트랜잭션이 없다"는 가정이 필요하다. 위치로 판정하면 가정이 없다(2026-09-21 개정). `410`을 쓰는 다른 코드와 구별되도록 클라이언트는 상태 코드가 아니라 `code` 값으로 분기한다.
+- **피드 순서는 txid 순이지 직렬화 순서가 아니다(2026-10-28 개정).** txid는 트랜잭션 첫 쓰기(멱등성 INSERT)에서 배정되고 도메인 잠금은 그 뒤다. 그래서 먼저 txid를 받고 잠금을 기다린 트랜잭션의 변경이, 먼저 잠금을 잡고 커밋한 트랜잭션의 변경보다 앞에 올 수 있다. version 있는 변경은 version 비교로 순서와 무관하게 수렴한다. 다음 두 가지는 순서에 기대지 않도록 규칙을 둔다.
+  - 끝난(삭제·종료) entity의 tombstone은 마지막 upsert보다 큰 version을 싣는다. 초대도 같다(`used_count + 2`). 클라이언트는 그 version을 하한으로 기록하고 이하의 upsert를 무시한다.
+  - Party 범위 변경(`party`, `party_membership`, `party_invite`, `party_visibility_setting`, `party_schedule_projection`)은 `scope_membership_id`, 즉 그 변경을 발행할 때의 수신자 멤버십 ID를 싣는다. 활성 멤버에게는 활성 멤버십, 방금 떠났거나 해산으로 끝난 수신자에게는 끝난 그 멤버십이다. bootstrap 항목도 호출자의 활성 멤버십을 싣는다. Party 밖 entity는 null이다.
+  - **규칙 (a):** `scope_membership_id`가 이미 끝난 멤버십(그 `party_membership`의 version 있는 tombstone을 받아 하한이 기록된 ID)인 upsert는 버린다. 떠나기 전에 직렬화됐지만 탈퇴 tombstone 뒤에 도착한 변경이다.
+  - **규칙 (b):** version 없는 tombstone(서버에는 남지만 수신자 scope에서 빠진 entity)은, 그 entity가 속한 Party에 tombstone의 `scope_membership_id`가 아닌 본인 활성 멤버십이 로컬에 있으면 무시한다. 재가입한 새 멤버십으로 이미 다시 받은 사본이다. 탈퇴·강퇴 트랜잭션은 본인 멤버십 tombstone을 scope tombstone보다 먼저 보낸다.
+  - 부모 없는 entity(예: 가입 부트스트랩보다 먼저 도착한 그 Party의 멤버십 upsert)를 버리지 않고 version 규칙대로 보관한다. 한 트랜잭션 안에서는 `party` upsert가 하위 upsert보다 앞서지만 트랜잭션 사이에는 보장하지 않는다.
 - **cursor는 발급한 DB 클러스터의 세대(`system_identifier`, timeline)를 담는다.** 비동기 복제본 장애 전환이나 시점 복구로 txid 이력이 되감기면 옛 cursor 뒤에는 새 변경이 영원히 오지 않는다. 세대가 다르면 `410 sync_cursor_expired`다. sync 읽기는 primary에서 한다(2026-09-21 개정).
 
 #### 순서 키를 `BIGSERIAL`로 두지 않는 이유
@@ -226,6 +233,8 @@ Party, 공개 설정, 제안 API는 후속 설계에서 추가하되 공통 멱�
 - iOS는 한 개의 SwiftData transaction에서 기존 서버 투영을 snapshot으로 교체하고 cursor를 watermark로 설정한다.
 - 아직 전송하지 않은 로컬 mutation은 별도 queue에 보존하고 snapshot 반영 후 의존 entity/version을 다시 확인해 재전송하거나 conflict로 표시한다.
 - tombstone을 먼저 적용해 삭제된 entity를 되살리지 않은 뒤 version이 더 큰 upsert만 적용한다.
+- snapshot 항목도 §7.1의 `scope_membership_id`를 싣고, 교체할 때 하한 기록은 비운다. 이후 증분은 §7.1 규칙 (a)(b)대로 적용한다(2026-10-28).
+- snapshot은 호출자가 변경 피드 보존 기간(30일) 안에 끝낸 본인 멤버십을 version 있는 `party_membership` tombstone 항목으로 함께 싣는다. 클라이언트는 row 없이 하한만 기록한다. 탈퇴는 snapshot에 반영됐지만 그보다 먼저 직렬화되고 txid가 watermark 뒤인 변경이 다시 올 때 규칙 (a)가 그 멤버십이 끝났음을 알아야 하기 때문이다(2026-10-28).
 
 ### 7.3 iOS 로컬 상태
 

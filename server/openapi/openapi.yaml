@@ -285,6 +285,9 @@ paths:
         보장은 "최소 한 번 전달 + version 비교로 한 번 적용"이다. snapshot에 이미 반영된
         변경이 이후 증분으로 다시 올 수 있다. 클라이언트는 tombstone을 먼저 적용하고
         version이 더 큰 upsert만 적용한다.
+
+        entity는 upsert다. 단 호출자가 최근 30일 안에 끝낸 본인 멤버십은 version 있는 party_membership
+        tombstone 항목으로 온다. row를 만들지 않고 하한만 기록한다(SyncChange 규칙 (a)에 쓴다).
       operationId: syncBootstrap
       tags: [sync]
       responses:
@@ -1992,7 +1995,14 @@ components:
 
     SyncChange:
       type: object
-      required: [entity_type, entity_id, operation, version, payload]
+      description: |
+        적용 규칙(account_backend_design.md §7.1·§7.2, 2026-10-28 개정). 피드는 txid 순이고 직렬화 순서와 어긋날 수 있다.
+        - upsert는 version이 로컬 version과 하한보다 클 때만 적용한다. version 있는 tombstone은 지우고 하한을 기록한다.
+        - 규칙 (a): scope_membership_id가 끝난 멤버십(하한이 기록된 party_membership ID)인 upsert는 버린다.
+        - 규칙 (b): version 없는 tombstone은 그 entity의 Party에 scope_membership_id가 아닌 본인 활성 멤버십이 로컬에
+          있으면 무시한다(재가입으로 다시 받은 사본).
+        - 부모 Party보다 먼저 온 하위 entity도 버리지 않고 보관한다.
+      required: [entity_type, entity_id, operation, version, payload, scope_membership_id]
       additionalProperties: false
       properties:
         entity_type:
@@ -2015,8 +2025,15 @@ components:
             서버에 남아 있지만 수신자의 scope에서 빠진 entity(탈퇴자가 보던 Party·다른 멤버 entity)이며, 로컬 row만
             지우고 version 하한을 기록하지 않는다(재가입 시 같은 version으로 다시 온다).
         payload:
-          type: object
-          description: 최소 projection. 캘린더 상세와 token은 담지 않는다.
+          type: [object, "null"]
+          description: 최소 projection. 캘린더 상세와 token은 담지 않는다. tombstone은 null이다.
+        scope_membership_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            Party 범위 entity(party, party_membership, party_invite, party_visibility_setting,
+            party_schedule_projection)에서 이 변경을 발행할 때의 수신자 멤버십 ID. 활성 멤버에게는 활성 멤버십,
+            떠났거나 해산으로 끝난 수신자에게는 끝난 그 멤버십이다. Party 밖 entity는 null이다.
 
     SyncResponse:
       type: object
