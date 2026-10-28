@@ -866,3 +866,129 @@ func TestLargeSnapshotEmitsBatchedChanges(t *testing.T) {
 		t.Fatal("bob의 피드 재구성이 최종 projection과 다르다")
 	}
 }
+
+// 철회 → selecting → snapshot 생성(syncing) → abort는 selecting으로 돌아간다. 철회 전 generation이 ready로
+// 되살아나 FreshUsers나 projection(busyOnly·details)으로 다시 보이면 안 된다. 정상 재동기화의 abort는 ready다.
+func TestAbortAfterRevokeDoesNotReviveGeneration(t *testing.T) {
+	s := newStack(t)
+	ctx := context.Background()
+	alice := s.signIn(t, "cal.ab."+uuid.NewString())
+	bob := s.signIn(t, "cal.ab."+uuid.NewString())
+	aliceID := uuid.MustParse(alice.UserID)
+	s.enableCalendar(t, alice)
+	p := s.newParty(t, alice)
+	s.join(t, bob, p)
+	s.setVisibility(t, p.ID, alice.UserID, "details", false)
+	title := "회의"
+	f1, f2 := mkFact(1, 1, 10), mkFact(2, 2, 10)
+	f1.Title = &title
+	s.sync(t, alice, 1, []fact{f1, f2}, 10)
+	if s.projections(t, p.ID, alice.UserID) != 2 {
+		t.Fatal("사전 조건: projection 2개")
+	}
+	fresh := func() bool {
+		t.Helper()
+		m, err := FreshUsers(ctx, s.pool, []uuid.UUID{aliceID}, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m[aliceID]
+	}
+	put := func(body string) {
+		t.Helper()
+		c := s.connection(t, alice)
+		if rec := s.mut(t, http.MethodPut, "/v1/calendar/connection", alice.AccessToken, body, itoa(c.Version)); rec.Code != http.StatusOK {
+			t.Fatalf("PUT %s = %d: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	abort := func(id uuid.UUID) {
+		t.Helper()
+		if rec := s.mut(t, http.MethodPost, "/v1/calendar/snapshots/"+id.String()+"/abort", alice.AccessToken, "", ""); rec.Code != http.StatusOK {
+			t.Fatalf("abort = %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	create := func(rev int64) uuid.UUID {
+		t.Helper()
+		rec := s.createSnapshot(t, alice, rev, 0)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("snapshot 생성 = %d: %s", rec.Code, rec.Body.String())
+		}
+		return decode[snapEnv](t, rec).Snapshot.ID
+	}
+
+	// 정상 재동기화 abort: ready 유지, fresh, projection 유지
+	abort(create(2))
+	if c := s.connection(t, alice); c.Status != "ready" || !fresh() || s.projections(t, p.ID, alice.UserID) != 2 {
+		t.Fatalf("정상 abort 뒤 상태 = %s fresh=%v projection=%d", c.Status, fresh(), s.projections(t, p.ID, alice.UserID))
+	}
+
+	// 철회 → selecting → snapshot 생성 → abort
+	put(`{"status":"revoked"}`)
+	put(`{"status":"selecting"}`)
+	id := create(3)
+	if c := s.connection(t, alice); c.Status != "syncing" {
+		t.Fatalf("snapshot 생성 뒤 상태 = %s", c.Status)
+	}
+	abort(id)
+	if c := s.connection(t, alice); c.Status != "selecting" {
+		t.Fatalf("철회 뒤 abort 상태 = %s, want selecting", c.Status)
+	}
+	if fresh() {
+		t.Fatal("철회 전 generation이 fresh로 되살아났다")
+	}
+	if n := s.projections(t, p.ID, alice.UserID); n != 0 {
+		t.Fatalf("철회 뒤 abort projection = %d", n)
+	}
+	// 다른 경로의 projection 재구성(공개 수준 변경 API)도 철회 전 facts를 다시 내보내지 않는다.
+	var setVer int64
+	if err := s.pool.QueryRow(ctx, `SELECT version FROM party_visibility_settings WHERE party_id = $1 AND user_id = $2`, p.ID, alice.UserID).Scan(&setVer); err != nil {
+		t.Fatal(err)
+	}
+	if rec := s.mut(t, http.MethodPatch, "/v1/parties/"+p.ID.String()+"/visibility/me", alice.AccessToken,
+		`{"visibility_level":"busyOnly","share_location":false}`, itoa(setVer)); rec.Code != http.StatusOK {
+		t.Fatalf("공개 수준 변경 = %d: %s", rec.Code, rec.Body.String())
+	}
+	if n := s.projections(t, p.ID, alice.UserID); n != 0 {
+		t.Fatalf("공개 수준 변경 뒤 projection = %d", n)
+	}
+	// 새 complete가 다시 ready·fresh·projection을 만든다.
+	s.sync(t, alice, 4, []fact{f2}, 10)
+	if c := s.connection(t, alice); c.Status != "ready" || !fresh() || s.projections(t, p.ID, alice.UserID) != 1 {
+		t.Fatalf("재연결 뒤 상태 = %s fresh=%v", c.Status, fresh())
+	}
+}
+
+// error → 업로드(syncing) → abort는 selecting이 되고, 비노출 상태이므로 projection도 즉시 지운다.
+func TestAbortToSelectingHidesProjections(t *testing.T) {
+	s := newStack(t)
+	alice := s.signIn(t, "cal.ae."+uuid.NewString())
+	bob := s.signIn(t, "cal.ae."+uuid.NewString())
+	s.enableCalendar(t, alice)
+	p := s.newParty(t, alice)
+	s.join(t, bob, p)
+	s.sync(t, alice, 1, []fact{mkFact(1, 1, 10), mkFact(2, 2, 10)}, 10)
+	c := s.connection(t, alice)
+	if rec := s.mut(t, http.MethodPut, "/v1/calendar/connection", alice.AccessToken, `{"status":"error"}`, itoa(c.Version)); rec.Code != http.StatusOK {
+		t.Fatal(rec.Body.String())
+	}
+	if s.projections(t, p.ID, alice.UserID) != 2 {
+		t.Fatal("사전 조건: error는 마지막 정상 projection을 유지한다")
+	}
+	rec := s.createSnapshot(t, alice, 2, 0)
+	if rec.Code != http.StatusCreated {
+		t.Fatal(rec.Body.String())
+	}
+	id := decode[snapEnv](t, rec).Snapshot.ID
+	if rec := s.mut(t, http.MethodPost, "/v1/calendar/snapshots/"+id.String()+"/abort", alice.AccessToken, "", ""); rec.Code != http.StatusOK {
+		t.Fatal(rec.Body.String())
+	}
+	if st := s.connection(t, alice).Status; st != "selecting" {
+		t.Fatalf("status = %s, want selecting", st)
+	}
+	if n := s.projections(t, p.ID, alice.UserID); n != 0 {
+		t.Fatalf("selecting인데 projection = %d", n)
+	}
+	if n := s.changes(t, bob.UserID, "tombstone"); n != 2 {
+		t.Fatalf("bob tombstone = %d", n)
+	}
+}

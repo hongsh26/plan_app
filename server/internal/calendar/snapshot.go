@@ -631,6 +631,11 @@ func (h *Handler) abortSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out, ok := h.run(w, r, p, prep, "calendar.snapshot.abort", func(ctx context.Context, tx *mutation.Tx) (mutation.Result, error) {
+		// 잠금 순서: 사용자의 활성 Party(FOR SHARE) -> connection(FOR UPDATE). selecting으로 돌아가면 projection을
+		// 다시 맞추므로 complete·PUT과 같은 순서를 따른다(migration 00012).
+		if err := party.LockUserPartiesShared(ctx, tx, p.UserID); err != nil {
+			return mutation.Result{}, err
+		}
 		var connID uuid.UUID
 		var syncDev *uuid.UUID
 		err := tx.QueryRow(ctx, `
@@ -664,13 +669,25 @@ func (h *Handler) abortSnapshot(w http.ResponseWriter, r *http.Request) {
 			if _, err := tx.Exec(ctx, `UPDATE calendar_snapshot_sessions SET status = 'aborted' WHERE id = $1`, sessionID); err != nil {
 				return mutation.Result{}, err
 			}
-			// syncing이던 연결은 마지막 정상 generation이 있으면 ready, 없으면 selecting으로 돌린다.
-			if _, err := tx.Exec(ctx, `
+			// syncing이던 연결은 마지막 정상 generation을 계산·노출에 쓸 수 있으면(active_generation_usable) ready,
+			// 아니면 selecting으로 돌린다. 철회·오류·source 변경 뒤 시작한 업로드를 abort해도 그 이전 generation이
+			// ready(FreshUsers·projection 가시성)로 되살아나지 않는다(설계 3 §12, migration 00017).
+			var newStatus string
+			err := tx.QueryRow(ctx, `
 				UPDATE calendar_connections
-				   SET source_status = CASE WHEN active_generation > 0 AND last_completed_sync_at IS NOT NULL THEN 'ready' ELSE 'selecting' END,
+				   SET source_status = CASE WHEN active_generation_usable AND active_generation > 0 AND last_completed_sync_at IS NOT NULL
+				                            THEN 'ready' ELSE 'selecting' END,
 				       version = version + 1, updated_at = now()
-				 WHERE id = $1 AND source_status = 'syncing'`, connID); err != nil {
+				 WHERE id = $1 AND source_status = 'syncing'
+				RETURNING source_status`, connID).Scan(&newStatus)
+			if err != nil && !isNoRows(err) {
 				return mutation.Result{}, err
+			}
+			// syncing(노출)에서 selecting(비노출)으로 가면 projection을 즉시 지운다(예: error → 업로드 → abort).
+			if newStatus == "selecting" {
+				if err := party.RebuildBusyProjections(ctx, tx, p.UserID, nil, true); err != nil {
+					return mutation.Result{}, err
+				}
 			}
 		}
 		return mutation.Result{StatusCode: http.StatusOK, ResourceType: "calendar_snapshot", ResourceID: sessionID, ResourceVersion: 1}, nil

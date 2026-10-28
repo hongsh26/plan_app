@@ -194,12 +194,12 @@ func TestSearchCalendarTransitionsThroughAPI(t *testing.T) {
 	}
 	pending("철회 뒤 재동기화 중", SelfCalendarSyncing)
 	stale("철회 뒤 재동기화 중", v)
-	// 그 업로드를 abort하면 calendar는 이전 generation으로 ready로 돌아가지만 계산에는 여전히 쓰지 않는다.
+	// 그 업로드를 abort하면 철회 전 generation은 쓸 수 없으므로 selecting으로 돌아간다.
 	s.calAbort(t, b, revived)
-	if c := s.calConn(t, b); c.Status != "ready" {
+	if c := s.calConn(t, b); c.Status != "selecting" {
 		t.Fatalf("abort 뒤 상태 = %s", c.Status)
 	}
-	pending("철회 뒤 abort", SelfCalendarStale)
+	pending("철회 뒤 abort", SelfCalendarSyncing)
 	s.calComplete(t, b, s.calCreate(t, b, next()), 0)
 	v = ok("철회 뒤 새 complete").CalculationVersion
 
