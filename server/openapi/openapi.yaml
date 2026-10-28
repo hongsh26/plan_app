@@ -606,6 +606,33 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/calendar/connection:
+    put:
+      summary: 캘린더 연결 상태·읽기 source·sync 기기 변경
+      description: |
+        If-Match가 없으면 create-only, 있으면 그 version일 때만 갱신한다. 요청 본문 schema는 아직 등재하지 않았다
+        (status, time_zone, sources, claim_sync_device).
+      operationId: putCalendarConnection
+      tags: [calendar]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: If-Match
+          in: header
+          required: false
+          schema: {type: string}
+      responses:
+        "200":
+          description: |
+            갱신된 연결.
+            - **syncing 중 enabled source 집합이 바뀌면 서버가 열린 업로드를 폐기하고 상태를 selecting으로 바꾼다.**
+              클라이언트는 새 source로 snapshot을 다시 만든다. ready에서 바꾸면 상태는 ready로 남지만 새 snapshot이
+              완료될 때까지 이전 데이터는 다른 멤버에게 보이지 않고 가능 시간 검색에도 쓰이지 않는다.
+            - sync 기기를 다른 기기로 바꾸면 이전 기기의 열린 업로드도 폐기된다.
+            - disabled 항목의 추가·삭제는 source 변경이 아니다.
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
   /v1/calendar/snapshots:
     post:
       summary: 캘린더 snapshot 세션 생성

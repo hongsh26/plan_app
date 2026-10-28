@@ -1161,6 +1161,23 @@ func TestSourceChangeDuringUploadAbortsOpenSession(t *testing.T) {
 		t.Fatalf("S1 complete = %d: %s", rec.Code, rec.Body.String())
 	}
 	c.expect("S1 complete 거부 뒤", 0, false)
+
+	// 새 업로드 S2가 시작돼 연결이 다시 syncing이어도(complete의 상태 검사는 통과) S1은 폐기된 채라 complete할
+	// 수 없다. S2 생성도 이전 열린 session을 폐기하므로, source 변경 자체가 폐기했다는 증거는 위의 S2 전 409다.
+	s2 := c.create()
+	if st := c.s.connection(t, c.alice).Status; st != "syncing" {
+		t.Fatalf("S2 생성 뒤 status = %s", st)
+	}
+	if rec := c.s.complete(t, c.alice, s1, 1); rec.Code != http.StatusConflict {
+		t.Fatalf("S2 진행 중 S1 complete = %d: %s", rec.Code, rec.Body.String())
+	}
+	c.expect("S2 진행 중 S1 complete 거부 뒤", 0, false)
+	if rec := c.s.complete(t, c.alice, s2, 0); rec.Code != http.StatusOK {
+		t.Fatalf("S2 complete = %d: %s", rec.Code, rec.Body.String())
+	}
+	if n := c.s.projections(t, c.p.ID, c.alice.UserID); n != 0 {
+		t.Fatalf("빈 S2 complete 뒤 projection = %d", n) // S1 staging(해제 캘린더 Busy)이 섞이지 않았다
+	}
 	c.resync(true)
 }
 
