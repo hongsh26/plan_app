@@ -11,21 +11,22 @@ import (
 // It runs inside the caller's snapshot transaction so its contents and cursor agree.
 func BootstrapProjections(ctx context.Context, q Querier, userID uuid.UUID) ([]Projection, error) {
 	rows, err := q.Query(ctx, `
-		SELECT p.id FROM parties p
+		SELECT p.id, mine.id FROM parties p
 		JOIN party_memberships mine ON mine.party_id = p.id
 		WHERE mine.user_id = $1 AND mine.status = 'active' AND p.status = 'active'
 		ORDER BY p.id`, userID)
 	if err != nil {
 		return nil, err
 	}
-	var partyIDs []uuid.UUID
+	var partyIDs, scopes []uuid.UUID
 	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
+		var id, scope uuid.UUID
+		if err := rows.Scan(&id, &scope); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		partyIDs = append(partyIDs, id)
+		scopes = append(scopes, scope)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -33,7 +34,8 @@ func BootstrapProjections(ctx context.Context, q Querier, userID uuid.UUID) ([]P
 	}
 
 	result := make([]Projection, 0)
-	for _, partyID := range partyIDs {
+	for i, partyID := range partyIDs {
+		start := len(result)
 		pr, err := PartyProjection(ctx, q, partyID)
 		if err != nil {
 			return nil, err
@@ -129,6 +131,35 @@ func BootstrapProjections(ctx context.Context, q Querier, userID uuid.UUID) ([]P
 		if err := projections.Err(); err != nil {
 			return nil, err
 		}
+		// 이 Party의 모든 entity는 호출자의 활성 멤버십을 scope로 갖는다.
+		for j := start; j < len(result); j++ {
+			result[j].Scope = scopes[i]
+		}
 	}
 	return result, nil
+}
+
+// EndedMembershipFloors는 호출자가 since 이후 끝낸 멤버십을 bootstrap의 version 있는 tombstone 항목으로 준다
+// (account_backend_design.md §7.2 2026-10-28 개정). snapshot을 교체하면 하한 기록이 비워지는데, 탈퇴는 snapshot에
+// 반영됐지만 그보다 먼저 직렬화되고 txid가 watermark 뒤인 변경이 다시 오면 규칙 (a)가 그 멤버십이 끝났음을 알아야
+// 한다. since는 변경 피드 보존 기간이다. 그보다 오래된 변경은 다시 오지 않는다.
+func EndedMembershipFloors(ctx context.Context, q Querier, userID uuid.UUID, since time.Time) ([]Projection, error) {
+	rows, err := q.Query(ctx, `
+		SELECT id, version FROM party_memberships
+		 WHERE user_id = $1 AND status <> 'active' AND ended_at >= $2
+		 ORDER BY id`, userID, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Projection
+	for rows.Next() {
+		var p Projection
+		if err := rows.Scan(&p.ID, &p.Version); err != nil {
+			return nil, err
+		}
+		p.EntityType, p.Scope, p.Tombstone = entityPartyMembership, p.ID, true
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }

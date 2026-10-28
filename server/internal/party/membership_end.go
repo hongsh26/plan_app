@@ -289,7 +289,7 @@ func endMembershipTx(ctx context.Context, tx *mutation.Tx, partyID uuid.UUID, me
 	for _, id := range others {
 		changes = append(changes, mutation.Change{Recipient: leaving.userID, EntityType: entityScheduleProjection, EntityID: id})
 	}
-	if err := tx.EmitChanges(ctx, changes); err != nil {
+	if err := emitScoped(ctx, tx, partyID, changes...); err != nil {
 		return err
 	}
 	// 남은 멤버는 version이 오른 Party를 받는다.
@@ -297,7 +297,7 @@ func endMembershipTx(ctx context.Context, tx *mutation.Tx, partyID uuid.UUID, me
 		if m.userID == leaving.userID {
 			continue
 		}
-		if err := emitProjection(ctx, tx, m.userID, partyID); err != nil {
+		if err := emitProjection(ctx, tx, partyID, m.userID, partyID); err != nil {
 			return err
 		}
 	}
@@ -387,7 +387,7 @@ func disbandPartyTx(ctx context.Context, tx *mutation.Tx, partyID uuid.UUID, mem
 				changes = append(changes, versionedTombstone(d.owner, entityVisibilitySetting, d))
 			}
 		}
-		if err := tx.EmitChanges(ctx, changes); err != nil {
+		if err := emitScoped(ctx, tx, partyID, changes...); err != nil {
 			return 0, err
 		}
 	}

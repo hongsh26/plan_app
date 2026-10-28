@@ -108,6 +108,10 @@ type Tx struct {
 	ordinal int32
 }
 
+// NewTx는 mutation.Run 밖의 트랜잭션(worker 등)에서 sync 변경을 쓸 때 감싼다. ordinal은 0부터 발급하므로
+// 그 트랜잭션에서 sync_changes를 쓰는 곳은 이 Tx 하나여야 한다.
+func NewTx(tx pgx.Tx) *Tx { return &Tx{Tx: tx} }
+
 // Change는 sync_changes 한 줄이다.
 type Change struct {
 	Recipient  uuid.UUID
@@ -119,6 +123,8 @@ type Change struct {
 	Tombstone bool
 	// Payload는 최소 projection이다(§7.1). 캘린더 상세와 token을 넣지 않는다.
 	Payload any
+	// Scope는 Party 범위 변경에서 수신자의 당시 멤버십 ID다(§7.1 2026-10-28 개정). 그 밖에는 nil이다.
+	Scope *uuid.UUID
 }
 
 // EmitChange는 sync 변경을 기록한다. ordinal은 트랜잭션 안에서 0부터 순서대로
@@ -134,9 +140,9 @@ func (t *Tx) EmitChange(ctx context.Context, c Change) error {
 		op = "tombstone"
 	}
 	if _, err := t.Exec(ctx, `
-		INSERT INTO sync_changes (ordinal, recipient_user_id, entity_type, entity_id, operation, entity_version, payload)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		t.ordinal, c.Recipient, c.EntityType, c.EntityID, op, c.Version, payload); err != nil {
+		INSERT INTO sync_changes (ordinal, recipient_user_id, entity_type, entity_id, operation, entity_version, payload, scope_membership_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		t.ordinal, c.Recipient, c.EntityType, c.EntityID, op, c.Version, payload, c.Scope); err != nil {
 		return err
 	}
 	t.ordinal++
@@ -161,7 +167,9 @@ func (t *Tx) EmitChanges(ctx context.Context, changes []Change) error {
 		ops := make([]string, len(part))
 		versions := make([]*int64, len(part))
 		payloads := make([]string, len(part))
+		scopes := make([]*uuid.UUID, len(part))
 		for i, c := range part {
+			scopes[i] = c.Scope
 			b, err := json.Marshal(c.Payload)
 			if err != nil {
 				return fmt.Errorf("mutation: sync payload를 직렬화할 수 없다: %w", err)
@@ -173,11 +181,11 @@ func (t *Tx) EmitChanges(ctx context.Context, changes []Change) error {
 			}
 		}
 		if _, err := t.Exec(ctx, `
-			INSERT INTO sync_changes (ordinal, recipient_user_id, entity_type, entity_id, operation, entity_version, payload)
-			SELECT o, r, e, i, op, v, p::jsonb
-			  FROM unnest($1::int[], $2::uuid[], $3::text[], $4::uuid[], $5::text[], $6::bigint[], $7::text[])
-			       AS x(o, r, e, i, op, v, p)`,
-			ordinals, recipients, types, ids, ops, versions, payloads); err != nil {
+			INSERT INTO sync_changes (ordinal, recipient_user_id, entity_type, entity_id, operation, entity_version, payload, scope_membership_id)
+			SELECT o, r, e, i, op, v, p::jsonb, s
+			  FROM unnest($1::int[], $2::uuid[], $3::text[], $4::uuid[], $5::text[], $6::bigint[], $7::text[], $8::uuid[])
+			       AS x(o, r, e, i, op, v, p, s)`,
+			ordinals, recipients, types, ids, ops, versions, payloads, scopes); err != nil {
 			return err
 		}
 		t.ordinal += int32(len(part))

@@ -3,6 +3,8 @@ package syncfeed
 import (
 	"context"
 	"encoding/json"
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -34,8 +36,8 @@ type Snapshot struct {
 //
 // entity는 증분 변경과 같은 전체 투영이다(account/projection.go).
 //
-// 지금 볼 수 있는 entity는 본인 user와 폐기되지 않은 기기뿐이다. Party, 제안 등은
-// 각 도메인을 구현할 때 여기에 더한다.
+// 지금 볼 수 있는 entity는 본인 user, 폐기되지 않은 기기, 활성 Party 범위 entity다. Party entity는 증분과
+// 같이 호출자의 활성 멤버십 ID를 scope로 싣는다. 제안 등은 각 도메인을 구현할 때 여기에 더한다.
 func Bootstrap(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID) (Snapshot, error) {
 	var snap Snapshot
 	err := pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
@@ -73,7 +75,17 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID) (Snaps
 					return err
 				}
 				v := pr.Version
-				snap.Entities = append(snap.Entities, Change{EntityType: pr.EntityType, EntityID: pr.ID, Operation: "upsert", Version: &v, Payload: b})
+				scope := pr.Scope
+				snap.Entities = append(snap.Entities, Change{EntityType: pr.EntityType, EntityID: pr.ID, Operation: "upsert", Version: &v, Payload: b, ScopeMembershipID: &scope})
+			}
+			// 최근 끝난 본인 멤버십은 하한 전용 tombstone 항목이다. 클라이언트는 row 없이 하한만 기록한다.
+			floors, err := party.EndedMembershipFloors(ctx, tx, userID, time.Now().Add(-Retention))
+			if err != nil {
+				return err
+			}
+			for _, pr := range floors {
+				v, scope := pr.Version, pr.Scope
+				snap.Entities = append(snap.Entities, Change{EntityType: pr.EntityType, EntityID: pr.ID, Operation: "tombstone", Version: &v, Payload: json.RawMessage("null"), ScopeMembershipID: &scope})
 			}
 			snap.Watermark = Cursor{Epoch: epoch, TxID: horizon, Ordinal: -1}
 			return nil

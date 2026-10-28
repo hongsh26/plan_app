@@ -135,7 +135,7 @@ func (h *Handler) patchVisibilityMe(w http.ResponseWriter, r *http.Request) {
 		if err := RebuildBusyProjections(ctx, tx, p.UserID, &partyID, false); err != nil {
 			return mutation.Result{}, err
 		}
-		if err := emitProjection(ctx, tx, p.UserID, settingID); err != nil {
+		if err := emitProjection(ctx, tx, partyID, p.UserID, settingID); err != nil {
 			return mutation.Result{}, err
 		}
 		status = visibilityStatusCode(req.VisibilityLevel)

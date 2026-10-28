@@ -59,7 +59,7 @@ func PropagateDisplayName(ctx context.Context, tx *mutation.Tx, userID uuid.UUID
 			v := pr.Version
 			changes = append(changes, mutation.Change{Recipient: r, EntityType: pr.EntityType, EntityID: pr.ID, Version: &v, Payload: pr.Payload})
 		}
-		if err := tx.EmitChanges(ctx, changes); err != nil {
+		if err := emitScoped(ctx, tx, b.partyID, changes...); err != nil {
 			return err
 		}
 	}

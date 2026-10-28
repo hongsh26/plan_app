@@ -23,6 +23,10 @@ type Projection struct {
 	ID         uuid.UUID
 	Version    int64
 	Payload    map[string]any
+	// Scope는 bootstrap에서 호출자의 활성 멤버십 ID다(증분의 scope_membership_id와 같다).
+	Scope uuid.UUID
+	// Tombstone이면 bootstrap의 하한 전용 항목이다(EndedMembershipFloors). Payload는 없다.
+	Tombstone bool
 }
 
 type Querier interface {

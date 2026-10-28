@@ -153,7 +153,7 @@ func (h *Handler) createParty(w http.ResponseWriter, r *http.Request) {
 		// 상위 entity(party, 멤버십, 설정)를 projection보다 먼저 발행한다. 클라이언트가 한 페이지 안에서
 		// 부모 없는 projection을 먼저 받지 않게 한다.
 		for _, id := range []uuid.UUID{partyID, membershipID, settingID} {
-			if err := emitProjection(ctx, tx, p.UserID, id); err != nil {
+			if err := emitProjection(ctx, tx, partyID, p.UserID, id); err != nil {
 				return mutation.Result{}, err
 			}
 		}
@@ -234,7 +234,7 @@ func (h *Handler) patchParty(w http.ResponseWriter, r *http.Request) {
 			return mutation.Result{}, err
 		}
 		for _, recipient := range recipients {
-			if err := emitProjection(ctx, tx, recipient, partyID); err != nil {
+			if err := emitProjection(ctx, tx, partyID, recipient, partyID); err != nil {
 				return mutation.Result{}, err
 			}
 		}
@@ -603,19 +603,19 @@ func createBusyOnlyProjections(ctx context.Context, tx *mutation.Tx, partyID, us
 	return RebuildBusyProjections(ctx, tx, userID, &partyID, false)
 }
 
-func emitProjection(ctx context.Context, tx *mutation.Tx, recipient, entityID uuid.UUID) error {
+func emitProjection(ctx context.Context, tx *mutation.Tx, partyID, recipient, entityID uuid.UUID) error {
 	var (
 		p   Projection
 		err error
 	)
 	if p, err = PartyProjection(ctx, tx, entityID); err == nil {
-		return tx.EmitChange(ctx, mutation.Change{Recipient: recipient, EntityType: p.EntityType, EntityID: p.ID, Version: &p.Version, Payload: p.Payload})
+		return emitScoped(ctx, tx, partyID, mutation.Change{Recipient: recipient, EntityType: p.EntityType, EntityID: p.ID, Version: &p.Version, Payload: p.Payload})
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
 	if p, err = MembershipProjection(ctx, tx, entityID); err == nil {
-		return tx.EmitChange(ctx, mutation.Change{Recipient: recipient, EntityType: p.EntityType, EntityID: p.ID, Version: &p.Version, Payload: p.Payload})
+		return emitScoped(ctx, tx, partyID, mutation.Change{Recipient: recipient, EntityType: p.EntityType, EntityID: p.ID, Version: &p.Version, Payload: p.Payload})
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return err
@@ -624,7 +624,7 @@ func emitProjection(ctx context.Context, tx *mutation.Tx, recipient, entityID uu
 	if err != nil {
 		return err
 	}
-	return tx.EmitChange(ctx, mutation.Change{Recipient: recipient, EntityType: p.EntityType, EntityID: p.ID, Version: &p.Version, Payload: p.Payload})
+	return emitScoped(ctx, tx, partyID, mutation.Change{Recipient: recipient, EntityType: p.EntityType, EntityID: p.ID, Version: &p.Version, Payload: p.Payload})
 }
 
 func requireActiveMember(ctx context.Context, q Querier, partyID, userID uuid.UUID) error {

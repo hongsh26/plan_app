@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plantogether/server/internal/auth"
+	"plantogether/server/internal/party"
 	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/audit"
 	"plantogether/server/internal/platform/httpapi"
@@ -325,14 +326,18 @@ func (s *DeletionService) finish(ctx context.Context, userID uuid.UUID) error {
 			 WHERE actor_user_id = $1`, userID, auditTombstone(userID)); err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			UPDATE users
 			   SET display_name = '탈퇴한 사용자',
 			       status = 'deleted',
 			       deleted_at = COALESCE(deleted_at, now()),
 			       updated_at = now()
-			 WHERE id = $1`, userID)
-		return err
+			 WHERE id = $1`, userID); err != nil {
+			return err
+		}
+		// 익명화한 이름을 같은 Party 멤버에게 보낸다(party_membership 투영이 display_name을 싣는다). 멤버십 자체의
+		// 정리(강제 위임·해산)는 P8이다. 잠금은 users → devices → sessions 뒤 parties FOR SHARE → 멤버십이다.
+		return party.PropagateDisplayName(ctx, mutation.NewTx(tx), userID)
 	})
 }
 

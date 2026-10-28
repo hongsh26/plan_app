@@ -313,7 +313,7 @@ func syncPartyProjections(ctx context.Context, tx *mutation.Tx, partyID, ownerID
 				changes = append(changes, mutation.Change{Recipient: r, EntityType: entityScheduleProjection, EntityID: d.id, Version: &version, Tombstone: true})
 			}
 		}
-		if err := tx.EmitChanges(ctx, changes); err != nil {
+		if err := emitScoped(ctx, tx, partyID, changes...); err != nil {
 			return err
 		}
 	}
@@ -386,7 +386,7 @@ func syncPartyProjections(ctx context.Context, tx *mutation.Tx, partyID, ownerID
 				changes = append(changes, mutation.Change{Recipient: r, EntityType: entityScheduleProjection, EntityID: o.id, Version: &version, Payload: payload})
 			}
 		}
-		if err := tx.EmitChanges(ctx, changes); err != nil {
+		if err := emitScoped(ctx, tx, partyID, changes...); err != nil {
 			return err
 		}
 	}
@@ -449,7 +449,7 @@ func emitPartyProjectionsTo(ctx context.Context, tx *mutation.Tx, recipient, par
 		}
 		changes = append(changes, mutation.Change{Recipient: recipient, EntityType: entityScheduleProjection, EntityID: r.id, Version: &version, Payload: payload})
 	}
-	return tx.EmitChanges(ctx, changes)
+	return emitScoped(ctx, tx, partyID, changes...)
 }
 
 // LockUserPartiesShared는 사용자가 속한 활성 Party 행을 id 순서로 FOR SHARE로 잠근다. snapshot

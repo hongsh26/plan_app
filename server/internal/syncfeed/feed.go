@@ -29,6 +29,8 @@ type Change struct {
 	Operation  string          `json:"operation"`
 	Version    *int64          `json:"version"`
 	Payload    json.RawMessage `json:"payload"`
+	// ScopeMembershipID는 Party 범위 변경에서 수신자의 당시 멤버십 ID다. 그 밖에는 null이다(§7.1).
+	ScopeMembershipID *uuid.UUID `json:"scope_membership_id"`
 }
 
 // Page는 증분 읽기 결과다.
@@ -66,10 +68,10 @@ func Read(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, from Cursor
 		SELECT h.x::text, `+epochSQL+`,
 		       ($2::text::xid8, $3::int) <= (p.t, p.o),
 		       c.txid::text, c.ordinal, c.entity_type, c.entity_id,
-		       c.operation, c.entity_version, c.payload
+		       c.operation, c.entity_version, c.payload, c.scope_membership_id
 		  FROM h CROSS JOIN p
 		  LEFT JOIN LATERAL (
-		        SELECT txid, ordinal, entity_type, entity_id, operation, entity_version, payload
+		        SELECT txid, ordinal, entity_type, entity_id, operation, entity_version, payload, scope_membership_id
 		          FROM sync_changes
 		         WHERE recipient_user_id = $1
 		           AND (txid, ordinal) > ($2::text::xid8, $3::int)
@@ -100,7 +102,7 @@ func Read(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, from Cursor
 			eid            *uuid.UUID
 			op             *string
 		)
-		if err := rows.Scan(&hx, &sysid, &tli, &pruned, &txid, &ordinal, &etype, &eid, &op, &ch.Version, &ch.Payload); err != nil {
+		if err := rows.Scan(&hx, &sysid, &tli, &pruned, &txid, &ordinal, &etype, &eid, &op, &ch.Version, &ch.Payload, &ch.ScopeMembershipID); err != nil {
 			return Page{}, err
 		}
 		if horizon, epoch, err = parseHead(hx, sysid, tli); err != nil {

@@ -195,7 +195,7 @@ func (h *Handler) createInvite(w http.ResponseWriter, r *http.Request) {
 			inviteID, partyID, hashToken(t), now.Add(ttl), maxUses, creatorMembershipID, now); err != nil {
 			return mutation.Result{}, err
 		}
-		if err := emitInviteUpsert(ctx, tx, p.UserID, inviteID); err != nil {
+		if err := emitInviteUpsert(ctx, tx, partyID, p.UserID, inviteID); err != nil {
 			return mutation.Result{}, err
 		}
 		token = t
@@ -298,7 +298,7 @@ func (h *Handler) revokeInvite(w http.ResponseWriter, r *http.Request) {
 				 WHERE id = $1`, inviteID, now); err != nil {
 				return mutation.Result{}, err
 			}
-			if err := tx.EmitChange(ctx, inviteTombstone(p.UserID, inviteID, used)); err != nil {
+			if err := emitScoped(ctx, tx, partyID, inviteTombstone(p.UserID, inviteID, used)); err != nil {
 				return mutation.Result{}, err
 			}
 		}
@@ -534,23 +534,23 @@ func (h *Handler) emitJoin(ctx context.Context, tx *mutation.Tx, partyID, invite
 		if m.userID == newUserID {
 			continue
 		}
-		if err := emitProjection(ctx, tx, m.userID, partyID); err != nil {
+		if err := emitProjection(ctx, tx, partyID, m.userID, partyID); err != nil {
 			return err
 		}
-		if err := emitProjection(ctx, tx, m.userID, membershipID); err != nil {
+		if err := emitProjection(ctx, tx, partyID, m.userID, membershipID); err != nil {
 			return err
 		}
 	}
 	// 신규 멤버: party, 모든 party_membership, 본인 party_visibility_setting.
-	if err := emitProjection(ctx, tx, newUserID, partyID); err != nil {
+	if err := emitProjection(ctx, tx, partyID, newUserID, partyID); err != nil {
 		return err
 	}
 	for _, m := range members {
-		if err := emitProjection(ctx, tx, newUserID, m.id); err != nil {
+		if err := emitProjection(ctx, tx, partyID, newUserID, m.id); err != nil {
 			return err
 		}
 	}
-	if err := emitProjection(ctx, tx, newUserID, settingID); err != nil {
+	if err := emitProjection(ctx, tx, partyID, newUserID, settingID); err != nil {
 		return err
 	}
 	// 다른 멤버의 허용된 projection도 부트스트랩으로 받는다(설계 4 §5.5 T3 13단계). 신규 멤버 본인의
@@ -570,9 +570,9 @@ func (h *Handler) emitJoin(ctx context.Context, tx *mutation.Tx, partyID, invite
 			return err
 		}
 		if status != "active" {
-			return tx.EmitChange(ctx, inviteTombstone(m.userID, inviteID, used))
+			return emitScoped(ctx, tx, partyID, inviteTombstone(m.userID, inviteID, used))
 		}
-		return emitInviteUpsert(ctx, tx, m.userID, inviteID)
+		return emitInviteUpsert(ctx, tx, partyID, m.userID, inviteID)
 	}
 	return nil
 }
@@ -602,12 +602,12 @@ func activeMemberships(ctx context.Context, q Querier, partyID uuid.UUID) ([]mem
 	return out, rows.Err()
 }
 
-func emitInviteUpsert(ctx context.Context, tx *mutation.Tx, recipient, inviteID uuid.UUID) error {
+func emitInviteUpsert(ctx context.Context, tx *mutation.Tx, partyID, recipient, inviteID uuid.UUID) error {
 	p, err := InviteProjection(ctx, tx, inviteID)
 	if err != nil {
 		return err
 	}
-	return tx.EmitChange(ctx, mutation.Change{Recipient: recipient, EntityType: p.EntityType, EntityID: p.ID, Version: &p.Version, Payload: p.Payload})
+	return emitScoped(ctx, tx, partyID, mutation.Change{Recipient: recipient, EntityType: p.EntityType, EntityID: p.ID, Version: &p.Version, Payload: p.Payload})
 }
 
 // loadMembershipForUser는 수락 응답용 멤버십을 읽는다. 활성이 아니면 재전송이라도

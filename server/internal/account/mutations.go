@@ -89,12 +89,18 @@ func (h *Handler) patchMe(w http.ResponseWriter, r *http.Request) {
 
 	out, ok := h.run(w, r, p, prep, "account.update_profile", func(ctx context.Context, tx *mutation.Tx) (mutation.Result, error) {
 		var current int64
+		var currentName string
 		if err := tx.QueryRow(ctx,
-			`SELECT version FROM users WHERE id = $1 FOR NO KEY UPDATE`, p.UserID).Scan(&current); err != nil {
+			`SELECT version, display_name FROM users WHERE id = $1 FOR NO KEY UPDATE`, p.UserID).Scan(&current, &currentName); err != nil {
 			return mutation.Result{}, err
 		}
 		if err := mutation.CheckVersion(prep.ExpectedVersion, current); err != nil {
 			return mutation.Result{}, err
+		}
+		// 이름이 그대로면 아무것도 바꾸지 않는다. version을 올리면 같은 Party 멤버 전원에게 재발행되고 가능 시간
+		// 검색 결과도 stale이 된다.
+		if name == currentName {
+			return mutation.Result{StatusCode: http.StatusOK, ResourceType: entityUser, ResourceID: p.UserID, ResourceVersion: current}, nil
 		}
 		var version int64
 		if err := tx.QueryRow(ctx, `

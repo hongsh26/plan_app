@@ -148,7 +148,7 @@ func (h *Handler) transferOwner(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, m := range members {
 			for _, id := range []uuid.UUID{partyID, oldOwnerMembership, newOwnerMembership} {
-				if err := emitProjection(ctx, tx, m.userID, id); err != nil {
+				if err := emitProjection(ctx, tx, partyID, m.userID, id); err != nil {
 					return mutation.Result{}, err
 				}
 			}
@@ -156,7 +156,7 @@ func (h *Handler) transferOwner(w http.ResponseWriter, r *http.Request) {
 		// 초대 entity는 방장만 본다(§6, §9.2). 무효화 tombstone은 이전 방장과 새 방장에게만 간다.
 		for _, inv := range revoked {
 			for _, recipient := range []uuid.UUID{p.UserID, targetUserID} {
-				if err := tx.EmitChange(ctx, inviteTombstone(recipient, inv.id, inv.used)); err != nil {
+				if err := emitScoped(ctx, tx, partyID, inviteTombstone(recipient, inv.id, inv.used)); err != nil {
 					return mutation.Result{}, err
 				}
 			}
