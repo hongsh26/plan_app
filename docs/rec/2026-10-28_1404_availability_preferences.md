@@ -34,7 +34,7 @@
 - 자정 분할(월→화, 일→월), 맞닿음 병합(분할 꼬리와 다음 요일 구간 포함), position 순서
 - 정규화 단위: 일요일 꼬리 병합, 정확히 24시간 횡단, 입력 상한, 30분 칸 7×48 전체 병합
 - DB trigger: 직접 INSERT의 겹침·맞닿음 거부, UPDATE로 만든 겹침 거부, 떨어진 구간 허용, row CHECK(30분 배수, position, configured의 time_zone), 사용자 삭제 cascade
-- 동시성: create-only 2건 경쟁과 같은 If-Match 2건 경쟁에서 각각 정확히 1건만 성공, `mutation.Retries()` 불변
+- 동시성: create-only 8건 경쟁과 같은 If-Match 8건 경쟁에서 각각 정확히 1건만 성공(나머지 409), `mutation.Retries()` 불변
 - 개인정보: 다른 사용자 GET은 자기 미설정, 다른 사용자 경로 없음, 다른 사용자 sync_changes·bootstrap에 활동 시간 없음, 본인 sync payload에 interval·time zone 없음, 로그에 값 없음
 - 요청 제한: 한도 초과 시 잘못된 본문도 400이 아니라 429(검증 앞에서 셈), 조회는 별도 scope
 
@@ -43,6 +43,6 @@
 ## 남은 것
 
 - **계정 삭제와 활동 시간:** FK는 users ON DELETE CASCADE지만 삭제 파이프라인이 `users` row를 물리 삭제하지 않아 cascade가 일어나지 않는다. 삭제된 사용자의 활동 시간이 남는다(캘린더 데이터도 같은 공백). P8에서 삭제 worker가 `availability_preferences`를 지우게 해야 한다.
-- **A2 엔진 계약:** 저장은 요일별로 나뉘므로 day d의 `[x,1440)`과 day d+1의 `[0,y)`를 UTC 확장 뒤 이어 붙여 자정에 인위적 틈이 생기지 않게 해야 한다.
+- **A2 엔진과의 계약은 맞다(확인함):** `engine.WeeklyInterval`은 ISO 요일 1~7, `0 ≤ Start < End ≤ 1440`인 이 정규형을 그대로 받고, UTC 확장 뒤 자정 분할 구간(day d `[x,1440)` + day d+1 `[0,y)`)을 병합한다. A3는 저장 row를 변환 없이 넘기면 된다.
 - A3가 쓸 version tuple에 `availability_preferences.version`(미설정은 0)을 넣는다. 지금 조회 함수는 패키지 내부(`loadPreference`)라 A3에서 필요한 만큼 노출한다.
 - iOS(A5): 첫 저장은 If-Match 없이, 이후는 GET의 ETag로. `availability_preference` sync 변경을 받으면 GET으로 다시 읽는다.

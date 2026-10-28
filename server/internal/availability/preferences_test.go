@@ -510,14 +510,16 @@ func TestConcurrentPutsSerializeWithoutRetries(t *testing.T) {
 		t.Helper()
 		start := make(chan struct{})
 		var wg sync.WaitGroup
-		codes := make([]int, 2)
-		bodies := make([]string, 2)
-		for i := range 2 {
+		// 여러 요청을 한꺼번에 풀어 실제로 잠금에서 겹치게 한다.
+		const n = 8
+		codes := make([]int, n)
+		bodies := make([]string, n)
+		for i := range n {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				<-start
-				b := `{"time_zone":"Asia/Seoul","weekly_intervals":[{"weekday":` + strconv.Itoa(i+1) + `,"start_minute":` + strconv.Itoa(60*round) + `,"end_minute":1440}]}`
+				b := `{"time_zone":"Asia/Seoul","weekly_intervals":[{"weekday":` + strconv.Itoa(i%7+1) + `,"start_minute":` + strconv.Itoa(60*round) + `,"end_minute":1440}]}`
 				rec := s.put(t, u.AccessToken, "race-"+ifMatch+"-"+strconv.Itoa(i), ifMatch, b)
 				codes[i], bodies[i] = rec.Code, rec.Body.String()
 			}()
@@ -538,8 +540,8 @@ func TestConcurrentPutsSerializeWithoutRetries(t *testing.T) {
 				t.Fatalf("예상 밖 status %d: %s", c, bodies[i])
 			}
 		}
-		if ok != 1 || conflict != 1 {
-			t.Fatalf("If-Match %q 경쟁 결과 ok=%d conflict=%d, want 1/1 (%v)", ifMatch, ok, conflict, bodies)
+		if ok != 1 || conflict != n-1 {
+			t.Fatalf("If-Match %q 경쟁 결과 ok=%d conflict=%d, want 1/%d (%v)", ifMatch, ok, conflict, n-1, bodies)
 		}
 	}
 	race("", 1)    // 둘 다 create-only
@@ -584,7 +586,21 @@ func TestRawIntervalsStayPrivate(t *testing.T) {
 	if boot.Code != http.StatusOK {
 		t.Fatalf("bootstrap = %d: %s", boot.Code, boot.Body.String())
 	}
-	for _, leak := range []string{"availability", tz, "start_minute", "750"} {
+	var snap struct {
+		Snapshot []struct {
+			EntityType string `json:"entity_type"`
+		} `json:"snapshot"`
+	}
+	if err := json.Unmarshal(boot.Body.Bytes(), &snap); err != nil || len(snap.Snapshot) == 0 {
+		t.Fatalf("bootstrap 해석 실패(%v): %s", err, boot.Body.String())
+	}
+	for _, e := range snap.Snapshot {
+		if strings.HasPrefix(e.EntityType, "availability") {
+			t.Fatalf("다른 사용자 bootstrap에 %s entity가 있다", e.EntityType)
+		}
+	}
+	// 우연히 나올 수 없는 값만 문자열로 찾는다(숫자는 UUID·cursor에 우연히 섞일 수 있다).
+	for _, leak := range []string{tz, `"start_minute"`} {
 		if strings.Contains(boot.Body.String(), leak) {
 			t.Fatalf("다른 사용자 bootstrap에 %q가 있다: %s", leak, boot.Body.String())
 		}
@@ -598,7 +614,7 @@ func TestRawIntervalsStayPrivate(t *testing.T) {
 	if strings.Contains(payload, tz) || strings.Contains(payload, "minute") || strings.Contains(payload, "interval") {
 		t.Fatalf("본인 sync payload에 원시 값이 있다: %s", payload)
 	}
-	for _, leak := range []string{tz, `"start_minute"`, "1170"} {
+	for _, leak := range []string{tz, `"start_minute"`} {
 		if strings.Contains(s.logs.String(), leak) {
 			t.Fatalf("로그에 %q가 있다: %s", leak, s.logs.String())
 		}
