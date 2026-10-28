@@ -669,9 +669,10 @@ func (h *Handler) abortSnapshot(w http.ResponseWriter, r *http.Request) {
 			if _, err := tx.Exec(ctx, `UPDATE calendar_snapshot_sessions SET status = 'aborted' WHERE id = $1`, sessionID); err != nil {
 				return mutation.Result{}, err
 			}
-			// syncing이던 연결은 마지막 정상 generation을 계산·노출에 쓸 수 있으면(active_generation_usable) ready,
-			// 아니면 selecting으로 돌린다. 철회·오류·source 변경 뒤 시작한 업로드를 abort해도 그 이전 generation이
-			// ready(FreshUsers·projection 가시성)로 되살아나지 않는다(설계 3 §12, migration 00017).
+			// syncing이던 연결은 마지막 정상 generation을 쓸 수 있으면(active_generation_usable) ready, 아니면
+			// selecting으로 돌린다. 철회·source 변경 뒤 시작한 업로드를 abort해도 그 이전 generation이
+			// ready(FreshUsers·projection 가시성)로 되살아나지 않는다(설계 3 §12, migration 00017). error는
+			// 플래그를 유지하므로 error → 업로드 → abort는 새 complete 없이 ready로 돌아간다(결정 B).
 			var newStatus string
 			err := tx.QueryRow(ctx, `
 				UPDATE calendar_connections
@@ -683,7 +684,8 @@ func (h *Handler) abortSnapshot(w http.ResponseWriter, r *http.Request) {
 			if err != nil && !isNoRows(err) {
 				return mutation.Result{}, err
 			}
-			// syncing(노출)에서 selecting(비노출)으로 가면 projection을 즉시 지운다(예: error → 업로드 → abort).
+			// selecting이 되는 경우는 플래그가 false인 syncing뿐이라 projection은 이미 비노출이다. 가시성 판정이
+			// 바뀌어도 어긋나지 않게 방어적으로 다시 맞춘다.
 			if newStatus == "selecting" {
 				if err := party.RebuildBusyProjections(ctx, tx, p.UserID, nil, true); err != nil {
 					return mutation.Result{}, err

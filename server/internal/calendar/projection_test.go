@@ -1122,3 +1122,97 @@ func TestProjectionVisibilityRequiresUsableGeneration(t *testing.T) {
 		c.expect("error → 업로드 → abort", 2, true)
 	})
 }
+
+func (c *flagCase) sessionStatus(id uuid.UUID) string {
+	c.t.Helper()
+	var st string
+	if err := c.s.pool.QueryRow(context.Background(), `SELECT status FROM calendar_snapshot_sessions WHERE id = $1`, id).Scan(&st); err != nil {
+		c.t.Fatal(err)
+	}
+	return st
+}
+
+// 업로드 중(syncing) source만 바꾸면 이전 source로 모은 열린 session은 폐기되고 연결은 selecting이 된다.
+// 그 session의 늦은 complete가 플래그를 다시 올려 해제한 캘린더 Busy를 노출하면 안 된다.
+func TestSourceChangeDuringUploadAbortsOpenSession(t *testing.T) {
+	c := newFlagCase(t)
+	c.rev++
+	rec := c.s.createSnapshot(t, c.alice, c.rev, 1)
+	if rec.Code != http.StatusCreated {
+		t.Fatal(rec.Body.String())
+	}
+	s1 := decode[snapEnv](t, rec).Snapshot.ID
+	// 해제할 캘린더의 Busy를 담은 page
+	if rec := c.s.putPage(t, c.alice, s1, 0, []fact{mkFact(9, 3, 9)}); rec.Code != http.StatusOK {
+		t.Fatal(rec.Body.String())
+	}
+	c.put(`{"sources":[{"key":"cal-2","enabled":true}]}`)
+	if st := c.s.connection(t, c.alice).Status; st != "selecting" {
+		t.Fatalf("status = %s, want selecting", st)
+	}
+	if st := c.sessionStatus(s1); st != "aborted" {
+		t.Fatalf("S1 = %s, want aborted", st)
+	}
+	if n := count(t, c.s.pool, `SELECT count(*) FROM calendar_snapshot_facts_staging WHERE session_id = $1`, s1); n != 0 {
+		t.Fatalf("S1 staging = %d", n)
+	}
+	c.expect("source 변경", 0, false)
+	if rec := c.s.complete(t, c.alice, s1, 1); rec.Code != http.StatusConflict {
+		t.Fatalf("S1 complete = %d: %s", rec.Code, rec.Body.String())
+	}
+	c.expect("S1 complete 거부 뒤", 0, false)
+	c.resync(true)
+}
+
+// migration 00017 backfill로 플래그만 false가 되고 projection이 남은 연결도 비노출 상태로 가면 즉시 비노출된다.
+func TestHidingTransitionCleansBackfilledProjections(t *testing.T) {
+	c := newFlagCase(t)
+	if _, err := c.s.pool.Exec(context.Background(),
+		`UPDATE calendar_connections SET source_status = 'error', active_generation_usable = false WHERE user_id = $1`, c.alice.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if n := c.s.projections(t, c.p.ID, c.alice.UserID); n != 2 {
+		t.Fatalf("사전 조건: backfill 뒤 남은 projection = %d", n)
+	}
+	c.put(`{"status":"revoked"}`)
+	c.expect("backfill 뒤 철회", 0, false)
+}
+
+// disabled 항목의 추가는 읽는 캘린더를 바꾸지 않으므로 source 변경이 아니다.
+func TestDisabledSourceEntryIsNotASourceChange(t *testing.T) {
+	c := newFlagCase(t)
+	c.put(`{"sources":[{"key":"cal-1","enabled":true},{"key":"cal-x","enabled":false}]}`)
+	c.expect("disabled 항목 추가", 2, true)
+	c.put(`{"sources":[{"key":"cal-1","enabled":false},{"key":"cal-x","enabled":true}]}`)
+	c.expect("enabled 집합 변경", 0, false)
+}
+
+// sync 기기를 다른 기기가 가져가면 이전 기기의 열린 session은 폐기된다.
+func TestSyncDeviceClaimAbortsPreviousDeviceSession(t *testing.T) {
+	c := newFlagCase(t)
+	c.rev++
+	rec := c.s.createSnapshot(t, c.alice, c.rev, 1)
+	if rec.Code != http.StatusCreated {
+		t.Fatal(rec.Body.String())
+	}
+	s1 := decode[snapEnv](t, rec).Snapshot.ID
+	if rec := c.s.putPage(t, c.alice, s1, 0, []fact{mkFact(9, 3, 9)}); rec.Code != http.StatusOK {
+		t.Fatal(rec.Body.String())
+	}
+	second := c.s.signInSameUser(t, c.alice)
+	conn := c.s.connection(t, second)
+	if rec := c.s.mut(t, http.MethodPut, "/v1/calendar/connection", second.AccessToken, `{"claim_sync_device":true}`, itoa(conn.Version)); rec.Code != http.StatusOK {
+		t.Fatal(rec.Body.String())
+	}
+	if st := c.sessionStatus(s1); st != "aborted" {
+		t.Fatalf("이전 기기 session = %s, want aborted", st)
+	}
+	if n := count(t, c.s.pool, `SELECT count(*) FROM calendar_snapshot_facts_staging WHERE session_id = $1`, s1); n != 0 {
+		t.Fatalf("이전 기기 staging = %d", n)
+	}
+	// 정상 기기 전환: syncing이고 마지막 정상 projection은 유지된다.
+	if st := c.s.connection(t, second).Status; st != "syncing" {
+		t.Fatalf("status = %s", st)
+	}
+	c.expect("기기 전환", 2, false)
+}

@@ -230,7 +230,8 @@ func (h *Handler) putConnection(w http.ResponseWriter, r *http.Request) {
 			}
 			newStatus = *req.Status
 		}
-		if req.ClaimSyncDevice && (syncDev == nil || *syncDev != p.DeviceID) {
+		deviceChanged := req.ClaimSyncDevice && (syncDev == nil || *syncDev != p.DeviceID)
+		if deviceChanged {
 			// 기기를 바꾸면 새 기기의 full snapshot이 끝날 때까지 syncing이다(설계 3 §7.1). 마지막
 			// 정상 데이터는 유지한다.
 			if err := tx.QueryRow(ctx, `SELECT true FROM devices WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`, p.DeviceID, p.UserID).Scan(new(bool)); err != nil {
@@ -245,12 +246,25 @@ func (h *Handler) putConnection(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// sourcesChanged는 아래에서 정해지므로 newVisible은 그 뒤에 계산한다.
+		sourcesChanged := false
+		if req.Sources != nil {
+			if sourcesChanged, err = sourcesDiffer(ctx, tx, id, *req.Sources); err != nil {
+				return mutation.Result{}, err
+			}
+		}
+		// 업로드 중(syncing)에 source 선택이 바뀌면 열린 session은 이전 source로 모은 것이라 버리고, abort 규칙
+		// (쓸 수 있는 generation이 없으면 selecting)과 같게 selecting으로 돌린다. 아래에서 플래그도 내려간다.
+		if sourcesChanged && newStatus == "syncing" {
+			newStatus = "selecting"
+		}
+
 		oldVisible := visible(status, gen, usable)
 
-		// 진행 중이던 snapshot은 상태가 syncing을 벗어나면 이어갈 수 없다. 열린 session을 폐기해 늦은
-		// complete가 철회·거부된 연결을 되살리지 못하게 한다(complete도 상태를 다시 확인한다).
-		if status == "syncing" && newStatus != "syncing" {
+		// 열린 snapshot session을 폐기하는 경우:
+		//   - 상태가 syncing을 벗어난다(늦은 complete가 철회·거부된 연결을 되살리지 못하게, complete도 상태를 다시 확인한다)
+		//   - source 선택이 바뀐다(이전 source로 모은 session의 complete가 플래그를 다시 올려 해제한 캘린더를 노출하지 않게)
+		//   - sync 기기가 바뀐다(이전 기기의 session은 더 이어갈 수 없다)
+		if (status == "syncing" && newStatus != "syncing") || sourcesChanged || deviceChanged {
 			if _, err := tx.Exec(ctx, `DELETE FROM calendar_snapshot_facts_staging WHERE session_id IN (SELECT id FROM calendar_snapshot_sessions WHERE connection_id = $1 AND status = 'open')`, id); err != nil {
 				return mutation.Result{}, err
 			}
@@ -262,11 +276,7 @@ func (h *Handler) putConnection(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		sourcesChanged := false
 		if req.Sources != nil {
-			if sourcesChanged, err = sourcesDiffer(ctx, tx, id, *req.Sources); err != nil {
-				return mutation.Result{}, err
-			}
 			if _, err := tx.Exec(ctx, `DELETE FROM calendar_source_selections WHERE connection_id = $1`, id); err != nil {
 				return mutation.Result{}, err
 			}
@@ -315,8 +325,9 @@ func (h *Handler) putConnection(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 보이던 projection이 보이면 안 되는 상태가 되면 같은 트랜잭션에서 즉시 지우고 tombstone을
-		// 보낸다(설계 3 §12). facts는 7일 유예 동안 남는다.
-		if oldVisible != newVisible {
+		// 보낸다(설계 3 §12). facts는 7일 유예 동안 남는다. 비노출 상태·source 변경은 이전 판정과 상관없이
+		// 다시 맞춘다: migration 00017 backfill로 플래그만 false가 된 연결에 projection이 남아 있을 수 있다.
+		if oldVisible != newVisible || hidesProjections(newStatus) || sourcesChanged {
 			if err := party.RebuildBusyProjections(ctx, tx, p.UserID, nil, true); err != nil {
 				return mutation.Result{}, err
 			}
@@ -335,9 +346,10 @@ func (h *Handler) putConnection(w http.ResponseWriter, r *http.Request) {
 	httpapi.WriteJSON(w, out.StatusCode, connectionEnvelope{RequestID: httpapi.RequestID(r.Context()).String(), Connection: c})
 }
 
-// sourcesDiffer는 요청한 읽기 source 선택이 저장된 것과 다른지 본다(key와 enabled 집합).
+// sourcesDiffer는 요청한 읽기 source 중 enabled인 key 집합이 저장된 것과 다른지 본다. disabled 항목의
+// 추가·삭제는 읽는 캘린더를 바꾸지 않으므로 변경이 아니다.
 func sourcesDiffer(ctx context.Context, tx *mutation.Tx, connID uuid.UUID, next []sourceJSON) (bool, error) {
-	rows, err := tx.Query(ctx, `SELECT source_key, enabled FROM calendar_source_selections WHERE connection_id = $1`, connID)
+	rows, err := tx.Query(ctx, `SELECT source_key FROM calendar_source_selections WHERE connection_id = $1 AND enabled`, connID)
 	if err != nil {
 		return false, err
 	}
@@ -345,24 +357,25 @@ func sourcesDiffer(ctx context.Context, tx *mutation.Tx, connID uuid.UUID, next 
 	current := map[string]bool{}
 	for rows.Next() {
 		var k string
-		var e bool
-		if err := rows.Scan(&k, &e); err != nil {
+		if err := rows.Scan(&k); err != nil {
 			return false, err
 		}
-		current[k] = e
+		current[k] = true
 	}
 	if err := rows.Err(); err != nil {
 		return false, err
 	}
-	if len(current) != len(next) {
-		return true, nil
-	}
+	enabled := 0
 	for _, s := range next {
-		if e, ok := current[s.Key]; !ok || e != s.Enabled {
+		if !s.Enabled {
+			continue
+		}
+		enabled++
+		if !current[s.Key] {
 			return true, nil
 		}
 	}
-	return false, nil
+	return enabled != len(current), nil
 }
 
 // visible은 party.RebuildBusyProjections의 가시성 판정과 같아야 한다: 노출 상태 AND active generation 사용 가능.
