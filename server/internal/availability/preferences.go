@@ -215,8 +215,14 @@ func (h *Handler) putPreferences(w http.ResponseWriter, r *http.Request) {
 		}
 		// 같은 사용자의 PUT은 이 row 잠금으로 직렬화된다. 동시 create-only는 위 INSERT의 unique
 		// 대기 뒤 새 문장 snapshot에서 상대가 만든 row를 본다.
-		if _, err := tx.Exec(ctx, `SELECT 1 FROM availability_preferences WHERE user_id = $1 FOR NO KEY UPDATE`, p.UserID); err != nil {
+		tag, err := tx.Exec(ctx, `SELECT 1 FROM availability_preferences WHERE user_id = $1 FOR NO KEY UPDATE`, p.UserID)
+		if err != nil {
 			return mutation.Result{}, err
+		}
+		if tag.RowsAffected() == 0 {
+			// 잠글 row가 없었다(If-Match인데 설정 없음). 잠금 없이 다음 문장을 읽으면 그 사이 커밋된 create를
+			// 보고 version 검사를 통과한 뒤 다른 교체를 덮어쓸 수 있다. 낡은 version으로 처리한다(현재 0).
+			return mutation.Result{}, &mutation.VersionConflictError{Current: 0}
 		}
 		// 잠금 뒤의 새 문장이라 마지막 커밋 상태를 본다. 다른 쓰기는 이 row 잠금을 기다린다.
 		current, err := loadOne(ctx, tx, p.UserID)
