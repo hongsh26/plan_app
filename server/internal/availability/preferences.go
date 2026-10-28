@@ -68,6 +68,8 @@ type Handler struct {
 	limiter   ratelimit.Allower
 	versioner *Versioner
 	cache     *resultCache
+	// searchTimeout은 검색 기한이다. 테스트가 줄일 수 있게 필드로 둔다.
+	searchTimeout time.Duration
 }
 
 type Deps struct {
@@ -91,7 +93,7 @@ func NewHandler(d Deps) (*Handler, error) {
 		return nil, err
 	}
 	return &Handler{pool: d.Pool, logger: d.Logger, now: d.Now, limiter: d.Limiter, versioner: v,
-		cache: newResultCache(searchCacheSize)}, nil
+		cache: newResultCache(searchCacheSize), searchTimeout: searchTimeout}, nil
 }
 
 // Versioner는 설계 7이 VerifyCalculationVersion을 부를 때 쓴다.

@@ -261,7 +261,11 @@ func (h *Handler) putConnection(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		sourcesChanged := false
 		if req.Sources != nil {
+			if sourcesChanged, err = sourcesDiffer(ctx, tx, id, *req.Sources); err != nil {
+				return mutation.Result{}, err
+			}
 			if _, err := tx.Exec(ctx, `DELETE FROM calendar_source_selections WHERE connection_id = $1`, id); err != nil {
 				return mutation.Result{}, err
 			}
@@ -296,9 +300,12 @@ func (h *Handler) putConnection(w http.ResponseWriter, r *http.Request) {
 			       time_zone = COALESCE($4, time_zone),
 			       last_completed_sync_at = CASE WHEN $2 = 'disconnected' THEN NULL ELSE last_completed_sync_at END,
 			       revoked_at = CASE WHEN $5::timestamptz IS NOT NULL THEN COALESCE(revoked_at, $5) ELSE NULL END,
+			       -- ready·syncing 밖으로 가거나 source 선택이 바뀌면 active generation을 계산에 쓰지 않는다.
+			       -- 다시 true가 되는 길은 snapshot complete뿐이다(migration 00017).
+			       active_generation_usable = active_generation_usable AND $2 IN ('ready', 'syncing') AND NOT $6::boolean,
 			       version = version + 1, updated_at = now()
 			 WHERE id = $1
-			RETURNING version`, id, newStatus, syncDev, tz, revokedAt).Scan(&newVersion); err != nil {
+			RETURNING version`, id, newStatus, syncDev, tz, revokedAt, sourcesChanged).Scan(&newVersion); err != nil {
 			return mutation.Result{}, err
 		}
 
@@ -321,6 +328,36 @@ func (h *Handler) putConnection(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	httpapi.WriteJSON(w, out.StatusCode, connectionEnvelope{RequestID: httpapi.RequestID(r.Context()).String(), Connection: c})
+}
+
+// sourcesDiffer는 요청한 읽기 source 선택이 저장된 것과 다른지 본다(key와 enabled 집합).
+func sourcesDiffer(ctx context.Context, tx *mutation.Tx, connID uuid.UUID, next []sourceJSON) (bool, error) {
+	rows, err := tx.Query(ctx, `SELECT source_key, enabled FROM calendar_source_selections WHERE connection_id = $1`, connID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	current := map[string]bool{}
+	for rows.Next() {
+		var k string
+		var e bool
+		if err := rows.Scan(&k, &e); err != nil {
+			return false, err
+		}
+		current[k] = e
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	if len(current) != len(next) {
+		return true, nil
+	}
+	for _, s := range next {
+		if e, ok := current[s.Key]; !ok || e != s.Enabled {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func visible(status string, gen int64) bool {

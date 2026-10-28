@@ -22,6 +22,7 @@ import (
 
 	"plantogether/server/internal/auth"
 	"plantogether/server/internal/availability/engine"
+	"plantogether/server/internal/calendar"
 	"plantogether/server/internal/party"
 	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/httpapi"
@@ -107,6 +108,7 @@ func newStack(t *testing.T, limited bool) *stack {
 	}
 	avail.Register(mux, authHandler.Require)
 	party.NewHandler(party.Deps{Pool: pool, Logger: logger}).Register(mux, authHandler.Require)
+	calendar.NewHandler(calendar.Deps{Pool: pool, Logger: logger, SecretBox: box}).Register(mux, authHandler.Require)
 	syncfeed.NewHandler(syncfeed.Deps{Pool: pool, Logger: logger, RefKeyBox: box}).Register(mux, authHandler.Require)
 	return &stack{handler: httpapi.Wrap(logger, mux), pool: pool, logs: &logs, avail: avail, clock: clock}
 }

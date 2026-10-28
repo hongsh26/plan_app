@@ -21,8 +21,10 @@ import (
 )
 
 const (
-	defaultSearchDays   = 14
-	maxSearchDays       = 31
+	defaultSearchDays = 14
+	maxSearchDays     = 31
+	// snapshotHorizonDays: end_date는 오늘+89일까지다. 멤버 window는 멤버 시간대·마지막 sync 기준의 90일이라
+	// 요청 시간대 +90일은 시간대 차이로 흔히 window 밖이 된다.
 	snapshotHorizonDays = 90
 	defaultDuration     = 60
 	minDuration         = 30
@@ -34,6 +36,8 @@ const (
 	searchTimeout = 3 * time.Second
 	// searchCacheSize는 프로세스당 캐시 항목 상한이다. 항목은 슬롯 20개 이하라 작다.
 	searchCacheSize = 1024
+	// statusClientClosed는 클라이언트가 요청을 취소했을 때의 로그용 status다(nginx 관례 499).
+	statusClientClosed = 499
 )
 
 type searchRequest struct {
@@ -98,7 +102,7 @@ func parseSearchRequest(req searchRequest, now time.Time) (SearchParams, *time.L
 		p.DurationMinutes < minDuration, p.DurationMinutes > maxDuration, p.DurationMinutes%slotMinutes != 0,
 		p.MaxResults < 1, p.MaxResults > maxMaxResults:
 		return SearchParams{}, nil, httpapi.CodeInvalidRequest, errBadSearchInput
-	case p.StartDate.AddDays(maxSearchDays - 1).Before(p.EndDate), today.AddDays(snapshotHorizonDays).Before(p.EndDate):
+	case p.StartDate.AddDays(maxSearchDays - 1).Before(p.EndDate), today.AddDays(snapshotHorizonDays - 1).Before(p.EndDate):
 		return SearchParams{}, nil, CodeRangeInvalid, errBadSearchInput
 	}
 	return p, loc, "", nil
@@ -145,7 +149,7 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), searchTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), h.searchTimeout)
 	defer cancel()
 	ep := engine.Params{
 		StartDate: params.StartDate, EndDate: params.EndDate, Duration: time.Duration(params.DurationMinutes) * time.Minute,
@@ -159,8 +163,9 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 캐시 key는 매 요청 새로 읽은 snapshot에서 만든다. snapshot을 건너뛰지 않으므로 correctness는 캐시에
-	// 의존하지 않는다. 캐시는 엔진 계산만 아낀다. 가장 이른 시작 grid가 다르면(lead time 경계를 지남) 다른 key다.
-	ck := cacheKey{party: partyID, tuple: sha256.Sum256(snap.state.canonical), earliest: engine.EarliestStart(ep).UnixNano()}
+	// 의존하지 않는다. 캐시는 엔진 계산만 아낀다. 결과는 now에 첫 grid 시작으로만 의존하므로 그 값을 key에 넣는다
+	// (lead time 경계를 지나면 다른 key, 같은 grid 칸 안의 재검색은 hit).
+	ck := cacheKey{party: partyID, tuple: sha256.Sum256(snap.state.canonical), earliest: engine.FirstGridStart(ep).UnixNano()}
 	res, ok := h.cache.get(ck, now)
 	if ok {
 		cacheHit = true
@@ -211,12 +216,17 @@ func computeWithDeadline(ctx context.Context, members []engine.Member, p engine.
 }
 
 func (h *Handler) enforceSearchLimit(w http.ResponseWriter, r *http.Request, userID uuid.UUID, rawPartyID string) bool {
+	// subject는 정규화한 UUID다. 파싱할 수 없는 값은 고정 subject 하나로 모아 임의 문자열로 bucket을 늘리지 못하게 한다.
+	party := "invalid"
+	if id, err := uuid.Parse(rawPartyID); err == nil {
+		party = id.String()
+	}
 	d, ok := ratelimit.Enforce(w, r, h.limiter, ratelimit.ModeClosed,
 		ratelimit.Rule{
 			Scope:   ratelimit.ScopeAvailabilitySearch,
 			Limit:   ratelimit.LimitAvailabilitySearch.Count,
 			Window:  ratelimit.LimitAvailabilitySearch.Window,
-			Subject: "user:" + userID.String() + ":party:" + rawPartyID,
+			Subject: "user:" + userID.String() + ":party:" + party,
 		},
 		ratelimit.UserRule(ratelimit.ScopeAvailabilitySearchAll, ratelimit.LimitAvailabilitySearchAll, userID))
 	if !ok {
@@ -263,6 +273,11 @@ func (h *Handler) writeSearchError(w http.ResponseWriter, r *http.Request, err e
 	case errors.Is(err, errChangedRetry):
 		httpapi.WriteError(w, r, http.StatusConflict, CodeChangedRetry, "검색 중 그룹 상태가 바뀌었다. 다시 검색해야 한다")
 		return CodeChangedRetry
+	case errors.Is(err, context.Canceled):
+		// 클라이언트가 먼저 끊었다. 받을 사람이 없으므로 본문 없이 499로 남기고 오류 로그를 쓰지 않는다
+		// (검색 지표 로그의 result_code=canceled로만 집계).
+		w.WriteHeader(statusClientClosed)
+		return "canceled"
 	case errors.Is(err, context.DeadlineExceeded):
 		w.Header().Set("Retry-After", "1")
 		httpapi.WriteError(w, r, http.StatusServiceUnavailable, CodeUnavailable, "가능 시간을 지금 계산할 수 없다. 잠시 후 다시 시도해야 한다")

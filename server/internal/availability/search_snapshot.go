@@ -101,6 +101,7 @@ type connRow struct {
 	status       string
 	lastSync     *time.Time
 	generation   int64
+	usable       bool // calendar_connections.active_generation_usable
 	windowStart  *time.Time
 	windowEnd    *time.Time
 }
@@ -188,7 +189,7 @@ func readSearchState(ctx context.Context, q Querier, partyID, callerID uuid.UUID
 	// active generation의 window는 그 generation을 만든 completed session에만 있다.
 	rows, err = q.Query(ctx, `
 		SELECT c.user_id, c.id, c.source_status, c.last_completed_sync_at, c.active_generation,
-		       s.window_start, s.window_end
+		       c.active_generation_usable, s.window_start, s.window_end
 		  FROM calendar_connections c
 		  LEFT JOIN LATERAL (
 		        SELECT window_start, window_end FROM calendar_snapshot_sessions
@@ -201,7 +202,7 @@ func readSearchState(ctx context.Context, q Querier, partyID, callerID uuid.UUID
 	for rows.Next() {
 		var uid uuid.UUID
 		var c connRow
-		if err := rows.Scan(&uid, &c.connectionID, &c.status, &c.lastSync, &c.generation, &c.windowStart, &c.windowEnd); err != nil {
+		if err := rows.Scan(&uid, &c.connectionID, &c.status, &c.lastSync, &c.generation, &c.usable, &c.windowStart, &c.windowEnd); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -263,20 +264,22 @@ func readSearchState(ctx context.Context, q Querier, partyID, callerID uuid.UUID
 // calendarState는 한 멤버의 캘린더 준비 상태다. stale은 저장하지 않고 now로 계산한다
 // (last_completed_sync_at + 6h > now이어야 fresh, calendar.FreshUsers와 같은 경계).
 //
-// 계산 가능(ready) 조건: source_status ∈ {ready, syncing} AND active_generation > 0 AND fresh AND active
-// generation의 window row가 있다. syncing은 재동기화 중에도 마지막 정상 generation을 유지하는 상태라(설계 3
-// §6, §9의 sync pending 목록에 없다) 그 generation으로 계산한다. 진행 중 업로드는 staging에만 있고 계산은
-// active generation facts만 읽으므로 섞이지 않는다. calendar.FreshUsers(ready만 인정)는 다른 소비자가 쓰므로
-// 바꾸지 않고 여기서 판정한다.
+// 계산 가능(ready) 조건: source_status ∈ {ready, syncing} AND active_generation_usable AND active_generation > 0
+// AND fresh AND active generation의 window row가 있다.
+//   - syncing은 재동기화 중에도 마지막 정상 generation을 유지하는 상태라(설계 3 §6, §9) 그 generation으로 계산한다.
+//   - active_generation_usable(migration 00017)은 calendar 계층이 관리한다. 철회·거부·오류·source 재선택·연결
+//     해제 등 ready·syncing 밖으로 가거나 source 선택이 바뀌면 false, snapshot complete에서만 true다. 그래서
+//     ready → revoked → selecting → syncing처럼 철회 전 generation이 "재동기화 중"으로 되살아나지 않는다.
+//   - 진행 중 업로드는 staging에만 있고 계산은 active generation facts만 읽으므로 섞이지 않는다.
+//   - calendar.FreshUsers(ready만 인정)는 다른 소비자가 쓰므로 바꾸지 않고 여기서 판정한다.
 //
-// self 표시: 계산 가능하면 syncing이어도 ready다(본인이 할 일이 없다). 쓸 수 있는 이전 generation이 없는
-// syncing(첫 연결, 또는 이전 generation이 stale·window 없음)은 syncing이다. ready인데 stale이거나 window row가
-// 없으면(session 24시간 정리, calendar.Prune) stale이다.
+// self 표시는 계산 가능 여부와 분리한다: 계산 가능하면 syncing이어도 ready(본인이 할 일이 없다). 계산할 수
+// 없는 syncing은 syncing(이미 동기화 중). ready인데 stale·window 없음·usable false면 stale(새 동기화 필요).
 func calendarState(c connRow, exists bool, now time.Time) string {
 	if !exists {
 		return SelfCalendarNotConnected
 	}
-	usable := c.generation > 0 && c.lastSync != nil && c.lastSync.Add(calendar.FreshnessWindow).After(now) &&
+	usable := c.usable && c.generation > 0 && c.lastSync != nil && c.lastSync.Add(calendar.FreshnessWindow).After(now) &&
 		c.windowStart != nil && c.windowEnd != nil
 	switch c.status {
 	case "ready":
@@ -398,7 +401,7 @@ func isSerializationFailure(err error) bool {
 //	party_id, party_version,
 //	membership: (user_id, membership_id, membership_version) user_id 오름차순,
 //	activity:   (user_id, preference version),
-//	calendar:   (user_id, connection_id, active_generation),
+//	calendar:   (user_id, connection_id, active_generation, active_generation_usable),
 //	fresh_until(UTC 마이크로초),
 //	params:     start_date, end_date, duration_minutes, time_zone, max_results
 //
@@ -428,6 +431,11 @@ func canonicalTuple(partyID uuid.UUID, partyVersion int64, st *searchState, p Se
 		b.Write(m.userID[:])
 		b.Write(c.connectionID[:])
 		putInt(c.generation)
+		if c.usable {
+			b.WriteByte(1)
+		} else {
+			b.WriteByte(0)
+		}
 	}
 	putInt(st.freshUntil.UTC().UnixMicro())
 	putStr(dateString(p.StartDate))
@@ -485,7 +493,9 @@ func (v *Versioner) mac(canonical, tail []byte) []byte {
 //   - 비멤버·없는 Party: 검색과 같은 not-found 오류(errSearchNotFound, IsNotFound로 판별)
 //   - tuple 불일치, 만료, 형식 오류, 준비 미완료·범위 미포함: ErrResultStale(→ 409 availability_result_stale)
 //
-// q는 호출자 트랜잭션이어도 된다. facts는 읽지 않는다.
+// q는 여러 문장(Party·멤버십·활동 시간·연결)을 한 시점으로 읽어야 하므로 REPEATABLE READ(이상) 트랜잭션이어야
+// 한다. READ COMMITTED 트랜잭션이나 pool을 넘기면 문장 사이 변경이 섞인 tuple을 볼 수 있다. 자기 트랜잭션이
+// 없으면 VerifyCalculationVersionTx를 쓴다. facts는 읽지 않는다.
 func (v *Versioner) VerifyCalculationVersion(ctx context.Context, q Querier, partyID, callerID uuid.UUID, p SearchParams, version string, now time.Time) error {
 	raw, err := base64.RawURLEncoding.DecodeString(version)
 	if err != nil || len(raw) != 1+8+sha256.Size || raw[0] != versionFormat {
@@ -513,6 +523,19 @@ func (v *Versioner) VerifyCalculationVersion(ctx context.Context, q Querier, par
 		return ErrResultStale
 	}
 	return nil
+}
+
+// VerifyCalculationVersionTx는 REPEATABLE READ READ ONLY 트랜잭션을 열어 VerifyCalculationVersion을 부른다.
+func (v *Versioner) VerifyCalculationVersionTx(ctx context.Context, pool *pgxpool.Pool, partyID, callerID uuid.UUID, p SearchParams, version string, now time.Time) error {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := v.VerifyCalculationVersion(ctx, tx, partyID, callerID, p, version, now); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // IsNotFound는 VerifyCalculationVersion의 not-found 오류인지 판별한다.

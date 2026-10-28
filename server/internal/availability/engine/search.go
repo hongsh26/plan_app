@@ -95,6 +95,21 @@ func EarliestStart(p Params) time.Time {
 	return maxTime(p.Now.Add(leadTime), RequestEnvelope(p.StartDate, p.EndDate, p.Location).Start).UTC()
 }
 
+// FirstGridStart는 EarliestStart 이상인 첫 grid 시각이다. 없으면 zero다. 결과는 now에 이 값으로만 의존하므로
+// 같은 값이면 같은 결과다(검색 캐시 key).
+func FirstGridStart(p Params) time.Time {
+	if p.Location == nil || p.EndDate.Before(p.StartDate) {
+		return time.Time{}
+	}
+	earliest := EarliestStart(p)
+	for _, s := range gridStarts(p.StartDate, p.EndDate, p.Location) {
+		if !s.Before(earliest) {
+			return s
+		}
+	}
+	return time.Time{}
+}
+
 // GenerateSlots는 공통 free interval 안에 완전히 들어가는 grid 슬롯을 시작 오름차순으로 반환한다.
 // 시작은 EarliestStart 이상인 grid 시각이고, 종료(시작 + Duration)는 요청 envelope 끝을 넘지 않는다.
 func GenerateSlots(common []Interval, p Params) []Interval {

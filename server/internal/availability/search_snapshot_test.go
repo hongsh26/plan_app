@@ -133,13 +133,15 @@ func defaultWindow() (time.Time, time.Time) {
 }
 
 // seedCalendar는 ready 연결, generation 1의 completed session(window), Busy facts를 직접 만든다.
+// snapshot complete를 거친 상태와 같게 active_generation_usable도 true다. 상태 전이 자체를 보는 테스트는
+// 실제 calendar API를 쓴다(search_calendar_test.go).
 func (s *stack) seedCalendar(t *testing.T, userID string, lastSync, winStart, winEnd time.Time, busy ...engine.Interval) uuid.UUID {
 	t.Helper()
 	ctx := context.Background()
 	connID := uuid.New()
 	if _, err := s.pool.Exec(ctx, `
-		INSERT INTO calendar_connections (id, user_id, source_status, active_generation, last_completed_sync_at, time_zone, last_snapshot_revision)
-		VALUES ($1, $2, 'ready', 1, $3, 'Asia/Seoul', 1)`, connID, userID, lastSync); err != nil {
+		INSERT INTO calendar_connections (id, user_id, source_status, active_generation, active_generation_usable, last_completed_sync_at, time_zone, last_snapshot_revision)
+		VALUES ($1, $2, 'ready', 1, true, $3, 'Asia/Seoul', 1)`, connID, userID, lastSync); err != nil {
 		t.Fatal(err)
 	}
 	s.addGeneration(t, connID, userID, 1, winStart, winEnd, busy...)
@@ -166,7 +168,7 @@ func (s *stack) addGeneration(t *testing.T, connID uuid.UUID, userID string, gen
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.pool.Exec(ctx, `UPDATE calendar_connections SET active_generation = $2, last_snapshot_revision = $2 WHERE id = $1`, connID, gen); err != nil {
+	if _, err := s.pool.Exec(ctx, `UPDATE calendar_connections SET active_generation = $2, active_generation_usable = true, last_snapshot_revision = $2 WHERE id = $1`, connID, gen); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -519,7 +519,7 @@ func (h *Handler) completeSnapshot(w http.ResponseWriter, r *http.Request) {
 		if _, err := tx.Exec(ctx, `
 			UPDATE calendar_connections
 			   SET source_status = 'ready', active_generation = $2, last_completed_sync_at = now(),
-			       revoked_at = NULL, version = version + 1, updated_at = now()
+			       active_generation_usable = true, revoked_at = NULL, version = version + 1, updated_at = now()
 			 WHERE id = $1`, connID, newGen); err != nil {
 			return mutation.Result{}, err
 		}

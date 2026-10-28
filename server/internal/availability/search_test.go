@@ -354,7 +354,7 @@ func TestSearchInputValidation(t *testing.T) {
 		`{"time_zone":"Asia/Seoul"}`,
 		fmt.Sprintf(`{"start_date":%q,"time_zone":"Asia/Seoul"}`, ds(2)),
 		fmt.Sprintf(`{"start_date":%q,"end_date":%q,"time_zone":"Asia/Seoul"}`, ds(1), ds(31)),
-		fmt.Sprintf(`{"start_date":%q,"end_date":%q,"time_zone":"Asia/Seoul"}`, ds(80), ds(90)),
+		fmt.Sprintf(`{"start_date":%q,"end_date":%q,"time_zone":"Asia/Seoul"}`, ds(79), ds(89)),
 		`{"time_zone":"Asia/Seoul","duration_minutes":30,"max_results":1}`,
 		`{"time_zone":"Asia/Seoul","duration_minutes":480,"max_results":20}`,
 	}
@@ -387,8 +387,8 @@ func TestSearchInputValidation(t *testing.T) {
 		{`not json`, httpapi.CodeInvalidRequest},
 		{``, httpapi.CodeInvalidRequest},
 		{fmt.Sprintf(`{"start_date":%q,"end_date":%q,"time_zone":"Asia/Seoul"}`, ds(1), ds(32)), CodeRangeInvalid},
-		{fmt.Sprintf(`{"start_date":%q,"end_date":%q,"time_zone":"Asia/Seoul"}`, ds(85), ds(91)), CodeRangeInvalid},
-		{fmt.Sprintf(`{"start_date":%q,"time_zone":"Asia/Seoul"}`, ds(91)), CodeRangeInvalid},
+		{fmt.Sprintf(`{"start_date":%q,"end_date":%q,"time_zone":"Asia/Seoul"}`, ds(85), ds(90)), CodeRangeInvalid},
+		{fmt.Sprintf(`{"start_date":%q,"time_zone":"Asia/Seoul"}`, ds(90)), CodeRangeInvalid},
 	}
 	for _, c := range bad {
 		assertError(t, s.search(t, a, p.ID, c.body), http.StatusBadRequest, c.code)
@@ -772,7 +772,7 @@ func TestSearchDuringResyncUsesActiveGeneration(t *testing.T) {
 		  SELECT $1, source_event_key, $3, 2, start_at, end_at, all_day, time_zone, availability
 		    FROM calendar_snapshot_facts_staging WHERE session_id = $2`, []any{connB, sessionID, b.UserID}},
 		{`UPDATE calendar_snapshot_sessions SET status = 'completed', generation = 2, fact_count = 1, completed_at = now() WHERE id = $1`, []any{sessionID}},
-		{`UPDATE calendar_connections SET source_status = 'ready', active_generation = 2, last_completed_sync_at = now() WHERE id = $1`, []any{connB}},
+		{`UPDATE calendar_connections SET source_status = 'ready', active_generation = 2, active_generation_usable = true, last_completed_sync_at = now() WHERE id = $1`, []any{connB}},
 	} {
 		if _, err := s.pool.Exec(ctx, q.sql, q.args...); err != nil {
 			t.Fatal(err)
