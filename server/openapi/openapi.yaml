@@ -676,6 +676,81 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
 
+  /v1/availability/preferences/me:
+    get:
+      summary: 내 활동 시간 조회
+      description: |
+        본인 주간 활동 규칙·시간대·version만 반환한다. 다른 사용자 규칙을 조회하는 endpoint는 없다.
+        설정한 적이 없으면 status unconfigured, version 0, time_zone null, 빈 weekly_intervals이고
+        ETag 헤더가 없다. 첫 저장은 If-Match 없이(create-only) 보낸다.
+      operationId: getMyAvailabilityPreferences
+      tags: [availability]
+      responses:
+        "200":
+          description: 본인 설정. configured이면 ETag는 설정 version이다.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AvailabilityPreferencesEnvelope"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    put:
+      summary: 내 활동 시간 전체 교체
+      description: |
+        주간 규칙 전체를 원자적으로 교체한다(docs/availability_search_design.md §3.2).
+
+        - If-Match가 없으면 create-only다. 이미 설정이 있으면 409 version_conflict(current_version 포함).
+        - If-Match가 있으면 그 version일 때만 교체한다. 설정이 없으면 409 version_conflict(current_version 0).
+        - 시작·종료는 time_zone 기준 지역 시각의 분이며 30분 배수, 한 구간은 30분 이상 24시간 이하다.
+        - **자정을 넘는 구간은 end_minute를 1440보다 크게(최대 2880) 보낸다.** 예: 월 22:00~02:00 =
+          {weekday: 1, start_minute: 1320, end_minute: 1560}. 서버는 시작 요일의 자정 전 구간과 다음
+          요일(일요일 7 → 월요일 1)의 자정 후 구간으로 나눠 저장하므로 응답에는 두 구간으로 돌아온다.
+        - 나눈 뒤 같은 요일 구간이 겹치면(중복 포함) 400 invalid_request다. 맞닿은 구간은 병합한다.
+        - 병합 뒤 요일별 3개 초과, 한 주 전체 0개, 입력 336개 초과는 400 invalid_request다.
+        - time_zone은 "Area/City" 형식의 IANA ID여야 한다. UTC, GMT, Etc/*, 고정 offset("UTC+09:00"),
+          Local은 거부한다.
+
+        정규화 결과가 현재 설정과 같으면 version을 올리지 않는다. 바뀌면 version이 1 오르고 본인에게만
+        availability_preference sync 변경(payload: status, version, updated_at)이 간다. sync payload에는
+        구간과 time_zone이 없으므로 클라이언트는 이 변경을 받으면 GET으로 다시 읽는다.
+      operationId: replaceMyAvailabilityPreferences
+      tags: [availability]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: If-Match
+          in: header
+          required: false
+          description: 교체할 현재 version(강한 ETag, 예 "3"). 첫 저장에는 보내지 않는다.
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AvailabilityPreferencesRequest"
+      responses:
+        "200":
+          description: 저장된 정규형 설정.
+          headers:
+            Idempotent-Replayed:
+              $ref: "#/components/headers/IdempotentReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AvailabilityPreferencesEnvelope"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/InvalidSession"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
 components:
   parameters:
     IdempotencyKey:
@@ -786,6 +861,67 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
 
   schemas:
+    AvailabilityIntervalInput:
+      type: object
+      required: [weekday, start_minute, end_minute]
+      additionalProperties: false
+      properties:
+        weekday: {type: integer, minimum: 1, maximum: 7, description: "ISO 요일. 1=월요일, 7=일요일"}
+        start_minute: {type: integer, minimum: 0, maximum: 1410, multipleOf: 30}
+        end_minute:
+          type: integer
+          minimum: 30
+          maximum: 2880
+          multipleOf: 30
+          description: 1440 초과는 자정을 넘어 다음 요일로 이어지는 구간이다. end_minute - start_minute는 30~1440.
+
+    AvailabilityInterval:
+      type: object
+      required: [weekday, start_minute, end_minute]
+      additionalProperties: false
+      properties:
+        weekday: {type: integer, minimum: 1, maximum: 7}
+        start_minute: {type: integer, minimum: 0, maximum: 1410, multipleOf: 30}
+        end_minute: {type: integer, minimum: 30, maximum: 1440, multipleOf: 30}
+
+    AvailabilityPreferencesRequest:
+      type: object
+      required: [time_zone, weekly_intervals]
+      additionalProperties: false
+      properties:
+        time_zone: {type: string, maxLength: 64, examples: ["Asia/Seoul"]}
+        weekly_intervals:
+          type: array
+          minItems: 1
+          maxItems: 336
+          items:
+            $ref: "#/components/schemas/AvailabilityIntervalInput"
+
+    AvailabilityPreferences:
+      type: object
+      required: [status, time_zone, version, weekly_intervals, updated_at]
+      additionalProperties: false
+      properties:
+        status: {type: string, enum: [unconfigured, configured]}
+        time_zone: {type: [string, "null"], description: unconfigured이면 null}
+        version: {type: integer, format: int64, minimum: 0, description: unconfigured이면 0}
+        weekly_intervals:
+          type: array
+          maxItems: 21
+          description: 정규형. 요일, 시작 순으로 정렬돼 있고 요일별 최대 3개이며 서로 겹치거나 맞닿지 않는다.
+          items:
+            $ref: "#/components/schemas/AvailabilityInterval"
+        updated_at: {type: [string, "null"], format: date-time}
+
+    AvailabilityPreferencesEnvelope:
+      type: object
+      required: [request_id, preferences]
+      additionalProperties: false
+      properties:
+        request_id: {type: string, format: uuid}
+        preferences:
+          $ref: "#/components/schemas/AvailabilityPreferences"
+
     CreateCalendarSnapshotRequest:
       type: object
       required: [revision, window_start, window_end, expected_pages]
@@ -1115,7 +1251,7 @@ components:
       required: [entity_type, entity_id, operation, version, payload]
       additionalProperties: false
       properties:
-        entity_type: {type: string, description: "user, device, 이후 도메인이 더한다"}
+        entity_type: {type: string, description: "user, device, availability_preference(본인 전용 무효화) 등. 이후 도메인이 더한다"}
         entity_id: {type: string, format: uuid}
         operation: {type: string, enum: [upsert, tombstone]}
         version:

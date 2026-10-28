@@ -20,6 +20,10 @@ const (
 	ScopeCalendarSnapshot      = "calendar.snapshot"
 	ScopeCalendarPage          = "calendar.page"
 	ScopePartyVisibilityUpdate = "party.visibility.update"
+	ScopeAvailabilityPrefRead  = "availability.preferences.read"
+	ScopeAvailabilityPrefWrite = "availability.preferences.write"
+	ScopeAvailabilitySearch    = "availability.search"
+	ScopeAvailabilitySearchAll = "availability.search.user"
 	ScopeAuditAuthFailure      = "audit.auth_failure"
 	ScopeAuditAuthFailureAll   = "audit.auth_failure.global"
 )
@@ -35,6 +39,10 @@ var (
 	LimitCalendarSnapshot      = Limit{Count: 10, Window: time.Minute}       // snapshot 생성, 사용자당 (잠정)
 	LimitCalendarPage          = Limit{Count: 300, Window: time.Minute}      // page 업로드, 사용자당 (잠정)
 	LimitPartyVisibilityUpdate = Limit{Count: 10, Window: time.Minute}       // 사용자·Party당
+	LimitAvailabilityPrefRead  = Limit{Count: 60, Window: time.Minute}       // 활동 시간 조회, 사용자당 (잠정)
+	LimitAvailabilityPrefWrite = Limit{Count: 10, Window: time.Minute}       // 활동 시간 교체, 사용자당 (잠정)
+	LimitAvailabilitySearch    = Limit{Count: 20, Window: time.Minute}       // 가능 시간 검색, 사용자·Party당 (availability_search_design.md §7.2)
+	LimitAvailabilitySearchAll = Limit{Count: 60, Window: time.Minute}       // 가능 시간 검색, 사용자당 (§7.2)
 	LimitAuditIP               = Limit{Count: 5, Window: 10 * time.Minute}   // 미인증 실패 audit, IP당
 	LimitAuditGlobal           = Limit{Count: 300, Window: 10 * time.Minute} // 미인증 실패 audit, 전역 (잠정)
 )
