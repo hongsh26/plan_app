@@ -16,10 +16,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plantogether/server/internal/auth"
+	"plantogether/server/internal/availability/engine"
 	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/httpapi"
 	"plantogether/server/internal/platform/mutation"
@@ -141,6 +143,15 @@ func (s *stack) put(t *testing.T, token, key, ifMatch, body string) *httptest.Re
 	rec := httptest.NewRecorder()
 	s.handler.ServeHTTP(rec, req)
 	return rec
+}
+
+// weekly는 (요일, 시작, 종료) 묶음으로 engine 구간을 만든다.
+func weekly(triples ...[3]int) []engine.WeeklyInterval {
+	out := make([]engine.WeeklyInterval, len(triples))
+	for i, t := range triples {
+		out[i] = engine.WeeklyInterval{Weekday: t[0], StartMinute: t[1], EndMinute: t[2]}
+	}
+	return out
 }
 
 func decode[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
@@ -317,12 +328,20 @@ func TestPutRejectsInvalidInput(t *testing.T) {
 		"빈 주":              body("Asia/Seoul"),
 		"필드 누락":            `{"time_zone":"Asia/Seoul","weekly_intervals":[{"weekday":1,"start_minute":540}]}`,
 		"모르는 필드":           `{"time_zone":"Asia/Seoul","weekly_intervals":[` + iv(1, 540, 600) + `],"extra":1}`,
-		"time zone 없음":     `{"weekly_intervals":[` + iv(1, 540, 600) + `]}`,
-		"고정 offset":        body("UTC+09:00", iv(1, 540, 600)),
-		"Etc/GMT-9":        body("Etc/GMT-9", iv(1, 540, 600)),
-		"UTC":              body("UTC", iv(1, 540, 600)),
-		"Local":            body("Local", iv(1, 540, 600)),
-		"없는 시간대":           body("Mars/Olympus", iv(1, 540, 600)),
+	}
+	// time zone 오류는 전용 code다. 클라이언트가 도시 선택 UI로 갈 수 있게 다른 입력 오류와 구분한다.
+	tzCases := map[string]string{
+		"time zone 없음": `{"weekly_intervals":[` + iv(1, 540, 600) + `]}`,
+		"고정 offset":    body("UTC+09:00", iv(1, 540, 600)),
+		"Etc/GMT-9":    body("Etc/GMT-9", iv(1, 540, 600)),
+		"etc/UTC":      body("etc/UTC", iv(1, 540, 600)),
+		"UTC":          body("UTC", iv(1, 540, 600)),
+		"GMT":          body("GMT", iv(1, 540, 600)),
+		"Local":        body("Local", iv(1, 540, 600)),
+		"소문자":          body("asia/seoul", iv(1, 540, 600)),
+		"대문자":          body("ASIA/SEOUL", iv(1, 540, 600)),
+		"빈 segment":    body("Asia//Seoul", iv(1, 540, 600)),
+		"없는 시간대":       body("Mars/Olympus", iv(1, 540, 600)),
 	}
 	i := 0
 	for name, b := range cases {
@@ -331,8 +350,22 @@ func TestPutRejectsInvalidInput(t *testing.T) {
 			assertError(t, s.put(t, u.AccessToken, "invalid-"+strconv.Itoa(i), "", b), http.StatusBadRequest, httpapi.CodeInvalidRequest)
 		})
 	}
+	for name, b := range tzCases {
+		i++
+		t.Run(name, func(t *testing.T) {
+			assertError(t, s.put(t, u.AccessToken, "invalid-"+strconv.Itoa(i), "", b), http.StatusBadRequest, CodeTimeZoneInvalid)
+		})
+	}
+	if n := countRows(t, s.pool, `SELECT count(*) FROM availability_preferences WHERE user_id = $1`, u.UserID); n != 0 {
+		t.Fatalf("거부된 요청이 설정을 만들었다")
+	}
+	// 경계값: 하루 전체(0→1440)와 가장 늦은 시작의 최대 횡단(1410→2850)은 허용된다.
+	b := prefOf(t, s.put(t, u.AccessToken, "bounds", "", body("Asia/Seoul", iv(1, 0, 1440), iv(3, 1410, 2850))))
+	if want := []Interval{{1, 0, 1440}, {3, 1410, 1440}, {4, 0, 1410}}; !sameIntervals(b.WeeklyIntervals, want) {
+		t.Fatalf("경계값 저장 = %+v, want %+v", b.WeeklyIntervals, want)
+	}
 	// 같은 요일 3개는 허용된다.
-	if rec := s.put(t, u.AccessToken, "three", "", body("Asia/Seoul", iv(3, 0, 60), iv(3, 120, 180), iv(3, 240, 300))); rec.Code != http.StatusOK {
+	if rec := s.put(t, u.AccessToken, "three", `"1"`, body("Asia/Seoul", iv(3, 0, 60), iv(3, 120, 180), iv(3, 240, 300))); rec.Code != http.StatusOK {
 		t.Fatalf("요일당 3개 = %d: %s", rec.Code, rec.Body.String())
 	}
 	// 헤더 검증
@@ -391,12 +424,12 @@ func TestNormalizeIntervalsUnit(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 일요일 꼬리가 월요일 00:00~00:30이 되고 월 00:30~01:30과 맞닿아 병합된다.
-	if want := []Interval{{1, 0, 90}, {7, 1410, 1440}}; !sameIntervals(got, want) {
+	if want := weekly([3]int{1, 0, 90}, [3]int{7, 1410, 1440}); !sameIntervals(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
 	// 정확히 24시간 횡단 구간: 월 12:00 ~ 화 12:00
 	got, err = normalizeIntervals([]intervalInput{in(1, 720, 2160)})
-	if err != nil || !sameIntervals(got, []Interval{{1, 720, 1440}, {2, 0, 720}}) {
+	if err != nil || !sameIntervals(got, weekly([3]int{1, 720, 1440}, [3]int{2, 0, 720})) {
 		t.Fatalf("24시간 횡단 = %+v, %v", got, err)
 	}
 	// 입력 상한
@@ -415,7 +448,7 @@ func TestNormalizeIntervalsUnit(t *testing.T) {
 		}
 	}
 	got, err = normalizeIntervals(grid)
-	if err != nil || len(got) != 7 || got[0] != (Interval{1, 0, 1440}) {
+	if err != nil || len(got) != 7 || got[0] != weekly([3]int{1, 0, 1440})[0] {
 		t.Fatalf("30분 칸 전체 = %+v, %v", got, err)
 	}
 }
@@ -427,6 +460,7 @@ func TestValidTimeZone(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{"", "Local", "UTC", "GMT", "EST", "EST5EDT", "Etc/UTC", "Etc/GMT-9", "Etc/GMT+5", "UTC+09:00", "+09:00",
+		"etc/UTC", "ETC/GMT-9", "asia/seoul", "ASIA/SEOUL", "Asia/seoul", "Asia//Seoul", "Asia/Seoul/", "/Asia/Seoul", " Asia/Seoul",
 		"posix/Asia/Seoul", "right/Asia/Seoul", "../etc/passwd", "/usr/share/zoneinfo/Asia/Seoul", "Asia/Nowhere", strings.Repeat("A/", 40)} {
 		if ValidTimeZone(bad) {
 			t.Errorf("%q를 받아들였다", bad)
@@ -639,8 +673,218 @@ func TestRateLimitBeforeValidation(t *testing.T) {
 	if rec.Header().Get("Retry-After") == "" {
 		t.Fatal("Retry-After가 없다")
 	}
-	// 조회 한도는 별도 scope다.
-	if got := s.get(t, prefPath, u.AccessToken); got.Code != http.StatusOK {
-		t.Fatalf("조회 = %d", got.Code)
+	// 조회 한도는 별도 scope이고, 인증 직후·조회 전에 센다.
+	for i := range ratelimit.LimitAvailabilityPrefRead.Count {
+		if got := s.get(t, prefPath, u.AccessToken); got.Code != http.StatusOK {
+			t.Fatalf("%d번째 조회 = %d", i, got.Code)
+		}
+	}
+	assertError(t, s.get(t, prefPath, u.AccessToken), http.StatusTooManyRequests, httpapi.CodeRateLimited)
+}
+
+// 내장 목록의 모든 이름은 규칙을 통과하고 실제로 로딩된다. Go를 올린 뒤 목록을 다시 만들지 않으면 여기서 드러난다.
+func TestRegionZonesAreLoadable(t *testing.T) {
+	if len(regionZones) < 300 {
+		t.Fatalf("지역 시간대가 %d개뿐이다", len(regionZones))
+	}
+	for name := range regionZones {
+		if !ValidTimeZone(name) {
+			t.Errorf("%q가 규칙을 통과하지 못한다", name)
+		}
+	}
+}
+
+// LoadPreferences는 여러 사용자를 한 문장으로 읽고, 미설정 사용자도 version 0으로 돌려준다.
+func TestLoadPreferencesInRepeatableRead(t *testing.T) {
+	s := newStack(t, false)
+	a, b, c := s.signIn(t), s.signIn(t), s.signIn(t)
+	if rec := s.put(t, a.AccessToken, "a", "", `{"time_zone":"Asia/Seoul","weekly_intervals":[{"weekday":2,"start_minute":600,"end_minute":660},{"weekday":1,"start_minute":1320,"end_minute":1500}]}`); rec.Code != http.StatusOK {
+		t.Fatalf("a 저장 = %d", rec.Code)
+	}
+	if rec := s.put(t, b.AccessToken, "b", "", weekdayBody); rec.Code != http.StatusOK {
+		t.Fatalf("b 저장 = %d", rec.Code)
+	}
+	ctx := context.Background()
+	ids := []uuid.UUID{uuid.MustParse(a.UserID), uuid.MustParse(b.UserID), uuid.MustParse(c.UserID)}
+	var got map[uuid.UUID]Preference
+	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		var err error
+		got, err = LoadPreferences(ctx, tx, ids)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("결과 %d명, want 3", len(got))
+	}
+	pa := got[ids[0]]
+	if pa.Status != StatusConfigured || pa.TimeZone != "Asia/Seoul" || pa.Version != 1 || pa.UpdatedAt.IsZero() ||
+		!sameIntervals(pa.Intervals, weekly([3]int{1, 1320, 1440}, [3]int{2, 0, 60}, [3]int{2, 600, 660})) {
+		t.Fatalf("a = %+v", pa)
+	}
+	if pb := got[ids[1]]; pb.Version != 1 || len(pb.Intervals) != 2 {
+		t.Fatalf("b = %+v", pb)
+	}
+	if pc := got[ids[2]]; pc.Status != StatusUnconfigured || pc.Version != 0 || pc.TimeZone != "" || pc.Intervals == nil || len(pc.Intervals) != 0 {
+		t.Fatalf("미설정 c = %+v", pc)
+	}
+	if empty, err := LoadPreferences(ctx, s.pool, nil); err != nil || len(empty) != 0 {
+		t.Fatalf("빈 입력 = %v, %v", empty, err)
+	}
+}
+
+// create-only와 If-Match 요청이 섞여 경쟁해도 각 version에 이기는 요청은 하나뿐이고 교착 재시도가 없다.
+func TestMixedCreateAndIfMatchRace(t *testing.T) {
+	s := newStack(t, false)
+	u := s.signIn(t)
+	before := mutation.Retries()
+	const n = 8
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			ifMatch := ""
+			if i%2 == 1 {
+				ifMatch = `"1"`
+			}
+			b := `{"time_zone":"Asia/Seoul","weekly_intervals":[{"weekday":` + strconv.Itoa(i%7+1) + `,"start_minute":0,"end_minute":` + strconv.Itoa(60+30*i) + `}]}`
+			codes[i] = s.put(t, u.AccessToken, "mixed-"+strconv.Itoa(i), ifMatch, b).Code
+		}()
+	}
+	close(start)
+	wg.Wait()
+	createWins, matchWins := 0, 0
+	for i, c := range codes {
+		switch {
+		case c == http.StatusOK && i%2 == 0:
+			createWins++
+		case c == http.StatusOK:
+			matchWins++
+		case c != http.StatusConflict:
+			t.Fatalf("예상 밖 status %d", c)
+		}
+	}
+	// create-only는 정확히 하나가 이긴다. If-Match "1"은 생성 뒤에 도착한 경우에만, 많아야 하나가 이긴다.
+	if createWins != 1 || matchWins > 1 {
+		t.Fatalf("create 승 %d, If-Match 승 %d (%v)", createWins, matchWins, codes)
+	}
+	if p := prefOf(t, s.get(t, prefPath, u.AccessToken)); p.Version != int64(1+matchWins) {
+		t.Fatalf("최종 version %d, 성공 %d건", p.Version, 1+matchWins)
+	}
+	if after := mutation.Retries(); after != before {
+		t.Fatalf("mutation.Retries가 %d에서 %d로 늘었다", before, after)
+	}
+}
+
+// 본인 다른 기기는 GET /v1/sync로 availability_preference 무효화 변경을 받는다.
+func TestOwnSyncDeliversPreferenceChange(t *testing.T) {
+	s := newStack(t, false)
+	u := s.signIn(t)
+	boot := s.get(t, "/v1/sync/bootstrap", u.AccessToken)
+	if boot.Code != http.StatusOK {
+		t.Fatalf("bootstrap = %d", boot.Code)
+	}
+	cursor := decode[struct {
+		Watermark string `json:"cursor_watermark"`
+	}](t, boot).Watermark
+	if rec := s.put(t, u.AccessToken, "sync", "", weekdayBody); rec.Code != http.StatusOK {
+		t.Fatalf("저장 = %d", rec.Code)
+	}
+	// settled horizon 읽기라 방금 커밋한 변경이 곧바로 보이지 않을 수 있다. 잠시 다시 읽는다.
+	type change struct {
+		EntityType string          `json:"entity_type"`
+		EntityID   string          `json:"entity_id"`
+		Operation  string          `json:"operation"`
+		Version    *int64          `json:"version"`
+		Payload    json.RawMessage `json:"payload"`
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		rec := s.get(t, "/v1/sync?cursor="+cursor, u.AccessToken)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("sync = %d: %s", rec.Code, rec.Body.String())
+		}
+		page := decode[struct {
+			Changes []change `json:"changes"`
+		}](t, rec)
+		for _, c := range page.Changes {
+			if c.EntityType != entityPreference {
+				continue
+			}
+			if c.EntityID != u.UserID || c.Operation != "upsert" || c.Version == nil || *c.Version != 1 {
+				t.Fatalf("변경 = %+v", c)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(c.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if len(payload) != 3 || payload["status"] != StatusConfigured || payload["version"] != float64(1) || payload["updated_at"] == nil {
+				t.Fatalf("payload = %s", c.Payload)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("availability_preference 변경이 오지 않았다: %s", rec.Body.String())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// trigger는 소유자 preference row를 잠근 뒤 검사한다. service 밖 두 트랜잭션이 동시에 겹치는 row를
+// 넣어도 둘 다 커밋되지 않는다. 잠금이 없으면 tx2의 검사가 tx1 커밋 전에 끝나 겹침이 저장된다.
+func TestDBTriggerSerializesConcurrentDirectWrites(t *testing.T) {
+	pool := pgtest.Pool(t, pgtest.APIRoleURLEnv)
+	ctx := context.Background()
+	userID := uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO users (id, display_name) VALUES ($1, '트리거 경쟁')`, userID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, userID) })
+	if _, err := pool.Exec(ctx, `INSERT INTO availability_preferences (user_id, status, time_zone) VALUES ($1, 'configured', 'Asia/Seoul')`, userID); err != nil {
+		t.Fatal(err)
+	}
+	insert := `INSERT INTO availability_weekly_intervals (user_id, weekday, position, start_minute, end_minute) VALUES ($1, 1, $2, $3, $4)`
+	tx1, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx1.Rollback(ctx) }()
+	tx2, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx2.Rollback(ctx) }()
+	if _, err := tx1.Exec(ctx, insert, userID, 0, 540, 720); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx2.Exec(ctx, insert, userID, 1, 600, 780); err != nil {
+		t.Fatal(err)
+	}
+	// tx1의 검사를 지금 실행해 preference row 잠금을 쥔 채로 둔다(이 트랜잭션의 마지막 SET CONSTRAINTS).
+	if _, err := tx1.Exec(ctx, `SET CONSTRAINTS ALL IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- tx2.Commit(ctx) }()
+	select {
+	case err := <-done:
+		t.Fatalf("tx2가 tx1의 잠금을 기다리지 않고 끝났다: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := tx1.Commit(ctx); err != nil {
+		t.Fatalf("tx1 커밋: %v", err)
+	}
+	err = <-done
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.ConstraintName != "availability_weekly_intervals_no_overlap_check" {
+		t.Fatalf("tx2 커밋 err = %v, want 겹침 트리거 위반", err)
+	}
+	if n := countRows(t, pool, `SELECT count(*) FROM availability_weekly_intervals WHERE user_id = $1`, userID); n != 1 {
+		t.Fatalf("저장된 구간 %d개, want 1", n)
 	}
 }

@@ -8,9 +8,11 @@ package availability
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plantogether/server/internal/auth"
+	"plantogether/server/internal/availability/engine"
 	"plantogether/server/internal/platform/httpapi"
 	"plantogether/server/internal/platform/mutation"
 	"plantogether/server/internal/platform/ratelimit"
@@ -29,12 +32,18 @@ import (
 	_ "time/tzdata"
 )
 
+//go:generate go run ./tzgen
+
 // ReplayedHeader는 저장된 결과를 돌려준 재전송 표시다.
 const ReplayedHeader = "Idempotent-Replayed"
 
 const (
 	StatusUnconfigured = "unconfigured"
 	StatusConfigured   = "configured"
+
+	// CodeTimeZoneInvalid는 time_zone이 지역 IANA 시간대가 아닐 때의 400 code다. 클라이언트는 이 code를
+	// 받으면 기기 시간대 대신 도시 선택 UI를 띄운다(예: 기기 identifier가 GMT인 경우).
+	CodeTimeZoneInvalid = "time_zone_invalid"
 
 	// entityPreference는 본인에게만 보내는 sync 무효화 entity다. payload에 interval이 없다.
 	entityPreference = "availability_preference"
@@ -78,7 +87,8 @@ func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.H
 	mux.Handle("PUT /v1/availability/preferences/me", require(http.HandlerFunc(h.putPreferences)))
 }
 
-// Interval은 저장된 정규형 활동 구간이다. 분은 사용자 time zone의 지역 시각이며 end_minute ≤ 1440이다.
+// Interval은 API 응답의 정규형 활동 구간이다(engine.WeeklyInterval과 같은 필드). 분은 사용자 time zone의
+// 지역 시각이며 end_minute ≤ 1440이다.
 type Interval struct {
 	Weekday     int `json:"weekday"`
 	StartMinute int `json:"start_minute"`
@@ -112,13 +122,17 @@ type preferencesEnvelope struct {
 	Preferences preferencesResponse `json:"preferences"`
 }
 
-// preference는 저장 상태다. row가 없으면 Status=unconfigured, Version=0이다.
-type preference struct {
+// Preference는 한 사용자의 저장된 활동 시간 설정이다. row가 없으면 Status=unconfigured, Version=0,
+// TimeZone="", Intervals는 빈 slice, UpdatedAt은 zero다.
+//
+// Intervals는 저장 정규형(요일·시작 순 정렬, 같은 요일 겹침·맞닿음 없음, 0 ≤ Start < End ≤ 1440)이라
+// engine.Member.Weekly에 그대로 넘긴다.
+type Preference struct {
 	Status    string
-	TimeZone  *string
+	TimeZone  string
 	Version   int64
-	Intervals []Interval
-	UpdatedAt *time.Time
+	Intervals []engine.WeeklyInterval
+	UpdatedAt time.Time
 }
 
 func (h *Handler) getPreferences(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +142,7 @@ func (h *Handler) getPreferences(w http.ResponseWriter, r *http.Request) {
 		ratelimit.UserRule(ratelimit.ScopeAvailabilityPrefRead, ratelimit.LimitAvailabilityPrefRead, p.UserID)); !ok {
 		return
 	}
-	pref, err := loadPreference(r.Context(), h.pool, p.UserID, false)
+	pref, err := loadOne(r.Context(), h.pool, p.UserID)
 	if err != nil {
 		h.writeDomainError(w, r, "availability.preferences.get", err)
 		return
@@ -162,7 +176,7 @@ func (h *Handler) putPreferences(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ValidTimeZone(req.TimeZone) {
-		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidRequest, "time_zone은 지역 IANA 시간대여야 한다")
+		httpapi.WriteError(w, r, http.StatusBadRequest, CodeTimeZoneInvalid, "time_zone은 Area/City 형식의 지역 IANA 시간대여야 한다")
 		return
 	}
 	intervals, err := normalizeIntervals(req.WeeklyIntervals)
@@ -185,7 +199,11 @@ func (h *Handler) putPreferences(w http.ResponseWriter, r *http.Request) {
 		}
 		// 같은 사용자의 PUT은 이 row 잠금으로 직렬화된다. 동시 create-only는 위 INSERT의 unique
 		// 대기 뒤 새 문장 snapshot에서 상대가 만든 row를 본다.
-		current, err := loadPreference(ctx, tx, p.UserID, true)
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM availability_preferences WHERE user_id = $1 FOR NO KEY UPDATE`, p.UserID); err != nil {
+			return mutation.Result{}, err
+		}
+		// 잠금 뒤의 새 문장이라 마지막 커밋 상태를 본다. 다른 쓰기는 이 row 잠금을 기다린다.
+		current, err := loadOne(ctx, tx, p.UserID)
 		if err != nil {
 			return mutation.Result{}, err
 		}
@@ -204,9 +222,9 @@ func (h *Handler) putPreferences(w http.ResponseWriter, r *http.Request) {
 		}
 
 		version := current.Version
-		updatedAt := *current.UpdatedAt
+		updatedAt := current.UpdatedAt
 		if !created {
-			if current.Status == StatusConfigured && current.TimeZone != nil && *current.TimeZone == req.TimeZone &&
+			if current.Status == StatusConfigured && current.TimeZone == req.TimeZone &&
 				sameIntervals(current.Intervals, intervals) {
 				// 내용이 같으면 version을 올리지 않는다. 검색 cache key와 결과를 불필요하게 무효화하지 않는다.
 				return mutation.Result{StatusCode: http.StatusOK, ResourceType: entityPreference, ResourceID: p.UserID, ResourceVersion: version}, nil
@@ -241,7 +259,7 @@ func (h *Handler) putPreferences(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	pref, err := loadPreference(r.Context(), h.pool, p.UserID, false)
+	pref, err := loadOne(r.Context(), h.pool, p.UserID)
 	if err != nil {
 		h.writeDomainError(w, r, "availability.preferences.put", err)
 		return
@@ -258,11 +276,11 @@ func (h *Handler) putPreferences(w http.ResponseWriter, r *http.Request) {
 //  5. 요일별 3개 초과, 한 주 전체 0개는 거부한다
 //
 // 결과는 요일, 시작 순으로 정렬돼 있고, 같은 요일 안의 순서가 저장 position이다.
-func normalizeIntervals(in []intervalInput) ([]Interval, error) {
+func normalizeIntervals(in []intervalInput) ([]engine.WeeklyInterval, error) {
 	if len(in) == 0 || len(in) > maxInputIntervals {
 		return nil, errInvalidInput
 	}
-	var days [8][]Interval
+	var days [8][]engine.WeeklyInterval
 	for _, iv := range in {
 		if iv.Weekday == nil || iv.StartMinute == nil || iv.EndMinute == nil {
 			return nil, errInvalidInput
@@ -273,18 +291,18 @@ func normalizeIntervals(in []intervalInput) ([]Interval, error) {
 			return nil, errInvalidInput
 		}
 		if e <= minutesPerDay {
-			days[w] = append(days[w], Interval{Weekday: w, StartMinute: s, EndMinute: e})
+			days[w] = append(days[w], engine.WeeklyInterval{Weekday: w, StartMinute: s, EndMinute: e})
 			continue
 		}
 		next := w%7 + 1
-		days[w] = append(days[w], Interval{Weekday: w, StartMinute: s, EndMinute: minutesPerDay})
-		days[next] = append(days[next], Interval{Weekday: next, StartMinute: 0, EndMinute: e - minutesPerDay})
+		days[w] = append(days[w], engine.WeeklyInterval{Weekday: w, StartMinute: s, EndMinute: minutesPerDay})
+		days[next] = append(days[next], engine.WeeklyInterval{Weekday: next, StartMinute: 0, EndMinute: e - minutesPerDay})
 	}
-	var out []Interval
+	var out []engine.WeeklyInterval
 	for w := 1; w <= 7; w++ {
 		segs := days[w]
 		sort.Slice(segs, func(i, j int) bool { return segs[i].StartMinute < segs[j].StartMinute })
-		var merged []Interval
+		var merged []engine.WeeklyInterval
 		for _, seg := range segs {
 			if n := len(merged); n > 0 {
 				last := &merged[n-1]
@@ -309,26 +327,35 @@ func normalizeIntervals(in []intervalInput) ([]Interval, error) {
 	return out, nil
 }
 
+// zoneNamePattern은 "Area/City" 또는 "Area/Sub/City" 모양이다. tzgen의 같은 이름 변수와 같아야 한다.
+var zoneNamePattern = regexp.MustCompile(`^[A-Z][A-Za-z_]+(/[A-Za-z0-9_+\-]+){1,2}$`)
+
 // ValidTimeZone은 지역 IANA 시간대만 받는다(§3.3 "고정 UTC offset은 허용하지 않는다").
+// 결과가 서버 환경(OS zoneinfo 유무, 대소문자를 무시하는 파일시스템)에 따라 달라지지 않게 한다.
 //
-//   - "Area/City" 형식이어야 한다. "/"가 없는 UTC, GMT, EST, EST5EDT 같은 고정 offset·레거시 별칭을 거부한다
-//   - Etc/ 아래(Etc/GMT-9, Etc/UTC 등)는 모두 고정 offset이라 거부한다
-//   - host zoneinfo에만 있는 posix/, right/, SystemV/ 변형은 내장 tzdata와 뜻이 갈릴 수 있어 거부한다
-//   - "Local"은 서버의 지역 시간대로 해석되므로 거부한다
+//   - zoneNamePattern에 맞아야 한다. "/"가 없는 UTC, GMT, EST, EST5EDT, Local과 "Asia//Seoul"을 거부한다
+//   - Etc/·posix/·right/·SystemV/ 접두는 대소문자와 상관없이 거부한다(Etc/GMT-9, etc/UTC 등 고정 offset)
+//   - 내장 tzdata에서 만든 목록(regionZones, zones_gen.go)에 정확히(대소문자 포함) 있어야 한다.
+//     macOS에서 "asia/seoul"이 OS zoneinfo로 로딩되는 것을 막는다
+//   - 마지막으로 time.LoadLocation이 성공해야 한다
 func ValidTimeZone(name string) bool {
-	if name == "" || len(name) > maxTimeZoneLen || name == "Local" || !strings.Contains(name, "/") {
+	if len(name) > maxTimeZoneLen || !zoneNamePattern.MatchString(name) {
 		return false
 	}
-	for _, prefix := range []string{"Etc/", "posix/", "right/", "SystemV/"} {
-		if strings.HasPrefix(name, prefix) {
+	lower := strings.ToLower(name)
+	for _, prefix := range []string{"etc/", "posix/", "right/", "systemv/"} {
+		if strings.HasPrefix(lower, prefix) {
 			return false
 		}
+	}
+	if _, ok := regionZones[name]; !ok {
+		return false
 	}
 	_, err := time.LoadLocation(name)
 	return err == nil
 }
 
-func sameIntervals(a, b []Interval) bool {
+func sameIntervals[T comparable](a, b []T) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -340,7 +367,7 @@ func sameIntervals(a, b []Interval) bool {
 	return true
 }
 
-func insertIntervals(ctx context.Context, tx *mutation.Tx, userID uuid.UUID, intervals []Interval) error {
+func insertIntervals(ctx context.Context, tx *mutation.Tx, userID uuid.UUID, intervals []engine.WeeklyInterval) error {
 	weekdays := make([]int32, len(intervals))
 	positions := make([]int32, len(intervals))
 	starts := make([]int32, len(intervals))
@@ -360,59 +387,84 @@ func insertIntervals(ctx context.Context, tx *mutation.Tx, userID uuid.UUID, int
 	return err
 }
 
-// querier는 pool과 트랜잭션이 함께 만족하는 조회 interface다.
-type querier interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+// Querier는 pool과 트랜잭션이 함께 만족하는 조회 interface다.
+type Querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-// loadPreference는 사용자의 설정을 읽는다. row가 없으면 unconfigured·version 0이다.
-// lock이면 preference row를 FOR NO KEY UPDATE로 잡는다(트랜잭션 안에서만).
-func loadPreference(ctx context.Context, q querier, userID uuid.UUID, lock bool) (preference, error) {
-	sql := `SELECT status, time_zone, version, updated_at FROM availability_preferences WHERE user_id = $1`
-	if lock {
-		sql += ` FOR NO KEY UPDATE`
+// LoadPreferences는 여러 사용자의 설정을 한 문장으로 읽는다. 요청한 모든 사용자가 결과에 있고, row가
+// 없는 사용자는 unconfigured·version 0이다.
+//
+// preference와 interval을 한 문장(같은 snapshot)에서 읽으므로 둘이 서로 다른 시점으로 섞이지 않는다.
+// 검색(A3)은 REPEATABLE READ 트랜잭션을 q로 넘겨 다른 입력과 같은 시점으로 맞춘다.
+func LoadPreferences(ctx context.Context, q Querier, userIDs []uuid.UUID) (map[uuid.UUID]Preference, error) {
+	out := make(map[uuid.UUID]Preference, len(userIDs))
+	for _, id := range userIDs {
+		out[id] = Preference{Status: StatusUnconfigured, Intervals: []engine.WeeklyInterval{}}
 	}
-	var pref preference
-	var updatedAt time.Time
-	err := q.QueryRow(ctx, sql, userID).Scan(&pref.Status, &pref.TimeZone, &pref.Version, &updatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return preference{Status: StatusUnconfigured, Intervals: []Interval{}}, nil
+	if len(userIDs) == 0 {
+		return out, nil
 	}
-	if err != nil {
-		return preference{}, err
-	}
-	pref.UpdatedAt = &updatedAt
 	rows, err := q.Query(ctx, `
-		SELECT weekday, start_minute, end_minute
-		  FROM availability_weekly_intervals
-		 WHERE user_id = $1
-		 ORDER BY weekday, start_minute`, userID)
+		SELECT p.user_id, p.status, p.time_zone, p.version, p.updated_at,
+		       COALESCE((SELECT json_agg(json_build_array(i.weekday, i.start_minute, i.end_minute)
+		                                 ORDER BY i.weekday, i.start_minute)
+		                   FROM availability_weekly_intervals i
+		                  WHERE i.user_id = p.user_id), '[]'::json)
+		  FROM availability_preferences p
+		 WHERE p.user_id = ANY($1)`, userIDs)
 	if err != nil {
-		return preference{}, err
+		return nil, err
 	}
 	defer rows.Close()
-	pref.Intervals = []Interval{}
 	for rows.Next() {
-		var iv Interval
-		if err := rows.Scan(&iv.Weekday, &iv.StartMinute, &iv.EndMinute); err != nil {
-			return preference{}, err
+		var (
+			id      uuid.UUID
+			pref    Preference
+			tz      *string
+			rawJSON []byte
+		)
+		if err := rows.Scan(&id, &pref.Status, &tz, &pref.Version, &pref.UpdatedAt, &rawJSON); err != nil {
+			return nil, err
 		}
-		pref.Intervals = append(pref.Intervals, iv)
+		if tz != nil {
+			pref.TimeZone = *tz
+		}
+		var triples [][3]int
+		if err := json.Unmarshal(rawJSON, &triples); err != nil {
+			return nil, err
+		}
+		pref.Intervals = make([]engine.WeeklyInterval, len(triples))
+		for i, t := range triples {
+			pref.Intervals[i] = engine.WeeklyInterval{Weekday: t[0], StartMinute: t[1], EndMinute: t[2]}
+		}
+		out[id] = pref
 	}
-	return pref, rows.Err()
+	return out, rows.Err()
 }
 
-func writePreference(w http.ResponseWriter, r *http.Request, pref preference, status int) {
+func loadOne(ctx context.Context, q Querier, userID uuid.UUID) (Preference, error) {
+	m, err := LoadPreferences(ctx, q, []uuid.UUID{userID})
+	if err != nil {
+		return Preference{}, err
+	}
+	return m[userID], nil
+}
+
+func writePreference(w http.ResponseWriter, r *http.Request, pref Preference, status int) {
 	// 미설정(version 0)에는 ETag가 없다. 첫 저장은 If-Match 없이 create-only로 보낸다.
 	if pref.Version > 0 {
 		w.Header().Set("ETag", `"`+strconv.FormatInt(pref.Version, 10)+`"`)
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	resp := preferencesResponse{
-		Status: pref.Status, TimeZone: pref.TimeZone, Version: pref.Version, WeeklyIntervals: pref.Intervals,
+	resp := preferencesResponse{Status: pref.Status, Version: pref.Version, WeeklyIntervals: make([]Interval, len(pref.Intervals))}
+	for i, iv := range pref.Intervals {
+		resp.WeeklyIntervals[i] = Interval(iv)
 	}
-	if pref.UpdatedAt != nil {
+	if pref.TimeZone != "" {
+		resp.TimeZone = &pref.TimeZone
+	}
+	if !pref.UpdatedAt.IsZero() {
 		s := pref.UpdatedAt.UTC().Format(time.RFC3339)
 		resp.UpdatedAt = &s
 	}

@@ -9,8 +9,9 @@
 -- constraint trigger가 커밋 시점에 같은 요일의 겹침과 맞닿음을 함께 거부한다. 저장된 interval은
 -- 언제나 "병합까지 끝난 정규형"이라는 것이 DB 불변식이다. 계산 엔진은 이것에 기댈 수 있다.
 --
--- trigger는 자기 트랜잭션에서 보이는 row만 검사하므로 동시 쓰기를 혼자 막지 못한다. PUT은
--- availability_preferences row를 FOR NO KEY UPDATE로 잡아 같은 사용자의 쓰기를 직렬화한다.
+-- trigger는 검사 전에 소유자의 availability_preferences row를 FOR NO KEY UPDATE로 잡는다. 같은 사용자의
+-- 쓰기가 service 밖에서 동시에 일어나도 커밋 검사가 직렬화되고, 잠금 뒤의 검사 문장은 앞 트랜잭션이 커밋한
+-- row를 본다. PUT은 트랜잭션 앞에서 같은 row를 먼저 잡으므로 추가 대기가 없다.
 
 -- +goose Up
 
@@ -55,6 +56,8 @@ CREATE TABLE availability_weekly_intervals (
 CREATE FUNCTION availability_assert_no_interval_overlap() RETURNS trigger
     LANGUAGE plpgsql AS $$
 BEGIN
+    -- 같은 사용자의 동시 쓰기를 직렬화한다. 이 잠금 뒤의 문장은 새 snapshot으로 앞 커밋을 본다.
+    PERFORM 1 FROM availability_preferences WHERE user_id = NEW.user_id FOR NO KEY UPDATE;
     -- 커밋 시점에는 row가 이미 지워졌거나 바뀌었을 수 있다. 지금 남아 있는 같은 요일 row 사이를 본다.
     -- 맞닿음(a.end = b.start)도 거부한다. service가 항상 병합하므로 맞닿은 row는 정규형이 아니다.
     IF EXISTS (
