@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,17 +24,20 @@ import (
 // 한 요청 본문이 64KB로 제한되므로(httpapi.ReadBody) page당 fact를 250개로 둔다. fact 하나는
 // 200바이트 안팎이다.
 const (
-	maxFactsPerPage   = 250
-	maxPages          = 200
-	maxTotalFacts     = 20000
-	maxWindow         = 100 * 24 * time.Hour
-	maxFactDuration   = 366 * 24 * time.Hour
-	minKeyBytes       = 16
-	maxKeyBytes       = 32
-	codeSnapshotState = "calendar_snapshot_state"
+	maxFactsPerPage    = 250
+	maxPages           = 200
+	maxTotalFacts      = 20000
+	maxWindow          = 100 * 24 * time.Hour
+	maxFactDuration    = 366 * 24 * time.Hour
+	maxDetailsTitle    = 256
+	maxDetailsLocation = 512
+	minKeyBytes        = 16
+	maxKeyBytes        = 32
+	codeSnapshotState  = "calendar_snapshot_state"
 )
 
 var errSnapshotState = errors.New("calendar: snapshot session 상태가 이 동작을 허용하지 않는다")
+var errDetailsSealerMissing = errors.New("calendar: details allowlist를 봉인할 sealer가 없다")
 
 type snapshotResponse struct {
 	ID            uuid.UUID `json:"id"`
@@ -53,10 +57,11 @@ type snapshotEnvelope struct {
 }
 
 type createSnapshotRequest struct {
-	Revision      int64  `json:"revision"`
-	WindowStart   string `json:"window_start"`
-	WindowEnd     string `json:"window_end"`
-	ExpectedPages int    `json:"expected_pages"`
+	Revision        int64  `json:"revision"`
+	WindowStart     string `json:"window_start"`
+	WindowEnd       string `json:"window_end"`
+	ExpectedPages   int    `json:"expected_pages"`
+	DetailsIncluded bool   `json:"details_included"`
 }
 
 // createSnapshot은 snapshot session을 만든다. 연결은 읽기 source가 하나 이상 선택돼 있어야 하고
@@ -120,12 +125,13 @@ func (h *Handler) createSnapshot(w http.ResponseWriter, r *http.Request) {
 			existing   uuid.UUID
 			exWS, exWE time.Time
 			exPages    int
+			exDetails  bool
 		)
 		err = tx.QueryRow(ctx, `
-			SELECT id, window_start, window_end, expected_pages FROM calendar_snapshot_sessions
-			 WHERE connection_id = $1 AND revision = $2`, connID, req.Revision).Scan(&existing, &exWS, &exWE, &exPages)
+			SELECT id, window_start, window_end, expected_pages, details_included FROM calendar_snapshot_sessions
+			 WHERE connection_id = $1 AND revision = $2`, connID, req.Revision).Scan(&existing, &exWS, &exWE, &exPages, &exDetails)
 		if err == nil {
-			if !exWS.Equal(ws) || !exWE.Equal(we) || exPages != req.ExpectedPages {
+			if !exWS.Equal(ws) || !exWE.Equal(we) || exPages != req.ExpectedPages || exDetails != req.DetailsIncluded {
 				return mutation.Result{}, &mutation.VersionConflictError{Current: lastRev}
 			}
 			return mutation.Result{StatusCode: http.StatusOK, ResourceType: "calendar_snapshot", ResourceID: existing, ResourceVersion: 1}, nil
@@ -155,8 +161,8 @@ func (h *Handler) createSnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 		id := uuid.New()
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO calendar_snapshot_sessions (id, connection_id, revision, window_start, window_end, expected_pages)
-			VALUES ($1, $2, $3, $4, $5, $6)`, id, connID, req.Revision, ws, we, req.ExpectedPages); err != nil {
+			INSERT INTO calendar_snapshot_sessions (id, connection_id, revision, window_start, window_end, expected_pages, details_included)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)`, id, connID, req.Revision, ws, we, req.ExpectedPages, req.DetailsIncluded); err != nil {
 			return mutation.Result{}, err
 		}
 		// 첫 snapshot이거나 기기를 이 기기로 정한다. 상태는 syncing이지만 마지막 정상 데이터는 유지한다.
@@ -218,12 +224,14 @@ func parseWindow(start, end string) (time.Time, time.Time, error) {
 }
 
 type factJSON struct {
-	SourceEventKey string `json:"source_event_key"`
-	StartAt        string `json:"start_at"`
-	EndAt          string `json:"end_at"`
-	AllDay         bool   `json:"all_day"`
-	TimeZone       string `json:"time_zone"`
-	Availability   string `json:"availability"`
+	SourceEventKey string  `json:"source_event_key"`
+	StartAt        string  `json:"start_at"`
+	EndAt          string  `json:"end_at"`
+	AllDay         bool    `json:"all_day"`
+	TimeZone       string  `json:"time_zone"`
+	Availability   string  `json:"availability"`
+	Title          *string `json:"title,omitempty"`
+	Location       *string `json:"location,omitempty"`
 }
 
 type pageRequest struct {
@@ -236,6 +244,16 @@ type parsedFact struct {
 	allDay       bool
 	timeZone     string
 	availability string
+	title        *string
+	location     *string
+}
+
+func stagingTitlePurpose(sessionID uuid.UUID, sourceEventKey []byte) string {
+	return "calendar_snapshot_detail_title:" + sessionID.String() + ":" + base64.RawURLEncoding.EncodeToString(sourceEventKey)
+}
+
+func stagingLocationPurpose(sessionID uuid.UUID, sourceEventKey []byte) string {
+	return "calendar_snapshot_detail_location:" + sessionID.String() + ":" + base64.RawURLEncoding.EncodeToString(sourceEventKey)
 }
 
 func parseFact(f factJSON, ws, we time.Time) (parsedFact, error) {
@@ -268,7 +286,16 @@ func parseFact(f factJSON, ws, we time.Time) (parsedFact, error) {
 	default:
 		return parsedFact{}, errInvalidInput
 	}
-	return parsedFact{key: key, start: start, end: end, allDay: f.AllDay, timeZone: f.TimeZone, availability: f.Availability}, nil
+	if f.Location != nil && f.Title == nil {
+		return parsedFact{}, errInvalidInput
+	}
+	if f.Title != nil && len([]rune(*f.Title)) > maxDetailsTitle {
+		return parsedFact{}, errInvalidInput
+	}
+	if f.Location != nil && len([]rune(*f.Location)) > maxDetailsLocation {
+		return parsedFact{}, errInvalidInput
+	}
+	return parsedFact{key: key, start: start, end: end, allDay: f.AllDay, timeZone: f.TimeZone, availability: f.Availability, title: f.Title, location: f.Location}, nil
 }
 
 // putPage는 page 하나를 통째로 교체한다. 같은 page를 다시 보내면 같은 결과다(재시도 안전).
@@ -345,11 +372,34 @@ func (h *Handler) putPage(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		for _, f := range facts {
+			var titleCiphertext, locationCiphertext []byte
+			detailAllowed := f.title != nil
+			if detailAllowed {
+				if h.box == nil {
+					return errDetailsSealerMissing
+				}
+				if strings.TrimSpace(*f.title) != "" {
+					var err error
+					titleCiphertext, err = h.box.Seal([]byte(*f.title), stagingTitlePurpose(sessionID, f.key))
+					if err != nil {
+						return err
+					}
+				}
+				if f.location != nil && strings.TrimSpace(*f.location) != "" {
+					var err error
+					locationCiphertext, err = h.box.Seal([]byte(*f.location), stagingLocationPurpose(sessionID, f.key))
+					if err != nil {
+						return err
+					}
+				}
+			}
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO calendar_snapshot_facts_staging
-				       (session_id, page, source_event_key, start_at, end_at, all_day, time_zone, availability)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-				sessionID, n, f.key, f.start, f.end, f.allDay, f.timeZone, f.availability); err != nil {
+				       (session_id, page, source_event_key, start_at, end_at, all_day, time_zone, availability,
+				        detail_allowed, title_ciphertext, location_ciphertext)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+				sessionID, n, f.key, f.start, f.end, f.allDay, f.timeZone, f.availability,
+				detailAllowed, titleCiphertext, locationCiphertext); err != nil {
 				var pgErr *pgconn.PgError
 				if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 					// 다른 page와 source_event_key가 겹친다.
@@ -423,7 +473,8 @@ func (h *Handler) completeSnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 		var status string
 		var expected int
-		if err := tx.QueryRow(ctx, `SELECT status, expected_pages FROM calendar_snapshot_sessions WHERE id = $1 FOR UPDATE`, sessionID).Scan(&status, &expected); err != nil {
+		var detailsIncluded bool
+		if err := tx.QueryRow(ctx, `SELECT status, expected_pages, details_included FROM calendar_snapshot_sessions WHERE id = $1 FOR UPDATE`, sessionID).Scan(&status, &expected, &detailsIncluded); err != nil {
 			return mutation.Result{}, err
 		}
 		switch status {
@@ -445,8 +496,8 @@ func (h *Handler) completeSnapshot(w http.ResponseWriter, r *http.Request) {
 		if err := tx.QueryRow(ctx, `SELECT count(*), coalesce(sum(fact_count), 0) FROM calendar_snapshot_pages WHERE session_id = $1`, sessionID).Scan(&uploaded, &total); err != nil {
 			return mutation.Result{}, err
 		}
-		var staged int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM calendar_snapshot_facts_staging WHERE session_id = $1`, sessionID).Scan(&staged); err != nil {
+		var staged, detailAllowed int
+		if err := tx.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE detail_allowed) FROM calendar_snapshot_facts_staging WHERE session_id = $1`, sessionID).Scan(&staged, &detailAllowed); err != nil {
 			return mutation.Result{}, err
 		}
 		// 모든 page가 올라왔고 개수가 클라이언트 선언·page 합계와 모두 같아야 한다.
@@ -478,13 +529,30 @@ func (h *Handler) completeSnapshot(w http.ResponseWriter, r *http.Request) {
 			 WHERE id = $1`, sessionID, newGen, req.FactCount); err != nil {
 			return mutation.Result{}, err
 		}
+		details, err := h.openSnapshotDetails(ctx, tx, sessionID)
+		if err != nil {
+			return mutation.Result{}, err
+		}
 		if _, err := tx.Exec(ctx, `DELETE FROM calendar_snapshot_facts_staging WHERE session_id = $1`, sessionID); err != nil {
 			return mutation.Result{}, err
 		}
 		// 사용자가 속한 모든 Party의 busy projection을 새 generation에 맞춘다. connection은 이미
 		// FOR UPDATE로 잡고 있다.
-		if err := party.RebuildBusyProjections(ctx, tx, p.UserID, nil, true); err != nil {
+		if err := party.RebuildBusyProjectionsWithDetails(ctx, tx, p.UserID, nil, true, h.box, details); err != nil {
 			return mutation.Result{}, err
+		}
+		if detailAllowed == staged && (detailsIncluded || detailAllowed > 0) {
+			// Party 설정 변경과 같은 Party row 잠금 아래에서 현재 version만 승인한다.
+			// 이후 details 상향은 version이 증가하므로 새 snapshot 전까지 다시 pending이다.
+			if _, err := tx.Exec(ctx, `
+				UPDATE party_visibility_settings s
+				   SET details_ready_version = s.version
+				  FROM party_memberships m, parties p
+				 WHERE s.user_id = $1 AND s.visibility_level = 'details'
+				   AND m.party_id = s.party_id AND m.user_id = s.user_id AND m.status = 'active'
+				   AND p.id = s.party_id AND p.status = 'active'`, p.UserID); err != nil {
+				return mutation.Result{}, err
+			}
 		}
 		return mutation.Result{StatusCode: http.StatusOK, ResourceType: "calendar_snapshot", ResourceID: sessionID, ResourceVersion: newGen}, nil
 	})
@@ -495,6 +563,56 @@ func (h *Handler) completeSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 var errSnapshotIncomplete = errors.New("calendar: snapshot이 아직 완전하지 않다")
+
+func (h *Handler) openSnapshotDetails(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID) (map[string]party.ProjectionPlainDetails, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT source_event_key, detail_allowed, title_ciphertext, location_ciphertext
+		  FROM calendar_snapshot_facts_staging
+		 WHERE session_id = $1 AND detail_allowed`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	details := map[string]party.ProjectionPlainDetails{}
+	for rows.Next() {
+		var (
+			key                    []byte
+			allowed                bool
+			titleCipher, locCipher []byte
+			titlePlain, locPlain   []byte
+		)
+		if err := rows.Scan(&key, &allowed, &titleCipher, &locCipher); err != nil {
+			return nil, err
+		}
+		if !allowed {
+			continue
+		}
+		if h.box == nil {
+			return nil, errDetailsSealerMissing
+		}
+		if len(titleCipher) > 0 {
+			titlePlain, err = h.box.Open(titleCipher, stagingTitlePurpose(sessionID, key))
+			if err != nil {
+				return nil, err
+			}
+		}
+		if len(locCipher) > 0 {
+			locPlain, err = h.box.Open(locCipher, stagingLocationPurpose(sessionID, key))
+			if err != nil {
+				return nil, err
+			}
+		}
+		details[string(key)] = party.ProjectionPlainDetails{
+			HasDetails:        true,
+			TitlePlaintext:    titlePlain,
+			LocationPlaintext: locPlain,
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return details, nil
+}
 
 // abortSnapshot은 열린 session을 폐기한다. 기존 generation과 projection에는 영향이 없다.
 func (h *Handler) abortSnapshot(w http.ResponseWriter, r *http.Request) {

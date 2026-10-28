@@ -195,11 +195,22 @@ func TestSnapshotValidation(t *testing.T) {
 		t.Fatal(rec.Body.String())
 	}
 	assertError(t, s.putPage(t, a, id, 1, []fact{ok}), http.StatusBadRequest, httpapi.CodeInvalidRequest)
-	// page 번호 범위, 알 수 없는 필드(allowlist), 너무 많은 fact.
+	// page 번호 범위, 알 수 없는 필드, 너무 많은 fact.
 	assertError(t, s.putPage(t, a, id, 2, nil), http.StatusBadRequest, httpapi.CodeInvalidRequest)
 	assertError(t, s.req(t, http.MethodPut, "/v1/calendar/snapshots/"+id.String()+"/pages/0", a.AccessToken, nil,
-		`{"facts":[{"source_event_key":"`+key(1)+`","start_at":"`+ok.Start+`","end_at":"`+ok.End+`","all_day":false,"time_zone":"Asia/Seoul","availability":"busy","title":"비밀 회의"}]}`),
+		`{"facts":[{"source_event_key":"`+key(1)+`","start_at":"`+ok.Start+`","end_at":"`+ok.End+`","all_day":false,"time_zone":"Asia/Seoul","availability":"busy","notes":"비밀 메모"}]}`),
 		http.StatusBadRequest, httpapi.CodeInvalidRequest)
+	withLocationOnly := ok
+	loc := "회의실"
+	withLocationOnly.Location = &loc
+	assertError(t, s.putPage(t, a, id, 0, []fact{withLocationOnly}), http.StatusBadRequest, httpapi.CodeInvalidRequest)
+	withoutBox := ok
+	title := "비밀 회의"
+	withoutBox.Title = &title
+	origBox := s.cal.box
+	s.cal.box = nil
+	assertError(t, s.putPage(t, a, id, 0, []fact{withoutBox}), http.StatusInternalServerError, httpapi.CodeInternal)
+	s.cal.box = origBox
 	many := make([]fact, maxFactsPerPage+1)
 	for i := range many {
 		many[i] = mkFact(byte(i), 1, 10)

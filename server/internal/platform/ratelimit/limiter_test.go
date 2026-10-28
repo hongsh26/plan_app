@@ -334,7 +334,9 @@ func TestPruneRemovesOnlyOldBucketsAsWorkerRole(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := Prune(ctx, worker, Retention, 2); err != nil {
+	// 다른 통합 테스트 실행에서 남은 오래된 bucket도 함께 정리될 수 있다.
+	// 이 테스트는 배치 크기가 아니라 보존 경계를 검증한다.
+	if _, err := Prune(ctx, worker, Retention, 10000); err != nil {
 		t.Fatal(err)
 	}
 	var left int

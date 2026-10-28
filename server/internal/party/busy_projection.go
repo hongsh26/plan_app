@@ -1,6 +1,7 @@
 package party
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -13,18 +14,6 @@ import (
 )
 
 func isNoRows(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
-
-// projectionNamespace는 projection ID를 (party, owner, source_event_key)에서 결정적으로 만드는
-// UUIDv5 namespace다. 같은 일정이 다시 만들어져도 클라이언트 캐시의 entity ID가 바뀌지 않는다.
-var projectionNamespace = uuid.MustParse("6f1b7a2e-4c58-4a0d-9b3e-2d5a7c1e8f40")
-
-func projectionID(partyID, ownerID uuid.UUID, key []byte) uuid.UUID {
-	buf := make([]byte, 0, 32+len(key))
-	buf = append(buf, partyID[:]...)
-	buf = append(buf, ownerID[:]...)
-	buf = append(buf, key...)
-	return uuid.NewSHA1(projectionNamespace, buf)
-}
 
 // visibleStatuses는 다른 멤버에게 projection을 보여도 되는 연결 상태다. syncing과 error는
 // 마지막 정상 데이터를 유지한다(설계 3 §5.2). denied·restricted·revoked·needs_source_reselection과
@@ -39,14 +28,27 @@ type busyFact struct {
 	timeZone string
 }
 
+type desiredProjection struct {
+	busyFact
+	id                 uuid.UUID
+	level              string
+	titlePlaintext     []byte
+	locationPlaintext  []byte
+	titleCiphertext    []byte
+	locationCiphertext []byte
+}
+
 type existingProjection struct {
-	id     uuid.UUID
-	key    []byte
-	start  time.Time
-	end    time.Time
-	allDay bool
-	tz     string
-	level  string
+	id       uuid.UUID
+	key      []byte
+	start    time.Time
+	end      time.Time
+	allDay   bool
+	tz       string
+	level    string
+	title    []byte
+	location []byte
+	version  int64
 }
 
 // RebuildBusyProjections는 사용자의 활성 generation Busy facts로 사용자가 속한 Party들의 busy
@@ -64,6 +66,12 @@ type existingProjection struct {
 // 잡아야 한다(migration 00012). 멤버십 행은 FOR KEY SHARE로 잡아 동시에 끝나는 멤버십에
 // projection이 남지 않게 한다.
 func RebuildBusyProjections(ctx context.Context, tx *mutation.Tx, userID uuid.UUID, onlyParty *uuid.UUID, connectionLocked bool) error {
+	return RebuildBusyProjectionsWithDetails(ctx, tx, userID, onlyParty, connectionLocked, nil, nil)
+}
+
+// RebuildBusyProjectionsWithDetails는 snapshot complete 경로에서만 details allowlist를 projection으로
+// 승격한다. details가 없거나 설정이 details가 아니면 기존처럼 busyOnly로 안전 강등한다.
+func RebuildBusyProjectionsWithDetails(ctx context.Context, tx *mutation.Tx, userID uuid.UUID, onlyParty *uuid.UUID, connectionLocked bool, box DetailBox, details map[string]ProjectionPlainDetails) error {
 	var (
 		connID     uuid.UUID
 		status     string
@@ -83,7 +91,7 @@ func RebuildBusyProjections(ctx context.Context, tx *mutation.Tx, userID uuid.UU
 	visible := hasConn && visibleStatuses[status] && generation > 0
 
 	rows, err := tx.Query(ctx, `
-		SELECT m.party_id, s.visibility_level, s.version
+		SELECT m.party_id, s.visibility_level, s.share_location, s.version
 		  FROM parties p
 		  JOIN party_memberships m ON m.party_id = p.id
 		  JOIN party_visibility_settings s ON s.party_id = m.party_id AND s.user_id = m.user_id
@@ -97,12 +105,13 @@ func RebuildBusyProjections(ctx context.Context, tx *mutation.Tx, userID uuid.UU
 	type target struct {
 		partyID        uuid.UUID
 		level          string
+		shareLocation  bool
 		settingVersion int64
 	}
 	var targets []target
 	for rows.Next() {
 		var t target
-		if err := rows.Scan(&t.partyID, &t.level, &t.settingVersion); err != nil {
+		if err := rows.Scan(&t.partyID, &t.level, &t.shareLocation, &t.settingVersion); err != nil {
 			rows.Close()
 			return err
 		}
@@ -139,20 +148,49 @@ func RebuildBusyProjections(ctx context.Context, tx *mutation.Tx, userID uuid.UU
 	}
 
 	for _, t := range targets {
-		desired := facts
+		desired, err := buildDesiredProjections(t.level, t.shareLocation, facts, details)
+		if err != nil {
+			return err
+		}
 		if !visible || t.level == "hidden" {
 			desired = nil
 		}
-		if err := syncPartyProjections(ctx, tx, t.partyID, userID, desired, generation, t.settingVersion); err != nil {
+		if err := syncPartyProjections(ctx, tx, t.partyID, userID, desired, generation, t.settingVersion, box, details == nil && t.level == visibilityDetails, t.shareLocation); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func syncPartyProjections(ctx context.Context, tx *mutation.Tx, partyID, ownerID uuid.UUID, desired []busyFact, generation, settingVersion int64) error {
+func buildDesiredProjections(level string, shareLocation bool, facts []busyFact, details map[string]ProjectionPlainDetails) ([]desiredProjection, error) {
+	out := make([]desiredProjection, 0, len(facts))
+	for _, f := range facts {
+		d := desiredProjection{busyFact: f, level: "busyOnly"}
+		if level == "details" {
+			if pd, ok := details[string(f.key)]; ok && pd.HasDetails {
+				d.level = "details"
+				d.titlePlaintext = pd.TitlePlaintext
+				if shareLocation {
+					d.locationPlaintext = pd.LocationPlaintext
+				}
+			}
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+func projectionPlaintextMatches(box DetailBox, sealed, plain []byte, purpose string) bool {
+	if len(sealed) == 0 || len(plain) == 0 {
+		return len(sealed) == 0 && len(plain) == 0
+	}
+	opened, err := box.Open(sealed, purpose)
+	return err == nil && bytes.Equal(opened, plain)
+}
+
+func syncPartyProjections(ctx context.Context, tx *mutation.Tx, partyID, ownerID uuid.UUID, desired []desiredProjection, generation, settingVersion int64, box DetailBox, preserveExistingDetails, shareLocation bool) error {
 	rows, err := tx.Query(ctx, `
-		SELECT id, source_event_key, start_at, end_at, all_day, time_zone, visibility_level
+		SELECT id, source_event_key, start_at, end_at, all_day, time_zone, visibility_level, title_ciphertext, location_ciphertext, version
 		  FROM party_schedule_projections
 		 WHERE party_id = $1 AND owner_user_id = $2`, partyID, ownerID)
 	if err != nil {
@@ -161,7 +199,7 @@ func syncPartyProjections(ctx context.Context, tx *mutation.Tx, partyID, ownerID
 	existing := map[string]existingProjection{}
 	for rows.Next() {
 		var e existingProjection
-		if err := rows.Scan(&e.id, &e.key, &e.start, &e.end, &e.allDay, &e.tz, &e.level); err != nil {
+		if err := rows.Scan(&e.id, &e.key, &e.start, &e.end, &e.allDay, &e.tz, &e.level, &e.title, &e.location, &e.version); err != nil {
 			rows.Close()
 			return err
 		}
@@ -172,16 +210,56 @@ func syncPartyProjections(ctx context.Context, tx *mutation.Tx, partyID, ownerID
 		return err
 	}
 
-	var upserts []busyFact
+	var upserts []desiredProjection
 	unchanged := make([][]byte, 0, len(desired))
 	seen := make(map[string]struct{}, len(desired))
 	for _, f := range desired {
 		k := hex.EncodeToString(f.key)
 		seen[k] = struct{}{}
 		e, ok := existing[k]
-		if ok && e.start.Equal(f.start) && e.end.Equal(f.end) && e.allDay == f.allDay && e.tz == f.timeZone && e.level == "busyOnly" {
+		preserved := preserveExistingDetails && ok && e.level == visibilityDetails
+		if preserved {
+			f.level, f.titleCiphertext = visibilityDetails, e.title
+			if shareLocation {
+				f.locationCiphertext = e.location
+			}
+		}
+		if f.level == visibilityDetails && box == nil && !preserved {
+			return errors.New("party: details projection sealer가 없다")
+		}
+		f.id = uuid.New()
+		if ok {
+			f.id = e.id
+		}
+		titleMatches, locationMatches := false, false
+		if preserved {
+			titleMatches = true
+			locationMatches = bytes.Equal(e.location, f.locationCiphertext)
+		} else if f.level == visibilityDetails && ok && e.level == visibilityDetails {
+			titleMatches = projectionPlaintextMatches(box, e.title, f.titlePlaintext, SealPurposeProjectionTitle(e.id))
+			locationMatches = projectionPlaintextMatches(box, e.location, f.locationPlaintext, SealPurposeProjectionLocation(e.id))
+		} else if f.level == visibilityBusyOnly {
+			titleMatches, locationMatches = e.title == nil, e.location == nil
+		}
+		if ok && e.start.Equal(f.start) && e.end.Equal(f.end) && e.allDay == f.allDay && e.tz == f.timeZone &&
+			e.level == f.level && titleMatches && locationMatches {
 			unchanged = append(unchanged, f.key)
 			continue
+		}
+		if f.level == visibilityDetails && !preserved {
+			var err error
+			if len(f.titlePlaintext) > 0 {
+				f.titleCiphertext, err = box.Seal(f.titlePlaintext, SealPurposeProjectionTitle(f.id))
+				if err != nil {
+					return err
+				}
+			}
+			if len(f.locationPlaintext) > 0 {
+				f.locationCiphertext, err = box.Seal(f.locationPlaintext, SealPurposeProjectionLocation(f.id))
+				if err != nil {
+					return err
+				}
+			}
 		}
 		upserts = append(upserts, f)
 	}
@@ -204,27 +282,32 @@ func syncPartyProjections(ctx context.Context, tx *mutation.Tx, partyID, ownerID
 		drows, err := tx.Query(ctx, `
 			DELETE FROM party_schedule_projections
 			 WHERE party_id = $1 AND owner_user_id = $2 AND source_event_key = ANY($3)
-			RETURNING id`, partyID, ownerID, stale)
+			RETURNING id, version`, partyID, ownerID, stale)
 		if err != nil {
 			return err
 		}
-		var ids []uuid.UUID
+		type deletedProjection struct {
+			id      uuid.UUID
+			version int64
+		}
+		var deleted []deletedProjection
 		for drows.Next() {
-			var id uuid.UUID
-			if err := drows.Scan(&id); err != nil {
+			var d deletedProjection
+			if err := drows.Scan(&d.id, &d.version); err != nil {
 				drows.Close()
 				return err
 			}
-			ids = append(ids, id)
+			deleted = append(deleted, d)
 		}
 		drows.Close()
 		if err := drows.Err(); err != nil {
 			return err
 		}
-		changes := make([]mutation.Change, 0, len(ids)*len(recipients))
-		for _, id := range ids {
+		changes := make([]mutation.Change, 0, len(deleted)*len(recipients))
+		for _, d := range deleted {
+			version := d.version + 1
 			for _, r := range recipients {
-				changes = append(changes, mutation.Change{Recipient: r, EntityType: entityScheduleProjection, EntityID: id})
+				changes = append(changes, mutation.Change{Recipient: r, EntityType: entityScheduleProjection, EntityID: d.id, Version: &version, Tombstone: true})
 			}
 		}
 		if err := tx.EmitChanges(ctx, changes); err != nil {
@@ -239,32 +322,37 @@ func syncPartyProjections(ctx context.Context, tx *mutation.Tx, partyID, ownerID
 		ends := make([]time.Time, len(upserts))
 		allDays := make([]bool, len(upserts))
 		zones := make([]string, len(upserts))
+		levels := make([]string, len(upserts))
+		titles := make([][]byte, len(upserts))
+		locations := make([][]byte, len(upserts))
 		for i, f := range upserts {
-			ids[i], keys[i], starts[i], ends[i], allDays[i], zones[i] = projectionID(partyID, ownerID, f.key), f.key, f.start, f.end, f.allDay, f.timeZone
+			ids[i], keys[i], starts[i], ends[i], allDays[i], zones[i] = f.id, f.key, f.start, f.end, f.allDay, f.timeZone
+			levels[i], titles[i], locations[i] = f.level, f.titleCiphertext, f.locationCiphertext
 		}
 		urows, err := tx.Query(ctx, `
 			INSERT INTO party_schedule_projections AS p
 			       (id, party_id, owner_user_id, source_event_key, source_generation, setting_version,
-			        visibility_level, start_at, end_at, all_day, time_zone)
-			SELECT t.id, $1, $2, t.key, $3, $4, 'busyOnly', t.start_at, t.end_at, t.all_day, t.tz
-			  FROM unnest($5::uuid[], $6::bytea[], $7::timestamptz[], $8::timestamptz[], $9::boolean[], $10::text[])
-			       AS t(id, key, start_at, end_at, all_day, tz)
+			        visibility_level, start_at, end_at, all_day, time_zone, title_ciphertext, location_ciphertext)
+			SELECT t.id, $1, $2, t.key, $3, $4, t.level, t.start_at, t.end_at, t.all_day, t.tz, t.title_ciphertext, t.location_ciphertext
+			  FROM unnest($5::uuid[], $6::bytea[], $7::timestamptz[], $8::timestamptz[], $9::boolean[], $10::text[], $11::text[], $12::bytea[], $13::bytea[])
+			       AS t(id, key, start_at, end_at, all_day, tz, level, title_ciphertext, location_ciphertext)
 			ON CONFLICT (party_id, owner_user_id, source_event_key) DO UPDATE
 			   SET source_generation = EXCLUDED.source_generation,
 			       setting_version   = EXCLUDED.setting_version,
-			       visibility_level  = 'busyOnly',
+			       visibility_level  = EXCLUDED.visibility_level,
 			       start_at = EXCLUDED.start_at, end_at = EXCLUDED.end_at,
 			       all_day = EXCLUDED.all_day, time_zone = EXCLUDED.time_zone,
-			       title_ciphertext = NULL, location_ciphertext = NULL,
+			       title_ciphertext = EXCLUDED.title_ciphertext, location_ciphertext = EXCLUDED.location_ciphertext,
 			       version = p.version + 1, updated_at = now()
-			RETURNING id, version, start_at, end_at, all_day, time_zone`,
-			partyID, ownerID, generation, settingVersion, ids, keys, starts, ends, allDays, zones)
+			RETURNING id, version, visibility_level, start_at, end_at, all_day, time_zone`,
+			partyID, ownerID, generation, settingVersion, ids, keys, starts, ends, allDays, zones, levels, titles, locations)
 		if err != nil {
 			return err
 		}
 		type out struct {
 			id      uuid.UUID
 			version int64
+			level   string
 			start   time.Time
 			end     time.Time
 			allDay  bool
@@ -273,7 +361,7 @@ func syncPartyProjections(ctx context.Context, tx *mutation.Tx, partyID, ownerID
 		var outs []out
 		for urows.Next() {
 			var o out
-			if err := urows.Scan(&o.id, &o.version, &o.start, &o.end, &o.allDay, &o.tz); err != nil {
+			if err := urows.Scan(&o.id, &o.version, &o.level, &o.start, &o.end, &o.allDay, &o.tz); err != nil {
 				urows.Close()
 				return err
 			}
@@ -287,7 +375,7 @@ func syncPartyProjections(ctx context.Context, tx *mutation.Tx, partyID, ownerID
 		for _, o := range outs {
 			version := o.version
 			payload := map[string]any{
-				"party_id": partyID.String(), "owner_user_id": ownerID.String(), "visibility_level": "busyOnly",
+				"party_id": partyID.String(), "owner_user_id": ownerID.String(), "visibility_level": o.level,
 				"start_at": o.start.UTC().Format(time.RFC3339), "end_at": o.end.UTC().Format(time.RFC3339),
 				"all_day": o.allDay, "time_zone": o.tz,
 			}

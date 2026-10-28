@@ -45,18 +45,18 @@ migration 00010으로 Party 테이블이 생겼지만 삭제 worker(`internal/ac
 
 DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합성만 보고 `users.status`를 보지 않으며, 삭제 파이프라인은 `users` row를 물리 삭제하지 않아 FK RESTRICT도 걸리지 않는다. 현재 테스트가 통과하는 이유는 계정 삭제 테스트에 Party row가 없기 때문이지 이 경로가 안전해서가 아니다.
 
-설계 §5.8과 계획 P8(강제 위임·해산)이 이 공백의 주인이다. **P8을 P5 이후로 미루더라도 이 결함은 그때까지 살아 있다.** 승계자 결정 규칙은 계획 P8에 있다.
+설계 §5.8과 계획 P8(강제 위임·해산)이 이 공백의 주인이다. P5(탈퇴·강퇴·해산)는 구현됐고 P8은 그 코어 `endMembershipTx`·`disbandPartyTx`(`internal/party/membership_end.go`)를 `account_deleted`로 재사용하면 된다. 승계자 결정 규칙은 계획 P8에 있다.
 
-### Party P1~P4, 요청 제한 완료
+### Party P1~P5, 요청 제한 완료
 
-스키마(00010), API(생성·조회·수정·멤버 목록), 초대(P3), 소유권 위임(P4, `POST /v1/parties/{id}/owner`), 공용 요청 제한(00011)을 구현했다. 상세와 설계 편차는 `docs/rec/`의 `..._09-29_1415_party_membership_schema`, `..._09-30_1621_party_invites`, `..._09-30_1710_rate_limit_impl`, `..._09-30_1720_party_owner_transfer`.
+스키마(00010), API(생성·조회·수정·멤버 목록), 초대(P3), 소유권 위임(P4, `POST /v1/parties/{id}/owner`), 탈퇴·강퇴·해산(P5), 공용 요청 제한(00011)을 구현했다. 상세와 설계 편차는 `docs/rec/`의 `..._09-29_1415_party_membership_schema`, `..._09-30_1621_party_invites`, `..._09-30_1710_rate_limit_impl`, `..._09-30_1720_party_owner_transfer`, `2026-10-14_2322_membership_end_cleanup`.
 
 - 이름 길이는 40 **rune** 기준이다. 초대 재전송은 token 원문을 다시 주지 못한다(무효화 후 새로 만든다)
 - **`SET CONSTRAINTS ALL IMMEDIATE`는 남은 트랜잭션 전체의 검사 시점을 바꾼다.** 지연 검증 테스트에서는 트랜잭션당 한 번, 마지막에만 부른다. `CREATE CONSTRAINT TRIGGER` 이름이 63자를 넘으면 PostgreSQL이 조용히 자른다
 - **새 소비자는 `Require` 다음, 모든 입력 검증·조회·`mutation.Prepare` 앞에서 `ratelimit.Enforce`를 호출한다.** 트랜잭션 안에서 세면 롤백과 함께 카운트가 사라진다. 한도는 `internal/platform/ratelimit/limits.go` 한 곳
 - **배포 전:** `CLIENT_IP_SOURCE`(비로컬 필수)·`TRUSTED_PROXY_HOPS`·`RATE_LIMIT_KEY`를 설정하고 실제 헤더로 hops를 검증한다. `client_ip_fallback`·`limiter_error` 로그를 경보에 건다
 - **iOS 계약:** refresh 429는 세션 상실이 아니다. `Retry-After` 뒤 재시도하며 로그아웃하지 않는다
-- **남은 것:** AASA 호스팅과 웹 폴백(`invite.web` 제한 포함), `notify_member_joined`·`notify_owner_transferred` worker kind(job은 pending으로 쌓인다), 가입 시 busy projection(`calendar_busy_facts` 없음), 공개 수준·검색·제안의 요청 제한 소비자, 초대·Party endpoint의 OpenAPI 등재
+- **남은 것:** AASA 호스팅과 웹 폴백(`invite.web` 제한 포함), `notify_member_joined`·`notify_owner_transferred`·`notify_member_left`·`notify_member_removed`·`notify_party_disbanded` worker kind(job은 pending으로 쌓인다), 공개 수준·검색·제안의 요청 제한 소비자, 초대·Party endpoint의 OpenAPI 등재
 
 ### P0에서 남은 것
 
@@ -78,11 +78,11 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 
 ## 다음 작업
 
-**목표: 핵심 가치(공통 가능 시간 찾기)를 보여주는 시연.** 시연에 필요 없는 P5·P6~P8·제안·캘린더 쓰기·알림은 뒤로 미루되, P8(계정 삭제 연동)은 출시 전 필수다.
+**목표: 핵심 가치(공통 가능 시간 찾기)를 보여주는 시연.** 시연에 필요 없는 P6~P8·제안·캘린더 쓰기·알림은 뒤로 미루되, P8(계정 삭제 연동)은 출시 전 필수다.
 
 1. ✅ 개발용 로그인(`DEV_LOGIN_ENABLED=true`, 로컬 전용)과 `server/scripts/`(`run_api_dev.sh`, `demo_api.sh`)
 2. ✅ 캘린더 동기화 서버(설계 3): 연결·snapshot·Busy facts·busy projection·freshness(재검증 High 1·Med 4 반영, 후속 Low는 rec 참고). `docs/rec/2026-09-30_1749_calendar_sync_server.md`
-3. **공개 수준**(설계 5, `.omc/plans/party-visibility-implementation.md`): 본인 설정 API와 details 상세, 하향·상향 시 projection 갱신. 지금은 설정 변경 API가 없고 projection은 busyOnly뿐이다
+3. **공개 수준**(설계 5, `.omc/plans/party-visibility-implementation.md`): 서버 쪽 V1~V3 완료(탈퇴·강퇴·해산 cleanup 포함, `docs/rec/2026-10-14_2322_membership_end_cleanup.md`). 남은 것은 iOS(V3 캐시 삭제·scope 교체, V5 설정 화면)와 V6 privacy 스캔. **iOS 계약:** version 없는 tombstone은 version 하한을 남기지 않고, 탈퇴 큐는 200·410을 모두 완료로 처리한다. 브랜치 `feature/party-visibility`의 작업은 아직 미커밋이다
 4. **가능 시간 검색 서버**(설계 6, `.omc/plans/availability-search-implementation.md`): `calendar.FreshUsers`로 freshness gate, `calendar_busy_facts`로 계산
 5. **P6-lite + iOS 연동:** `bootstrap`이 Party·멤버십·projection을 내려주고 `GET /v1/parties`(내 Party 목록)를 추가한다(지금 bootstrap은 user·기기뿐). 그 뒤 iOS API 클라이언트·로그인·Party·초대·캘린더·가능 시간 화면. 디자인은 `docs/design_references.md`
 

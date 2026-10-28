@@ -1,6 +1,7 @@
 package calendar
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	partypkg "plantogether/server/internal/party"
 	"plantogether/server/internal/platform/mutation"
 )
 
@@ -72,6 +74,16 @@ func (s *stack) setLevel(t *testing.T, partyID uuid.UUID, userID, level string) 
 		UPDATE party_visibility_settings
 		   SET visibility_level = $3, share_location = false, version = version + 1
 		 WHERE party_id = $1 AND user_id = $2`, partyID, userID, level); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (s *stack) setVisibility(t *testing.T, partyID uuid.UUID, userID, level string, shareLocation bool) {
+	t.Helper()
+	if _, err := s.pool.Exec(context.Background(), `
+		UPDATE party_visibility_settings
+		   SET visibility_level = $3, share_location = $4, version = version + 1
+		 WHERE party_id = $1 AND user_id = $2`, partyID, userID, level, shareLocation); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -148,6 +160,185 @@ func TestSnapshotBuildsAndDiffsBusyProjections(t *testing.T) {
 	}
 }
 
+func TestSnapshotDetailsPromoteOnlyAllowedProjectionFields(t *testing.T) {
+	s := newStack(t)
+	alice := s.signIn(t, "cal.d."+uuid.NewString())
+	bob := s.signIn(t, "cal.d."+uuid.NewString())
+	s.enableCalendar(t, alice)
+	p := s.newParty(t, alice)
+	s.join(t, bob, p)
+	s.setVisibility(t, p.ID, alice.UserID, "details", false)
+
+	title, location := "전략 회의", "회의실 A"
+	f := mkFact(9, 1, 10)
+	f.Title, f.Location = &title, &location
+	s.sync(t, alice, 1, []fact{f}, 10)
+
+	var (
+		projectionID uuid.UUID
+		level        string
+		titleCipher  []byte
+		locCipher    []byte
+	)
+	if err := s.pool.QueryRow(context.Background(), `
+		SELECT id, visibility_level, title_ciphertext, location_ciphertext
+		  FROM party_schedule_projections
+		 WHERE party_id = $1 AND owner_user_id = $2`, p.ID, alice.UserID).Scan(
+		&projectionID, &level, &titleCipher, &locCipher); err != nil {
+		t.Fatal(err)
+	}
+	if level != "details" || len(titleCipher) == 0 || locCipher != nil {
+		t.Fatalf("details/share_location=false projection level=%s title=%d location=%v", level, len(titleCipher), locCipher)
+	}
+	plain, err := s.box.Open(titleCipher, partypkg.SealPurposeProjectionTitle(projectionID))
+	if err != nil || string(plain) != title {
+		t.Fatalf("title 복호화 = %q %v", string(plain), err)
+	}
+	schedulePath := "/v1/parties/" + p.ID.String() + "/schedule?start_at=" + f.Start + "&end_at=" + f.End
+	schedule := s.req(t, http.MethodGet, schedulePath, bob.AccessToken, nil, "")
+	if schedule.Code != http.StatusOK {
+		t.Fatalf("schedule 조회 = %d: %s", schedule.Code, schedule.Body.String())
+	}
+	visible := decode[struct {
+		Projections []struct {
+			DisplayKind string  `json:"displayKind"`
+			Title       *string `json:"title"`
+			Location    *string `json:"location"`
+		} `json:"projections"`
+	}](t, schedule).Projections
+	if len(visible) != 1 || visible[0].DisplayKind != "details" || visible[0].Title == nil || *visible[0].Title != title || visible[0].Location != nil {
+		t.Fatalf("schedule details allowlist = %+v", visible)
+	}
+	var payload string
+	if err := s.pool.QueryRow(context.Background(), `
+		SELECT payload::text FROM sync_changes
+		 WHERE recipient_user_id = $1 AND entity_type = 'party_schedule_projection' AND entity_id = $2 AND operation = 'upsert'
+		 ORDER BY txid DESC, ordinal DESC LIMIT 1`, bob.UserID, projectionID).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(payload, "title") || strings.Contains(payload, "location") || strings.Contains(payload, "ciphertext") {
+		t.Fatalf("sync payload에 상세 필드가 있다: %s", payload)
+	}
+	if n := count(t, s.pool, `SELECT count(*) FROM calendar_snapshot_facts_staging`); n != 0 {
+		t.Fatalf("complete 뒤 staging = %d", n)
+	}
+	var versionBefore, versionAfter int64
+	if err := s.pool.QueryRow(context.Background(), `SELECT version FROM party_schedule_projections WHERE id = $1`, projectionID).Scan(&versionBefore); err != nil {
+		t.Fatal(err)
+	}
+	s.sync(t, alice, 2, []fact{f}, 10)
+	var repeatCipher []byte
+	if err := s.pool.QueryRow(context.Background(), `SELECT version, title_ciphertext FROM party_schedule_projections WHERE id = $1`, projectionID).Scan(&versionAfter, &repeatCipher); err != nil {
+		t.Fatal(err)
+	}
+	if versionAfter != versionBefore || !bytes.Equal(repeatCipher, titleCipher) {
+		t.Fatalf("동일 details snapshot이 projection을 변경했다: version %d -> %d", versionBefore, versionAfter)
+	}
+
+	s.setVisibility(t, p.ID, alice.UserID, "details", true)
+	s.sync(t, alice, 3, []fact{f}, 10)
+	if err := s.pool.QueryRow(context.Background(), `
+		SELECT id, location_ciphertext
+		  FROM party_schedule_projections
+		 WHERE party_id = $1 AND owner_user_id = $2`, p.ID, alice.UserID).Scan(&projectionID, &locCipher); err != nil {
+		t.Fatal(err)
+	}
+	plain, err = s.box.Open(locCipher, partypkg.SealPurposeProjectionLocation(projectionID))
+	if err != nil || string(plain) != location {
+		t.Fatalf("location 복호화 = %q %v", string(plain), err)
+	}
+}
+
+func TestSnapshotWithoutDetailAllowlistDowngradesPreviousDetails(t *testing.T) {
+	s := newStack(t)
+	alice := s.signIn(t, "cal.detail.removed."+uuid.NewString())
+	s.enableCalendar(t, alice)
+	p := s.newParty(t, alice)
+	s.setVisibility(t, p.ID, alice.UserID, "details", false)
+	f := mkFact(13, 1, 10)
+	title := "삭제될 제목"
+	f.Title = &title
+	s.sync(t, alice, 1, []fact{f}, 10)
+	if n := count(t, s.pool, `SELECT count(*) FROM party_schedule_projections WHERE party_id = $1 AND visibility_level = 'details' AND title_ciphertext IS NOT NULL`, p.ID); n != 1 {
+		t.Fatalf("초기 details projection = %d", n)
+	}
+	f.Title = nil
+	s.sync(t, alice, 2, []fact{f}, 10)
+	if n := count(t, s.pool, `SELECT count(*) FROM party_schedule_projections WHERE party_id = $1 AND visibility_level = 'busyOnly' AND title_ciphertext IS NULL AND location_ciphertext IS NULL`, p.ID); n != 1 {
+		t.Fatalf("상세 allowlist 제거 후 busyOnly projection = %d", n)
+	}
+}
+
+func TestVisibilityDetailsRefreshStateFollowsDetailedSnapshot(t *testing.T) {
+	s := newStack(t)
+	alice := s.signIn(t, "cal.state."+uuid.NewString())
+	s.enableCalendar(t, alice)
+	p := s.newParty(t, alice)
+	path := "/v1/parties/" + p.ID.String() + "/visibility/me"
+	read := func() struct {
+		Visibility struct {
+			Version int64  `json:"version"`
+			State   string `json:"details_refresh_state"`
+		} `json:"visibility"`
+	} {
+		t.Helper()
+		rec := s.req(t, http.MethodGet, path, alice.AccessToken, nil, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("설정 조회 = %d: %s", rec.Code, rec.Body.String())
+		}
+		return decode[struct {
+			Visibility struct {
+				Version int64  `json:"version"`
+				State   string `json:"details_refresh_state"`
+			} `json:"visibility"`
+		}](t, rec)
+	}
+	if rec := s.mut(t, http.MethodPatch, path, alice.AccessToken, `{"visibility_level":"details","share_location":false}`, "1"); rec.Code != http.StatusAccepted {
+		t.Fatalf("details 상향 = %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := read(); got.Visibility.State != "pending_details_refresh" {
+		t.Fatalf("상향 후 상태 = %+v", got.Visibility)
+	}
+	title := "상세 테스트"
+	f := mkFact(11, 1, 10)
+	f.Title = &title
+	s.sync(t, alice, 1, []fact{f}, 10)
+	if got := read(); got.Visibility.State != "not_required" {
+		t.Fatalf("상세 snapshot 후 상태 = %+v", got.Visibility)
+	}
+	if rec := s.mut(t, http.MethodPatch, path, alice.AccessToken, `{"visibility_level":"details","share_location":true}`, "2"); rec.Code != http.StatusAccepted {
+		t.Fatalf("장소 상향 = %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := read(); got.Visibility.State != "pending_details_refresh" {
+		t.Fatalf("장소 상향 후 상태 = %+v", got.Visibility)
+	}
+	location := "회의실"
+	f.Location = &location
+	s.sync(t, alice, 2, []fact{f}, 10)
+	if got := read(); got.Visibility.State != "not_required" {
+		t.Fatalf("장소 snapshot 후 상태 = %+v", got.Visibility)
+	}
+	if n := count(t, s.pool, `SELECT count(*) FROM party_schedule_projections WHERE party_id = $1 AND location_ciphertext IS NOT NULL`, p.ID); n != 1 {
+		t.Fatalf("장소 공유 상향 뒤 ciphertext = %d건", n)
+	}
+	if rec := s.mut(t, http.MethodPatch, path, alice.AccessToken, `{"visibility_level":"details","share_location":false}`, "3"); rec.Code != http.StatusOK {
+		t.Fatalf("장소 하향 = %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := read(); got.Visibility.State != "not_required" {
+		t.Fatalf("장소 하향 후 상태 = %+v", got.Visibility)
+	}
+	var level string
+	var titleBox, locationBox []byte
+	if err := s.pool.QueryRow(context.Background(), `
+		SELECT visibility_level, title_ciphertext, location_ciphertext
+		  FROM party_schedule_projections WHERE party_id = $1 AND owner_user_id = $2`, p.ID, alice.UserID).Scan(&level, &titleBox, &locationBox); err != nil {
+		t.Fatal(err)
+	}
+	if level != "details" || len(titleBox) == 0 || locationBox != nil {
+		t.Fatalf("장소 하향이 title까지 삭제했다: level=%s title=%d location=%d", level, len(titleBox), len(locationBox))
+	}
+}
+
 func hexByte(n byte) string {
 	const digits = "0123456789abcdef"
 	return string([]byte{digits[n>>4], digits[n&0xf]})
@@ -162,6 +353,7 @@ func TestHiddenLevelRemovesProjectionsButKeepsFactsAndDetailsDowngrades(t *testi
 	s.join(t, bob, p)
 	facts := []fact{mkFact(1, 1, 10), mkFact(2, 2, 10)}
 	s.sync(t, alice, 1, facts, 10)
+	beforeIDs := projectionIDs(t, s, p.ID)
 
 	s.setLevel(t, p.ID, alice.UserID, "hidden")
 	s.sync(t, alice, 2, facts, 10)
@@ -181,6 +373,11 @@ func TestHiddenLevelRemovesProjectionsButKeepsFactsAndDetailsDowngrades(t *testi
 	s.sync(t, alice, 3, facts, 10)
 	if n := s.projections(t, p.ID, alice.UserID); n != 2 {
 		t.Fatalf("projection = %d", n)
+	}
+	for id := range projectionIDs(t, s, p.ID) {
+		if _, reused := beforeIDs[id]; reused {
+			t.Fatalf("삭제 후 복원된 projection이 이전 ID %s를 재사용했다", id)
+		}
 	}
 	if n := count(t, s.pool, `SELECT count(*) FROM party_schedule_projections WHERE party_id = $1 AND visibility_level = 'details'`, p.ID); n != 0 {
 		t.Fatalf("details projection = %d", n)

@@ -49,6 +49,7 @@ type Handler struct {
 	logger  *slog.Logger
 	now     func() time.Time
 	limiter ratelimit.Allower
+	box     SecretBox
 }
 
 type Deps struct {
@@ -57,13 +58,22 @@ type Deps struct {
 	Now    func() time.Time
 	// Limiter는 snapshot 생성·업로드 요청 제한이다. nil이면 제한하지 않는다.
 	Limiter ratelimit.Allower
+	// SecretBox는 snapshot 상세 allowlist(title/location)를 staging에 봉인하고 projection으로 승격할 때 다시 봉인한다.
+	// details 필드가 요청에 있으면 nil을 허용하지 않는다.
+	SecretBox SecretBox
 }
 
 func NewHandler(d Deps) *Handler {
 	if d.Now == nil {
 		d.Now = time.Now
 	}
-	return &Handler{pool: d.Pool, logger: d.Logger, now: d.Now, limiter: d.Limiter}
+	return &Handler{pool: d.Pool, logger: d.Logger, now: d.Now, limiter: d.Limiter, box: d.SecretBox}
+}
+
+// SecretBox는 상세 allowlist 봉인 경계다. secretbox.LocalAESGCM이 구현한다.
+type SecretBox interface {
+	Seal(plaintext []byte, purpose string) ([]byte, error)
+	Open(sealed []byte, purpose string) ([]byte, error)
 }
 
 func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.Handler) {

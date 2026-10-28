@@ -22,6 +22,7 @@ import (
 	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/httpapi"
 	"plantogether/server/internal/platform/postgres/pgtest"
+	"plantogether/server/internal/platform/secretbox"
 )
 
 type subjectApple struct{}
@@ -35,6 +36,7 @@ type stack struct {
 	pool    *pgxpool.Pool
 	logs    *bytes.Buffer
 	cal     *Handler
+	box     *secretbox.LocalAESGCM
 }
 
 func newStack(t *testing.T) *stack {
@@ -50,13 +52,17 @@ func newStack(t *testing.T) *stack {
 	if err != nil {
 		t.Fatal(err)
 	}
+	box, err := secretbox.NewLocal("local", bytes.Repeat([]byte{8}, secretbox.KeySize))
+	if err != nil {
+		t.Fatal(err)
+	}
 	authHandler := auth.NewHandler(svc, logger)
 	mux := http.NewServeMux()
 	authHandler.Register(mux)
-	party.NewHandler(party.Deps{Pool: pool, Logger: logger}).Register(mux, authHandler.Require)
-	cal := NewHandler(Deps{Pool: pool, Logger: logger})
+	party.NewHandler(party.Deps{Pool: pool, Logger: logger, ProjectionOpener: box}).Register(mux, authHandler.Require)
+	cal := NewHandler(Deps{Pool: pool, Logger: logger, SecretBox: box})
 	cal.Register(mux, authHandler.Require)
-	return &stack{handler: httpapi.Wrap(logger, mux), pool: pool, logs: &logs, cal: cal}
+	return &stack{handler: httpapi.Wrap(logger, mux), pool: pool, logs: &logs, cal: cal, box: box}
 }
 
 type session struct {
@@ -175,12 +181,14 @@ func cleanupUser(t *testing.T, pool *pgxpool.Pool, userID uuid.UUID) {
 // --- 캘린더 시나리오 헬퍼 ---
 
 type fact struct {
-	Key          string `json:"source_event_key"`
-	Start        string `json:"start_at"`
-	End          string `json:"end_at"`
-	AllDay       bool   `json:"all_day"`
-	TimeZone     string `json:"time_zone"`
-	Availability string `json:"availability"`
+	Key          string  `json:"source_event_key"`
+	Start        string  `json:"start_at"`
+	End          string  `json:"end_at"`
+	AllDay       bool    `json:"all_day"`
+	TimeZone     string  `json:"time_zone"`
+	Availability string  `json:"availability"`
+	Title        *string `json:"title,omitempty"`
+	Location     *string `json:"location,omitempty"`
 }
 
 // 테스트 window는 오늘 0시(UTC)부터 30일이다. 시각은 항상 window 안에서 만든다.

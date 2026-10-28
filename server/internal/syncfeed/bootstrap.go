@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"plantogether/server/internal/account"
+	"plantogether/server/internal/party"
 )
 
 // SchemaVersion은 bootstrap snapshot 형식 버전이다(§7.2). 클라이언트는 모르는 버전을
@@ -61,6 +62,18 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID) (Snaps
 			}
 			for _, pr := range append([]account.Projection{user}, devices...) {
 				snap.Entities = append(snap.Entities, upsert(pr))
+			}
+			partyEntities, err := party.BootstrapProjections(ctx, tx, userID)
+			if err != nil {
+				return err
+			}
+			for _, pr := range partyEntities {
+				b, err := json.Marshal(pr.Payload)
+				if err != nil {
+					return err
+				}
+				v := pr.Version
+				snap.Entities = append(snap.Entities, Change{EntityType: pr.EntityType, EntityID: pr.ID, Operation: "upsert", Version: &v, Payload: b})
 			}
 			snap.Watermark = Cursor{Epoch: epoch, TxID: horizon, Ordinal: -1}
 			return nil

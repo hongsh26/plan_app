@@ -42,7 +42,13 @@ type Handler struct {
 	logger *slog.Logger
 	now    func() time.Time
 	// limiter는 초대 미리보기·수락 요청 제한이다. nil이면 꺼진다.
-	limiter Limiter
+	limiter          Limiter
+	projectionOpener ProjectionOpener
+}
+
+// ProjectionOpener opens encrypted schedule details after membership authorization.
+type ProjectionOpener interface {
+	Open(sealed []byte, purpose string) ([]byte, error)
 }
 
 // Limiter는 요청 제한 판정이다. ratelimit.Limiter가 구현한다.
@@ -55,14 +61,15 @@ type Deps struct {
 	Logger *slog.Logger
 	Now    func() time.Time
 	// Limiter는 docs/rate_limit_design.md의 요청 제한이다. nil이면 제한하지 않는다.
-	Limiter Limiter
+	Limiter          Limiter
+	ProjectionOpener ProjectionOpener
 }
 
 func NewHandler(d Deps) *Handler {
 	if d.Now == nil {
 		d.Now = time.Now
 	}
-	return &Handler{pool: d.Pool, logger: d.Logger, now: d.Now, limiter: d.Limiter}
+	return &Handler{pool: d.Pool, logger: d.Logger, now: d.Now, limiter: d.Limiter, projectionOpener: d.ProjectionOpener}
 }
 
 func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.Handler) {
@@ -70,8 +77,11 @@ func (h *Handler) Register(mux *http.ServeMux, require func(http.Handler) http.H
 	mux.Handle("GET /v1/parties/{id}", require(http.HandlerFunc(h.getParty)))
 	mux.Handle("PATCH /v1/parties/{id}", require(http.HandlerFunc(h.patchParty)))
 	mux.Handle("GET /v1/parties/{id}/memberships", require(http.HandlerFunc(h.listMemberships)))
+	h.registerVisibility(mux, require)
+	h.registerSchedule(mux, require)
 	h.registerInvites(mux, require)
 	h.registerOwnerTransfer(mux, require)
+	h.registerMembershipEnd(mux, require)
 }
 
 type partyResponse struct {
@@ -321,6 +331,10 @@ func (h *Handler) writeDomainError(w http.ResponseWriter, r *http.Request, actio
 		httpapi.WriteError(w, r, http.StatusNotFound, httpapi.CodeNotFound, "대상을 찾을 수 없다")
 	case errors.Is(err, errInvalidTransferTarget):
 		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidRequest, "위임 대상은 이 Party의 활성 멤버여야 한다")
+	case errors.Is(err, errRemoveSelf):
+		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidRequest, "방장은 자기 자신을 강퇴할 수 없다")
+	case errors.Is(err, errOwnerTransferRequired):
+		httpapi.WriteError(w, r, http.StatusConflict, codeOwnerTransferRequired, "다른 멤버에게 방장을 위임한 뒤 탈퇴할 수 있다")
 	case errors.Is(err, errForbidden):
 		httpapi.WriteError(w, r, http.StatusForbidden, httpapi.CodeForbidden, "권한이 없다")
 	case errors.Is(err, errOwnedLimitReached):

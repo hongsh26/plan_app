@@ -113,8 +113,10 @@ type Change struct {
 	Recipient  uuid.UUID
 	EntityType string
 	EntityID   uuid.UUID
-	// Version이 있으면 upsert, nil이면 tombstone이다. 스키마 CHECK가 둘을 묶는다.
-	Version *int64
+	// Version이 있으면 upsert, nil이면 tombstone이다. Tombstone이 true이면
+	// Version을 가진 삭제 이벤트를 보낼 수 있다.
+	Version   *int64
+	Tombstone bool
 	// Payload는 최소 projection이다(§7.1). 캘린더 상세와 token을 넣지 않는다.
 	Payload any
 }
@@ -128,7 +130,7 @@ func (t *Tx) EmitChange(ctx context.Context, c Change) error {
 		return fmt.Errorf("mutation: sync payload를 직렬화할 수 없다: %w", err)
 	}
 	op := "upsert"
-	if c.Version == nil {
+	if c.Tombstone || c.Version == nil {
 		op = "tombstone"
 	}
 	if _, err := t.Exec(ctx, `
@@ -166,7 +168,7 @@ func (t *Tx) EmitChanges(ctx context.Context, changes []Change) error {
 			}
 			ordinals[i], recipients[i], types[i], ids[i], versions[i], payloads[i] = t.ordinal+int32(i), c.Recipient, c.EntityType, c.EntityID, c.Version, string(b)
 			ops[i] = "upsert"
-			if c.Version == nil {
+			if c.Tombstone || c.Version == nil {
 				ops[i] = "tombstone"
 			}
 		}
