@@ -293,13 +293,17 @@ func endMembershipTx(ctx context.Context, tx *mutation.Tx, partyID uuid.UUID, me
 		return err
 	}
 	// 남은 멤버는 version이 오른 Party를 받는다.
+	batch := newProjectionBatch(partyID)
 	for _, m := range members {
 		if m.userID == leaving.userID {
 			continue
 		}
-		if err := emitProjection(ctx, tx, partyID, m.userID, partyID); err != nil {
+		if err := batch.add(ctx, tx, m.userID, partyID); err != nil {
 			return err
 		}
+	}
+	if err := batch.emit(ctx, tx); err != nil {
+		return err
 	}
 
 	jobType := jobMemberLeft

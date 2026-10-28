@@ -530,27 +530,31 @@ func (h *Handler) emitJoin(ctx context.Context, tx *mutation.Tx, partyID, invite
 	if err != nil {
 		return err
 	}
+	batch := newProjectionBatch(partyID)
 	for _, m := range members {
 		if m.userID == newUserID {
 			continue
 		}
-		if err := emitProjection(ctx, tx, partyID, m.userID, partyID); err != nil {
+		if err := batch.add(ctx, tx, m.userID, partyID); err != nil {
 			return err
 		}
-		if err := emitProjection(ctx, tx, partyID, m.userID, membershipID); err != nil {
+		if err := batch.add(ctx, tx, m.userID, membershipID); err != nil {
 			return err
 		}
 	}
 	// 신규 멤버: party, 모든 party_membership, 본인 party_visibility_setting.
-	if err := emitProjection(ctx, tx, partyID, newUserID, partyID); err != nil {
+	if err := batch.add(ctx, tx, newUserID, partyID); err != nil {
 		return err
 	}
 	for _, m := range members {
-		if err := emitProjection(ctx, tx, partyID, newUserID, m.id); err != nil {
+		if err := batch.add(ctx, tx, newUserID, m.id); err != nil {
 			return err
 		}
 	}
-	if err := emitProjection(ctx, tx, partyID, newUserID, settingID); err != nil {
+	if err := batch.add(ctx, tx, newUserID, settingID); err != nil {
+		return err
+	}
+	if err := batch.emit(ctx, tx); err != nil {
 		return err
 	}
 	// 다른 멤버의 허용된 projection도 부트스트랩으로 받는다(설계 4 §5.5 T3 13단계). 신규 멤버 본인의

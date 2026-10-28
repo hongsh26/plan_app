@@ -1111,7 +1111,9 @@ func TestAccountDeletionAnonymizesNameForCoMembers(t *testing.T) {
 		`UPDATE users SET deletion_requested_at = now() - interval '25 hours' WHERE id = $1`, d.id); err != nil {
 		t.Fatal(err)
 	}
-	svc, err := account.NewDeletionService(account.DeletionDeps{Pool: s.pool, Opener: s.box, Apple: noRevoke{}})
+	// 삭제 worker는 운영과 같이 worker 역할로 돈다.
+	workerPool := pgtest.Pool(t, pgtest.WorkerRoleURLEnv)
+	svc, err := account.NewDeletionService(account.DeletionDeps{Pool: workerPool, Opener: s.box, Apple: noRevoke{}})
 	if err != nil {
 		t.Fatal(err)
 	}

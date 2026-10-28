@@ -40,6 +40,7 @@ func emitScoped(ctx context.Context, tx *mutation.Tx, partyID uuid.UUID, changes
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	changes = append([]mutation.Change(nil), changes...) // 호출자 슬라이스를 바꾸지 않는다.
 	for i := range changes {
 		s, ok := scopes[changes[i].Recipient]
 		if !ok {

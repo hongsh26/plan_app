@@ -152,10 +152,14 @@ func (h *Handler) createParty(w http.ResponseWriter, r *http.Request) {
 		}
 		// 상위 entity(party, 멤버십, 설정)를 projection보다 먼저 발행한다. 클라이언트가 한 페이지 안에서
 		// 부모 없는 projection을 먼저 받지 않게 한다.
+		batch := newProjectionBatch(partyID)
 		for _, id := range []uuid.UUID{partyID, membershipID, settingID} {
-			if err := emitProjection(ctx, tx, partyID, p.UserID, id); err != nil {
+			if err := batch.add(ctx, tx, p.UserID, id); err != nil {
 				return mutation.Result{}, err
 			}
+		}
+		if err := batch.emit(ctx, tx); err != nil {
+			return mutation.Result{}, err
 		}
 		if err := createBusyOnlyProjections(ctx, tx, partyID, p.UserID); err != nil {
 			return mutation.Result{}, err
@@ -233,10 +237,14 @@ func (h *Handler) patchParty(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return mutation.Result{}, err
 		}
+		batch := newProjectionBatch(partyID)
 		for _, recipient := range recipients {
-			if err := emitProjection(ctx, tx, partyID, recipient, partyID); err != nil {
+			if err := batch.add(ctx, tx, recipient, partyID); err != nil {
 				return mutation.Result{}, err
 			}
+		}
+		if err := batch.emit(ctx, tx); err != nil {
+			return mutation.Result{}, err
 		}
 		return mutation.Result{StatusCode: http.StatusOK, ResourceType: entityParty, ResourceID: partyID, ResourceVersion: version}, nil
 	})
@@ -604,27 +612,55 @@ func createBusyOnlyProjections(ctx context.Context, tx *mutation.Tx, partyID, us
 }
 
 func emitProjection(ctx context.Context, tx *mutation.Tx, partyID, recipient, entityID uuid.UUID) error {
-	var (
-		p   Projection
-		err error
-	)
-	if p, err = PartyProjection(ctx, tx, entityID); err == nil {
-		return emitScoped(ctx, tx, partyID, mutation.Change{Recipient: recipient, EntityType: p.EntityType, EntityID: p.ID, Version: &p.Version, Payload: p.Payload})
+	b := newProjectionBatch(partyID)
+	if err := b.add(ctx, tx, recipient, entityID); err != nil {
+		return err
 	}
+	return b.emit(ctx, tx)
+}
+
+// projectionBatch는 Party·멤버십·공개 설정 upsert를 모아 한 번에 발행한다. 같은 entity는 한 번만 읽고
+// emitScoped(scope 조회)도 한 번만 부른다. 순서는 add 순서다.
+type projectionBatch struct {
+	partyID uuid.UUID
+	loaded  map[uuid.UUID]Projection
+	changes []mutation.Change
+}
+
+func newProjectionBatch(partyID uuid.UUID) *projectionBatch {
+	return &projectionBatch{partyID: partyID, loaded: map[uuid.UUID]Projection{}}
+}
+
+func (b *projectionBatch) add(ctx context.Context, tx *mutation.Tx, recipient, entityID uuid.UUID) error {
+	p, ok := b.loaded[entityID]
+	if !ok {
+		var err error
+		if p, err = loadPartyEntityProjection(ctx, tx, entityID); err != nil {
+			return err
+		}
+		b.loaded[entityID] = p
+	}
+	v := p.Version
+	b.changes = append(b.changes, mutation.Change{Recipient: recipient, EntityType: p.EntityType, EntityID: p.ID, Version: &v, Payload: p.Payload})
+	return nil
+}
+
+func (b *projectionBatch) emit(ctx context.Context, tx *mutation.Tx) error {
+	err := emitScoped(ctx, tx, b.partyID, b.changes...)
+	b.changes = nil
+	return err
+}
+
+// loadPartyEntityProjection은 ID로 party, 멤버십, 공개 설정 중 하나를 읽는다.
+func loadPartyEntityProjection(ctx context.Context, tx *mutation.Tx, entityID uuid.UUID) (Projection, error) {
+	p, err := PartyProjection(ctx, tx, entityID)
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return err
+		return p, err
 	}
-	if p, err = MembershipProjection(ctx, tx, entityID); err == nil {
-		return emitScoped(ctx, tx, partyID, mutation.Change{Recipient: recipient, EntityType: p.EntityType, EntityID: p.ID, Version: &p.Version, Payload: p.Payload})
+	if p, err = MembershipProjection(ctx, tx, entityID); !errors.Is(err, pgx.ErrNoRows) {
+		return p, err
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return err
-	}
-	p, err = VisibilitySettingProjection(ctx, tx, entityID)
-	if err != nil {
-		return err
-	}
-	return emitScoped(ctx, tx, partyID, mutation.Change{Recipient: recipient, EntityType: p.EntityType, EntityID: p.ID, Version: &p.Version, Payload: p.Payload})
+	return VisibilitySettingProjection(ctx, tx, entityID)
 }
 
 func requireActiveMember(ctx context.Context, q Querier, partyID, userID uuid.UUID) error {
