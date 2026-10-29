@@ -53,7 +53,7 @@
 
 - **추천 (a) 짧은 재사용 유예:** 쓰인 token이 `used_at`으로부터 30초 안에 다시 오고, 그 회전으로 만든 후속 세션이 아직 한 번도 쓰이지 않았고(`used_at IS NULL`, 폐기 안 됨), 같은 기기·token family면, 기기를 폐기하지 않는다. 대신 후속 세션을 폐기하고 새 쌍을 발급하며 audit `auth.refresh_grace_reissue`를 남긴다. 창 밖이나 후속 세션이 이미 쓰였으면 지금처럼 기기 폐기다. 창 안에서는 탈취 token으로 한 번 회전할 수 있어 탐지가 약해진다. 대신 정상 기기의 후속 token이 무효가 돼 401과 재로그인으로 드러난다
 - 탈락: (b) 멱등 refresh(후속 token 평문을 암호화해 짧게 보관하고 같은 요청에 같은 응답). 탐지는 약해지지 않지만 KMS(출시 조건 11)가 없고 저장·정리 경로가 는다. (c) 현상 유지
-- **확인할 점:** "그 회전으로 만든 후속 세션"을 찾는 링크가 지금 스키마에 있는가. `openSession`은 같은 `token_family_id`로 새 세션을 만들지만, 이전 세션 → 다음 세션 링크 열은 없어 보인다. family 안에서 `created_at`이 이전 세션 `used_at` 이후인 최신 세션으로 고를 수 있는지, 아니면 `sessions.rotated_from_session_id` 같은 열(마이그레이션)이 필요한지 정한다. 동시 refresh(single-flight가 막지만 다른 기기 복제 등)와 잠금 순서(users → devices → sessions)도 같이 본다
+- **확인할 점:** "그 회전으로 만든 후속 세션"을 찾는 링크가 지금 스키마에 있는가. `openSession`은 같은 `token_family_id`로 새 세션을 만들지만, 이전 세션 → 다음 세션 링크 열은 없다(migration 00001 `sessions`에 없고 이후 `ALTER TABLE sessions`도 없다). family 안에서 `created_at`이 이전 세션 `used_at` 이후인 최신 세션으로 고를 수 있는지, 아니면 `sessions.rotated_from_session_id` 같은 열(마이그레이션)이 필요한지 정한다. 동시 refresh(single-flight가 막지만 다른 기기 복제 등)와 잠금 순서(users → devices → sessions)도 같이 본다
 - 그 전까지 iOS는 refresh 네트워크 오류 뒤 그 자리에서 다시 보내지 않는다(`APIClient.performRefresh`)
 
 ## 테스트
