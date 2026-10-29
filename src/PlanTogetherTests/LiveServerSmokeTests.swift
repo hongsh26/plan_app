@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import PlanTogether
 
@@ -229,5 +230,39 @@ final class LiveTwoUserDemoTests: XCTestCase {
         }
         await aAPI.logout()
         await bAPI.logout()
+    }
+}
+
+/// 화면 확인용 스크린샷(선택 실행): 만료된 검색 결과 화면을 테스트 호스트 창에 그려 PNG로 저장한다.
+///   TEST_RUNNER_PLAN_SCREENSHOT_DIR=<디렉터리> xcodebuild ... -only-testing:PlanTogetherTests/ScreenSnapshotTests
+final class ScreenSnapshotTests: XCTestCase {
+    @MainActor
+    func testExpiredSearchResultsScreenshot() async throws {
+        guard let dir = ProcessInfo.processInfo.environment["PLAN_SCREENSHOT_DIR"] else { throw XCTSkip("PLAN_SCREENSHOT_DIR이 없다(선택 실행)") }
+        MockURLProtocol.install { _, _ in
+            .json(200, ["request_id": "r", "slots": [
+                ["start_at": "2026-10-30T01:00:00Z", "end_at": "2026-10-30T02:00:00Z"],
+                ["start_at": "2026-10-30T06:00:00Z", "end_at": "2026-10-30T07:00:00Z"],
+                ["start_at": "2026-10-31T01:00:00Z", "end_at": "2026-10-31T02:00:00Z"]],
+                        "calculation_version": "v", "generated_at": "2026-10-29T03:00:00Z", "valid_until": "2026-10-29T03:05:00Z"])
+        }
+        let api = APIClient(baseURL: URL(string: "http://localhost:8080")!, session: MockURLProtocol.makeSession(),
+                            tokenStore: InMemoryTokenStore(TestTokens.make("a-1")), sleep: { _ in })
+        let clock = DateBox(RFC3339.parse("2026-10-29T03:00:00Z")!)
+        let vm = SearchViewModel(api: api, partyID: "p", timeZone: TimeZone(identifier: "Asia/Seoul")!, now: { clock.value })
+        await vm.search()
+        clock.value = RFC3339.parse("2026-10-29T03:10:00Z")!   // valid_until 지남
+        let session = SessionStore(api: api, syncStore: InMemorySyncStore(), queueStore: InMemoryMutationQueueStore(), calendarSource: FakeEventSource())
+        let host = UIHostingController(rootView: NavigationStack { SearchContent(vm: vm).navigationTitle("모두 가능한 시간") }.environmentObject(session))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 1200)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) }
+        try XCTUnwrap(image.pngData()).write(to: URL(fileURLWithPath: dir).appendingPathComponent("search_expired.png"))
+        XCTAssertTrue(vm.isExpired)
+        window.isHidden = true
     }
 }

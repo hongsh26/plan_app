@@ -117,6 +117,8 @@ final class PreferencesViewModel: ObservableObject {
     @Published var needsCityPicker = false
     @Published private(set) var message: String?
     @Published private(set) var isBusy = false
+    /// 서버 값을 한 번이라도 읽었다. 첫 읽기가 실패하면 화면에 다시 들어올 때·다시 불러오기에서 다시 읽는다.
+    @Published private(set) var loaded = false
 
     private let api: APIClient
     /// create-only 재전송에 같은 Idempotency-Key를 쓰려고 보관한다(rec 1404 iOS 계약).
@@ -138,6 +140,7 @@ final class PreferencesViewModel: ObservableObject {
             let p = try await api.send(.get("/v1/availability/preferences/me"), as: Envelope.self).preferences
             apply(p)
             message = nil
+            loaded = true
             return true
         } catch {
             message = UserMessage.of(error)

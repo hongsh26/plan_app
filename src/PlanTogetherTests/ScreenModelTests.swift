@@ -432,3 +432,54 @@ final class ScreenReviewFixTests: XCTestCase {
         XCTAssertEqual(sent[2].request.value(forHTTPHeaderField: "If-Match"), "\"1\"")
     }
 }
+
+final class SearchTimeZoneChangeTests: XCTestCase {
+    /// 시간대를 바꿔도 사용자가 고른 달력 날짜·길이를 지킨다. 같은 시간대면 아무것도 바꾸지 않는다.
+    @MainActor
+    func testSetTimeZoneKeepsUserDates() {
+        let seoul = TimeZone(identifier: "Asia/Seoul")!, ny = TimeZone(identifier: "America/New_York")!
+        let now = RFC3339.parse("2026-10-29T03:00:00Z")!   // 서울 10-29 12:00, 뉴욕 10-28 23:00
+        let api = APIClient(baseURL: URL(string: "http://localhost:8080")!, tokenStore: InMemoryTokenStore())
+        let vm = SearchViewModel(api: api, partyID: "p", timeZone: seoul, now: { now })
+        let cal = SnapshotWindow.calendar(seoul)
+        vm.form.startDate = cal.date(byAdding: .day, value: 3, to: vm.form.startDate)!
+        vm.form.endDate = cal.date(byAdding: .day, value: 5, to: vm.form.startDate)!
+        vm.form.durationMinutes = 90
+        let before = vm.form
+
+        vm.setTimeZone(seoul)
+        XCTAssertEqual(vm.form, before, "같은 시간대면 그대로")
+
+        vm.setTimeZone(ny)
+        XCTAssertEqual(vm.form.timeZone.identifier, "America/New_York")
+        XCTAssertEqual(SearchForm.day(vm.form.startDate, ny), "2026-11-01", "같은 달력 날짜")
+        XCTAssertEqual(SearchForm.day(vm.form.endDate, ny), "2026-11-06")
+        XCTAssertEqual(vm.form.durationMinutes, 90)
+        XCTAssertNil(vm.form.validate(now: now))
+
+        // 시작일이 새 시간대의 오늘보다 앞이면 오늘로.
+        let vm2 = SearchViewModel(api: api, partyID: "p", timeZone: seoul, now: { now })
+        vm2.setTimeZone(TimeZone(identifier: "Pacific/Kiritimati")!)   // UTC+14: 이미 10-29 17:00
+        XCTAssertEqual(SearchForm.day(vm2.form.startDate, vm2.form.timeZone), "2026-10-29")
+        XCTAssertNil(vm2.form.validate(now: now))
+    }
+
+    @MainActor
+    func testFailedFirstLoadIsRetried() async {
+        let calls = Counter()
+        MockURLProtocol.install { _, _ in
+            calls.increment()
+            if calls.value == 1 { throw URLError(.notConnectedToInternet) }
+            return .json(200, ["request_id": "r", "preferences": ["status": "unconfigured", "time_zone": NSNull(), "version": 0, "weekly_intervals": [], "updated_at": NSNull()]])
+        }
+        let api = APIClient(baseURL: URL(string: "http://localhost:8080")!, session: MockURLProtocol.makeSession(),
+                            tokenStore: InMemoryTokenStore(TestTokens.make("a-1")), sleep: { _ in })
+        let vm = PreferencesViewModel(api: api, deviceTimeZone: "Asia/Seoul")
+        let first = await vm.load()
+        XCTAssertFalse(first)
+        XCTAssertFalse(vm.loaded, "실패하면 다시 읽어야 하는 상태로 남는다")
+        let second = await vm.load()
+        XCTAssertTrue(second)
+        XCTAssertTrue(vm.loaded)
+    }
+}

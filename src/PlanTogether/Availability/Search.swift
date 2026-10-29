@@ -176,13 +176,21 @@ final class SearchViewModel: ObservableObject {
         }
     }
 
+    /// 검색 시간대를 바꾼다. 같으면 아무것도 하지 않는다. 다르면 사용자가 고른 달력 날짜(시작·끝)와 길이를 그대로 새 시간대로
+    /// 옮긴다(시작일이 새 시간대의 오늘보다 앞이면 오늘로). prepare()가 늦게 끝나도 사용자 편집을 덮어쓰지 않는다.
     func setTimeZone(_ tz: TimeZone) {
-        let days = SnapshotWindow.calendar(form.timeZone).dateComponents([.day], from: form.startDate, to: form.endDate).day ?? 13
-        var next = SearchForm.defaults(now: now(), timeZone: tz)
-        next.durationMinutes = form.durationMinutes
-        next.endDate = SnapshotWindow.calendar(tz).date(byAdding: .day, value: max(0, days), to: next.startDate) ?? next.endDate
-        form = next
         needsTimeZonePick = !PreferencesRules.isRegionZone(tz.identifier)
+        guard tz.identifier != form.timeZone.identifier else { return }
+        let old = SnapshotWindow.calendar(form.timeZone), new = SnapshotWindow.calendar(tz)
+        func move(_ d: Date) -> Date {
+            new.date(from: old.dateComponents([.year, .month, .day], from: d)) ?? d
+        }
+        let today = new.startOfDay(for: now())
+        var next = form
+        next.timeZone = tz
+        next.startDate = max(move(form.startDate), today)
+        next.endDate = max(move(form.endDate), next.startDate)
+        form = next
     }
 
     /// 결과가 만료됐다(valid_until 지남). 결과는 다시 검색해야 쓸 수 있다.

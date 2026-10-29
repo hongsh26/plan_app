@@ -12,11 +12,20 @@ struct PreferencesView: View {
         }
         .navigationTitle("활동 시간")
         .task {
-            // 처음 들어올 때만 읽는다. 탭을 오가도 저장하지 않은 편집을 지우지 않는다.
-            guard model.vm == nil else { return }
-            let vm = PreferencesViewModel(api: session.api)
+            // 한 번 읽은 뒤에는 탭을 오가도 다시 읽지 않는다(저장하지 않은 편집을 지키려고). 첫 읽기가 실패했으면 다시 읽는다.
+            let vm = model.vm ?? PreferencesViewModel(api: session.api)
             model.vm = vm
+            guard !vm.loaded else { return }
             if await vm.load() { await session.preferencesRefreshed() }
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("다시 불러오기") {
+                    guard let vm = model.vm else { return }
+                    Task { if await vm.load() { await session.preferencesRefreshed() } }
+                }
+                .disabled(model.vm?.isBusy ?? true)
+            }
         }
         // 다른 기기에서 바꾸면 sync가 무효화 신호만 준다. 다시 읽고, 읽기에 성공했을 때만 표시를 지운다.
         .onChange(of: session.syncState?.needsPreferenceRefresh ?? false) { _, needs in
@@ -122,7 +131,7 @@ final class SearchViewModelBox: ObservableObject {
     @Published var vm: SearchViewModel?
 }
 
-private struct SearchContent: View {
+struct SearchContent: View {
     @EnvironmentObject private var session: SessionStore
     @ObservedObject var vm: SearchViewModel
 
@@ -148,18 +157,21 @@ private struct SearchContent: View {
             case .loading:
                 Section { ProgressView() }
             case .results(let sections, let until):
-                // valid_until이 지나면 화면을 열어 둔 채로도 만료 표시가 나오게 주기적으로 다시 그린다.
-                TimelineView(.periodic(from: .now, by: 10)) { _ in
-                    if vm.isExpired {
-                        Section { Text("결과가 만료됐습니다. 다시 찾아 주세요.").font(.footnote) }
-                    }
-                }
                 ForEach(sections) { day in
                     Section(day.title) {
                         ForEach(day.slots) { Text($0.label) }
                     }
                 }
-                Section { Text("\(until.formatted(date: .omitted, time: .shortened))까지 유효한 결과입니다.").font(.caption).foregroundStyle(.secondary) }
+                Section {
+                    // valid_until이 지나면 화면을 열어 둔 채로도 만료 표시가 나오게 이 문구만 주기적으로 다시 그린다.
+                    TimelineView(.periodic(from: .now, by: 10)) { _ in
+                        if vm.isExpired {
+                            Text("결과가 만료됐습니다. 다시 찾아 주세요.").font(.footnote).foregroundStyle(.red)
+                        } else {
+                            Text("\(until.formatted(date: .omitted, time: .shortened))까지 유효한 결과입니다.").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
             case .empty:
                 Section {
                     Text("선택한 기간과 활동 시간 안에 모두 가능한 시간이 없습니다.")
