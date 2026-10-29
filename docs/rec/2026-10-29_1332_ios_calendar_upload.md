@@ -70,13 +70,15 @@
 - iOS 게이트 94개 실행, 90개 통과, 4개 건너뜀(선택 실행)
   - 변환 9개: window, 분류, 반복 key 고정·중복 제거·입력 순서 무관, all-day(서울, 뉴욕 DST), 시간대 대체, 긴 일정 자르기·초 미만, page JSON allowlist, page 경계(250/251, 20,000 = 80 page, 20,001 실패, 각 page ≤ 60,000바이트)
   - 업로더 8개: 정상 흐름·본문, revision 충돌, 재사용 session(닫힘·열림 모두 새 revision), 409 → 닫힌 200 → 생성, page 재시도(같은 키·본문, Retry-After), 거절 page abort, complete incomplete만 abort
-  - 조정자 16개. 가짜 서버는 실제 handler의 create-only·If-Match, 전이 표, 기기별 판정(token으로 구별), claim 때 ready → syncing, syncing 중 source 변경 → selecting, 같은 revision 200, complete의 syncing·fact 수 검사, 다른 기기 403을 흉내 낸다. 리뷰 반영 7개: 두 기기(iPad 거부·제한·빈 선택이 iPhone 상태를 안 바꿈, 연결 누르면 가져옴, 그 뒤 iPhone은 안 바꿈), disconnected 되살림 없음, 409 뒤 다시 판단, needs_source_reselection 유지, 시간대 UTC 대체, 닫힌 세션은 요청 없음, 진행 중 실행 뒤 선택 변경이 새로 돔. 재검증 반영 2개: 폐기된 sync 기기 + 올릴 수 없는 iPad 앱 활성화 → PUT 없음 → iPhone이 맡아 올림, 시간대 대체 두 단계(일정 고유 시간대만 UTC, 무관한 거부는 오류). 두 기기·disconnected·폐기 sync 기기 테스트는 수정 전 동작으로 되돌리면 실패하는 것을 확인했다. 그 밖: 전이 표, 연결 안 한 사용자 앱 활성화, 연결 흐름(create-only, 권한, 선택 대기, 읽지 않음), 선택한 캘린더만 읽기·HMAC key·재업로드 바이트 동일, 앱 활성화 억제, revoked·denied·restricted, 전체 해제 → needs_source_reselection, 삭제된 캘린더, sync 기기 규칙(살아 있는 다른 기기·연결 누름·폐기된 기기), 다른 사용자 상태 무시
+  - 조정자 19개. 가짜 서버는 실제 handler의 create-only·If-Match, 전이 표, 기기별 판정(token으로 구별), claim 때 ready → syncing, syncing 중 source 변경 → selecting, 같은 revision 200, complete의 syncing·fact 수 검사, 다른 기기 403을 흉내 낸다. 리뷰 반영 7개: 두 기기(iPad 거부·제한·빈 선택이 iPhone 상태를 안 바꿈, 연결 누르면 가져옴, 그 뒤 iPhone은 안 바꿈), disconnected 되살림 없음, 409 뒤 다시 판단, needs_source_reselection 유지, 시간대 UTC 대체, 닫힌 세션은 요청 없음, 진행 중 실행 뒤 선택 변경이 새로 돔. 재검증 반영 2개: 폐기된 sync 기기 + 올릴 수 없는 iPad 앱 활성화 → PUT 없음 → iPhone이 맡아 올림, 시간대 대체 두 단계(일정 고유 시간대만 UTC, 무관한 거부는 오류). 두 기기·disconnected·폐기 sync 기기 테스트는 수정 전 동작으로 되돌리면 실패하는 것을 확인했다. 그 밖: 전이 표, 연결 안 한 사용자 앱 활성화, 연결 흐름(create-only, 권한, 선택 대기, 읽지 않음), 선택한 캘린더만 읽기·HMAC key·재업로드 바이트 동일, 앱 활성화 억제, revoked·denied·restricted, 전체 해제 → needs_source_reselection, 삭제된 캘린더, sync 기기 규칙(살아 있는 다른 기기·연결 누름·폐기된 기기), 다른 사용자 상태 무시
   - 로그아웃이 캘린더 로컬 상태를 지운다
 - 선택 실행(로컬 서버 `run_api_dev.sh`, 시뮬레이터 권한 `xcrun simctl privacy <udid> grant calendar com.example.PlanTogether`), 모두 통과
   - `LiveCalendarSmokeTests`: 가짜 source 301개 일정 → 2 page → ready, 두 번째 revision, 전체 해제 → needs_source_reselection. 서버 로그 모두 2xx
   - `LiveEventKitTests`: 실제 EventKit에서 시연 일정 8 occurrence(반복 4 펼침), 다시 만들어도 늘지 않음, all-day = 로컬 하루, 선택 비면 읽지 않음, 실제 EventKit + 실서버 업로드 → ready(8 facts)
 
 ## 남은 것
+
+- 시간대와 무관한 이유로 page 거부가 계속되는 연결은 앱을 열 때마다 한 업로드 안에서 create·abort가 3회씩 반복된다(서버 snapshot 한도 10/분 안). backoff나 `error` 상태 PUT을 검토한다
 
 - V5: details 업로드(제목·장소, `details_included`, `details_refresh_state` 재업로드)
 - EventKit 변경 알림(`EKEventStoreChanged`) debounce 업로드, 백그라운드 갱신
