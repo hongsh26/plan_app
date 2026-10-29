@@ -156,7 +156,11 @@ func TestConcurrentAllowNeverAdmitsMoreThanLimit(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			l, _ := newLimiterWithKey(t, pool, key)
+			// 이 테스트는 동시 판정의 계산 정확성을 본다. 기본 판정 기한(250ms)을 쓰면 20개가 같은 bucket row를
+			// 기다리는 동안 DB 부하나 작은 pool(CPU 2개 CI는 4개)에서 일부가 기한을 넘겨 ModeClosed 실패로 바뀌고
+			// 허용 개수가 5보다 작아진다. 기한 초과는 DB 실패와 같은 경로이고 그 동작은
+			// TestDeviceFailureFollowsMode가 보므로 여기서는 넉넉히 준다.
+			l, _ := newLimiterWithKey(t, pool, key, WithTimeout(10*time.Second))
 			d, err := l.Allow(context.Background(), ModeClosed, r)
 			if err != nil {
 				t.Error(err)
