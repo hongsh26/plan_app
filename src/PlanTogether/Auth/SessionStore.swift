@@ -83,6 +83,16 @@ final class SessionStore: ObservableObject {
         await run { try await self.syncNowThrowing() }
     }
 
+    var partyAPI: PartyAPI { PartyAPI(api: api) }
+
+    /// 활동 시간 화면이 GET으로 다시 읽었다(availability_preference 무효화 신호 소비).
+    func preferencesRefreshed() async {
+        guard let engine = syncEngine else { return }
+        try? await engine.markPreferencesRefreshed()
+        let s = await engine.state
+        if syncEngine === engine { syncState = s }
+    }
+
     // MARK: 캘린더(설계 3)
 
     /// 사용자가 캘린더 연결을 눌렀다. 처음이면 OS 권한을 묻는다.

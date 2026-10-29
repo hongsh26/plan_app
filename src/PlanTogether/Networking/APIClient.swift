@@ -41,6 +41,8 @@ struct ServerError: Error, Equatable, Sendable {
     let currentVersion: Int64?
     /// 429·503의 `Retry-After`(초).
     let retryAfter: TimeInterval?
+    /// 오류 응답 본문 원문. code별 추가 필드(예: 검색 409의 self)를 읽을 때 쓴다.
+    var body: Data? = nil
 }
 
 enum APIError: Error, Equatable {
@@ -274,7 +276,8 @@ actor APIClient {
             message: body?.message ?? "",
             requestID: body?.requestID ?? response.header("X-Request-ID"),
             currentVersion: body?.currentVersion,
-            retryAfter: Self.parseRetryAfter(response.header("Retry-After"))
+            retryAfter: Self.parseRetryAfter(response.header("Retry-After")),
+            body: response.data
         ))
     }
 
