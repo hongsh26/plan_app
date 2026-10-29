@@ -63,9 +63,13 @@ enum APIError: Error, Equatable {
 ///
 /// - 인증 요청이 401이면 refresh 한 번 뒤 같은 요청(같은 Idempotency-Key·본문)을 한 번만 다시 보낸다.
 /// - refresh는 single-flight다. 이미 쓴 refresh token을 다시 보내면 서버가 재사용으로 보고 기기 전체를 폐기한다.
-///   그래서 동시 401은 한 refresh를 기다리고, refresh 429만 같은 token으로 재시도한다(요청 제한은 본문 해석 전이라
-///   token이 소비되지 않았다). 시간 초과·네트워크 오류·5xx는 서버가 token을 소비했는지 알 수 없으므로 자동으로
-///   다시 보내지 않고 오류만 돌려준다. 로그아웃하지 않는다.
+///   그래서 동시 401은 한 refresh를 기다리고, refresh 429만 같은 token으로 곧바로 재시도한다(요청 제한은 본문 해석
+///   전이라 token이 소비되지 않았다). 시간 초과·네트워크 오류·5xx는 그 자리에서 다시 보내지 않고 오류만 돌려주며
+///   로그아웃하지 않는다. **위험:** 서버가 회전을 커밋했는데 응답을 잃었으면, 다음 401에서 보내는 같은 token이
+///   재사용으로 판정돼 기기가 폐기되고 다시 로그인해야 한다. 서버에 유예가 없어 클라이언트만으로는 피할 수 없다.
+/// - 새 token은 메모리에 먼저 반영한다. Keychain 저장이 실패해도 소비된 refresh token을 다시 쓰지 않게 하고,
+///   저장은 다음 요청 때 다시 시도한다.
+/// - 세대(generation): 로그아웃·세션 종료마다 올린다. 그 전에 시작한 refresh의 결과는 버린다(로그아웃 뒤 token 부활 방지).
 /// - 세션을 끝내는 것은 refresh 401 `invalid_session`과 어떤 요청이든 423 `account_locked`뿐이다.
 actor APIClient {
     typealias Sleeper = @Sendable (TimeInterval) async throws -> Void
@@ -76,7 +80,10 @@ actor APIClient {
     private let sleep: Sleeper
     private var tokens: AuthTokens?
     private var refreshTask: Task<AuthTokens, Error>?
-    private var sessionEndedHandler: (@Sendable () async -> Void)?
+    private let sessionEnded = HandlerBox()
+    private var generation = 0
+    /// 새 token의 Keychain 저장이 실패해 다시 저장해야 한다.
+    private var needsTokenSave = false
     /// refresh 429 재시도 상한. 넘으면 세션을 유지한 채 rate_limited 오류를 돌려준다.
     private let maxRefreshAttempts = 5
 
@@ -91,8 +98,9 @@ actor APIClient {
 
     var currentTokens: AuthTokens? { tokens }
 
-    func setSessionEndedHandler(_ handler: @escaping @Sendable () async -> Void) {
-        sessionEndedHandler = handler
+    /// 서버가 세션을 끝냈을 때(refresh 401·423, 요청 423) 부른다. 동기 등록이라 첫 요청 전에 걸 수 있다.
+    nonisolated func setSessionEndedHandler(_ handler: @escaping @Sendable () async -> Void) {
+        sessionEnded.set(handler)
     }
 
     // MARK: 인증
@@ -111,13 +119,20 @@ actor APIClient {
     }
 
     /// 현재 기기 세션을 서버에서 폐기하고 로컬 token을 지운다. 서버 호출이 실패해도 로컬은 지운다.
+    /// 로컬을 먼저 지우고 세대를 올린 뒤 서버 호출을 한 번만 시도한다(refresh하지 않는다). 진행 중이던 refresh가
+    /// 끝나도 결과를 저장하지 않는다.
     func logout() async {
-        if tokens != nil {
-            _ = try? await send(APIRequest(method: "POST", path: "/v1/auth/logout"))
-        }
-        try? tokenStore.clear()
+        let old = tokens
+        generation += 1
         tokens = nil
         refreshTask = nil
+        needsTokenSave = false
+        try? tokenStore.clear()
+        if let old {
+            var req = APIRequest(method: "POST", path: "/v1/auth/logout")
+            req.idempotencyKey = UUID().uuidString
+            _ = try? await perform(req, accessToken: old.accessToken)
+        }
     }
 
     // MARK: 요청
@@ -132,13 +147,14 @@ actor APIClient {
             return response
         }
         guard let used = tokens else { throw APIError.notSignedIn }
+        if needsTokenSave, (try? tokenStore.save(used)) != nil { needsTokenSave = false }
         var response = try await perform(req, accessToken: used.accessToken)
         if response.status == 401 {
             let fresh = try await refreshed(after: used.accessToken)
             response = try await perform(req, accessToken: fresh.accessToken)
         }
         if response.status == 423 {
-            await endSession()
+            await endSession(generation)
             throw APIError.sessionEnded
         }
         guard (200..<300).contains(response.status) else { throw error(from: response) }
@@ -156,13 +172,14 @@ actor APIClient {
         if let current = tokens, current.accessToken != failedAccessToken { return current }
         if let running = refreshTask { return try await running.value }
         guard let refreshToken = tokens?.refreshToken else { throw APIError.notSignedIn }
-        let task = Task { try await self.performRefresh(refreshToken) }
+        let gen = generation
+        let task = Task { try await self.performRefresh(refreshToken, generation: gen) }
         refreshTask = task
         defer { refreshTask = nil }
         return try await task.value
     }
 
-    private func performRefresh(_ refreshToken: String) async throws -> AuthTokens {
+    private func performRefresh(_ refreshToken: String, generation gen: Int) async throws -> AuthTokens {
         var req = try APIRequest.json("POST", "/v1/auth/refresh", body: RefreshRequest(refreshToken: refreshToken))
         req.requiresAuth = false
         req.idempotencyKey = nil
@@ -170,12 +187,19 @@ actor APIClient {
         while true {
             attempt += 1
             let response = try await perform(req, accessToken: nil)
+            // 기다리는 사이 로그아웃·세션 종료가 있었으면 결과를 버린다.
+            guard generation == gen else { throw APIError.sessionEnded }
             switch response.status {
             case 200:
                 let fresh = AuthTokens(try decode(SessionResponse.self, response.data))
-                // 새 token을 저장한 뒤에 넘긴다. 사이에 앱이 죽으면 이미 소비한 refresh token만 남는다.
-                try tokenStore.save(fresh)
+                // 메모리에 먼저 반영한다. 저장 실패로 소비된 refresh token을 다시 보내면 기기가 폐기된다.
                 tokens = fresh
+                do {
+                    try tokenStore.save(fresh)
+                    needsTokenSave = false
+                } catch {
+                    needsTokenSave = true
+                }
                 return fresh
             case 429:
                 // 세션 상실이 아니다(progressing.md iOS 계약). Retry-After 뒤 같은 token으로 다시 보낸다.
@@ -183,7 +207,7 @@ actor APIClient {
                 guard attempt < maxRefreshAttempts else { throw err }
                 try await sleep(retryAfter(of: err) ?? 1)
             case 401, 423:
-                await endSession()
+                await endSession(gen)
                 throw APIError.sessionEnded
             default:
                 throw error(from: response)
@@ -191,10 +215,15 @@ actor APIClient {
         }
     }
 
-    private func endSession() async {
-        try? tokenStore.clear()
+    /// 그 세대가 아직 현재일 때만 끝낸다(이미 로그아웃했으면 아무것도 하지 않는다).
+    private func endSession(_ gen: Int) async {
+        guard generation == gen else { return }
+        generation += 1
         tokens = nil
-        if let handler = sessionEndedHandler { await handler() }
+        refreshTask = nil
+        needsTokenSave = false
+        try? tokenStore.clear()
+        if let handler = sessionEnded.get() { await handler() }
     }
 
     // MARK: 전송
@@ -261,5 +290,21 @@ actor APIClient {
         f.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
         guard let date = f.date(from: raw) else { return nil }
         return max(0, date.timeIntervalSinceNow)
+    }
+}
+
+/// 세션 종료 handler. actor 밖에서 동기로 등록하려고 잠금으로 보호한다.
+final class HandlerBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (@Sendable () async -> Void)?
+
+    func set(_ h: @escaping @Sendable () async -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        handler = h
+    }
+
+    func get() -> (@Sendable () async -> Void)? {
+        lock.lock(); defer { lock.unlock() }
+        return handler
     }
 }

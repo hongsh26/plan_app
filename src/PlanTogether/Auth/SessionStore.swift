@@ -34,12 +34,14 @@ final class SessionStore: ObservableObject {
     private let queueStore: MutationQueueStore
     private(set) var syncEngine: SyncEngine?
     private(set) var mutationQueue: MutationQueue?
+    /// 현재 세션의 디스크 쓰기 허가. 로그아웃·세션 종료가 닫는다.
+    private var gate: SessionGate?
 
     init(api: APIClient, syncStore: SyncStore, queueStore: MutationQueueStore) {
         self.api = api
         self.syncStore = syncStore
         self.queueStore = queueStore
-        Task { await api.setSessionEndedHandler { [weak self] in await self?.sessionEnded() } }
+        api.setSessionEndedHandler { [weak self] in await self?.sessionEnded() }
     }
 
     /// 앱 기본 구성: Keychain token, Application Support 파일 캐시.
@@ -54,7 +56,9 @@ final class SessionStore: ObservableObject {
     func restore() async {
         guard let tokens = await api.currentTokens else { return }
         startSession(tokens)
-        syncState = await syncEngine?.state
+        guard let engine = syncEngine else { return }
+        let restored = await engine.state
+        if syncEngine === engine { syncState = restored }
     }
 
     /// 개발용 로그인(server DEV_LOGIN_ENABLED, identity token `dev:<이름>`). Sign in with Apple은 이후 단계에서 붙인다.
@@ -79,12 +83,17 @@ final class SessionStore: ObservableObject {
     private func syncNowThrowing() async throws {
         guard let engine = syncEngine else { return }
         await mutationQueue?.flush()
-        syncState = try await engine.sync()
+        let synced = try await engine.sync()
+        // 기다리는 사이 로그아웃했으면 반영하지 않는다.
+        if syncEngine === engine { syncState = synced }
     }
 
     private func startSession(_ tokens: AuthTokens) {
-        syncEngine = SyncEngine(api: api, store: syncStore, userID: tokens.userID)
-        mutationQueue = MutationQueue(api: api, store: queueStore)
+        gate?.close()
+        let gate = SessionGate()
+        self.gate = gate
+        syncEngine = SyncEngine(api: api, store: GatedSyncStore(base: syncStore, gate: gate), userID: tokens.userID)
+        mutationQueue = MutationQueue(api: api, store: GatedMutationQueueStore(base: queueStore, gate: gate), userID: tokens.userID)
         state = .signedIn(SignedInUser(userID: tokens.userID, deviceID: tokens.deviceID))
     }
 
@@ -95,6 +104,9 @@ final class SessionStore: ObservableObject {
     }
 
     private func clearLocal() {
+        // 먼저 닫는다. 진행 중인 sync·flush의 쓰기가 끝난 뒤에 지우고, 이후 쓰기는 거부된다.
+        gate?.close()
+        gate = nil
         try? syncStore.clear()
         try? queueStore.clear()
         syncEngine = nil
@@ -110,6 +122,9 @@ final class SessionStore: ObservableObject {
         do {
             try await work()
         } catch {
+            // 로그아웃·세션 종료로 끊긴 작업의 오류는 보이지 않는다. 세션 종료 안내는 sessionEnded()가 이미 남겼다.
+            let interrupted = error is SessionGate.Closed || (error as? APIError) == .notSignedIn || (error as? APIError) == .sessionEnded
+            if gate == nil, interrupted { return }
             lastError = String(describing: error)
         }
     }

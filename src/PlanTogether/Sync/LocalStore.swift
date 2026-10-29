@@ -65,3 +65,37 @@ final class InMemorySyncStore: SyncStore, @unchecked Sendable {
         state = nil
     }
 }
+
+/// 로그인 세션 하나의 디스크 쓰기 허가. 로그아웃·세션 종료가 `close()`하면 그 세션의 진행 중이던 sync·큐가
+/// 끝나면서 파일을 되살리지 못한다. 쓰기와 close가 같은 잠금을 잡으므로 close 뒤의 삭제가 마지막 쓰기보다 늦다.
+final class SessionGate: @unchecked Sendable {
+    struct Closed: Error {}
+
+    private let lock = NSLock()
+    private var open = true
+
+    func close() {
+        lock.lock(); defer { lock.unlock() }
+        open = false
+    }
+
+    var isOpen: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return open
+    }
+
+    func write(_ body: () throws -> Void) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard open else { throw Closed() }
+        try body()
+    }
+}
+
+struct GatedSyncStore: SyncStore {
+    let base: SyncStore
+    let gate: SessionGate
+
+    func load() throws -> SyncState? { try base.load() }
+    func save(_ state: SyncState) throws { try gate.write { try base.save(state) } }
+    func clear() throws { try base.clear() }
+}

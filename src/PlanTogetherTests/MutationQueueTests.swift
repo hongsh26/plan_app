@@ -17,7 +17,7 @@ final class MutationQueueTests: XCTestCase {
             return .json(201, ["party": ["id": "p"]])
         }
         let store = InMemoryMutationQueueStore()
-        let first = MutationQueue(api: makeAPI(), store: store)
+        let first = MutationQueue(api: makeAPI(), store: store, userID: TestTokens.userID)
         let queued = try await first.enqueue(try .json("POST", "/v1/parties", body: ["name": "주말 모임"]))
 
         let left1 = await first.flush()
@@ -27,7 +27,7 @@ final class MutationQueueTests: XCTestCase {
         let pending = await first.pending
         XCTAssertEqual(pending.first?.attemptCount, 2)
 
-        let relaunched = MutationQueue(api: makeAPI(), store: store)
+        let relaunched = MutationQueue(api: makeAPI(), store: store, userID: TestTokens.userID)
         let left3 = await relaunched.flush()
         XCTAssertEqual(left3, 0)
         let after = await relaunched.pending
@@ -44,7 +44,7 @@ final class MutationQueueTests: XCTestCase {
         MockURLProtocol.install { req, _ in
             req.url!.path.contains("p-gone") ? .error(410, code: "party_disbanded") : .json(200, ["membership": ["status": "left"]])
         }
-        let queue = MutationQueue(api: makeAPI(), store: InMemoryMutationQueueStore())
+        let queue = MutationQueue(api: makeAPI(), store: InMemoryMutationQueueStore(), userID: TestTokens.userID)
         try await queue.enqueueLeaveParty("p-ok")
         try await queue.enqueueLeaveParty("p-gone")
         let left = await queue.flush()
@@ -59,7 +59,7 @@ final class MutationQueueTests: XCTestCase {
         MockURLProtocol.install { req, _ in
             req.url!.path == "/v1/me" ? .error(409, code: "version_conflict", currentVersion: 5) : .json(201, [:])
         }
-        let queue = MutationQueue(api: makeAPI(), store: InMemoryMutationQueueStore())
+        let queue = MutationQueue(api: makeAPI(), store: InMemoryMutationQueueStore(), userID: TestTokens.userID)
         try await queue.enqueue(try .json("PATCH", "/v1/me", body: ["display_name": "x"], ifMatch: 3))
         try await queue.enqueue(try .json("POST", "/v1/parties", body: ["name": "P"]))
         let left = await queue.flush()
@@ -67,12 +67,21 @@ final class MutationQueueTests: XCTestCase {
         let failed = await queue.failed
         XCTAssertEqual(failed.map(\.path), ["/v1/me"])
         XCTAssertEqual(failed.first?.lastError, "version_conflict")
-        XCTAssertEqual(MutationQueue.classify(.server(ServerError(status: 410, code: "party_disbanded", message: "", requestID: nil, currentVersion: nil, retryAfter: nil)), kind: .generic), .rejected)
+        func gone(_ status: Int, _ code: String) -> APIError {
+            .server(ServerError(status: status, code: code, message: "", requestID: nil, currentVersion: nil, retryAfter: nil))
+        }
+        XCTAssertEqual(MutationQueue.classify(gone(410, "party_disbanded"), kind: .generic), .rejected)
+        // 탈퇴의 410도 code가 party_disbanded일 때만 완료다(§6: code로 분기).
+        XCTAssertEqual(MutationQueue.classify(gone(410, "party_disbanded"), kind: .leaveParty), .done)
+        XCTAssertEqual(MutationQueue.classify(gone(410, "sync_cursor_expired"), kind: .leaveParty), .rejected)
+        // refresh 뒤 재전송도 401이면 세션 문제다. 버리지 않고 남긴다.
+        XCTAssertEqual(MutationQueue.classify(gone(401, "invalid_session"), kind: .generic), .retryLater)
+        XCTAssertEqual(MutationQueue.classify(.sessionEnded, kind: .generic), .stop)
     }
 
     func testRateLimitedStopsAndKeepsOrder() async throws {
         MockURLProtocol.install { _, _ in .error(429, code: "rate_limited", headers: ["Retry-After": "5"]) }
-        let queue = MutationQueue(api: makeAPI(), store: InMemoryMutationQueueStore())
+        let queue = MutationQueue(api: makeAPI(), store: InMemoryMutationQueueStore(), userID: TestTokens.userID)
         try await queue.enqueue(try .json("POST", "/v1/parties", body: ["name": "A"]))
         try await queue.enqueue(try .json("POST", "/v1/parties", body: ["name": "B"]))
         let left = await queue.flush()
@@ -151,7 +160,7 @@ final class MutationQueueConcurrencyTests: XCTestCase {
         MockURLProtocol.install { _, _ in .json(201, [:], delay: 0.1) }
         let api = APIClient(baseURL: URL(string: "http://localhost:8080")!, session: MockURLProtocol.makeSession(),
                             tokenStore: InMemoryTokenStore(TestTokens.make("a-1")), sleep: { _ in })
-        let queue = MutationQueue(api: api, store: InMemoryMutationQueueStore())
+        let queue = MutationQueue(api: api, store: InMemoryMutationQueueStore(), userID: TestTokens.userID)
         try await queue.enqueue(try .json("POST", "/v1/parties", body: ["name": "A"]))
         async let first = queue.flush()
         async let second = queue.flush()
@@ -160,5 +169,183 @@ final class MutationQueueConcurrencyTests: XCTestCase {
         XCTAssertEqual(MockURLProtocol.requests.count, 1)
         let failed = await queue.failed
         XCTAssertTrue(failed.isEmpty)
+    }
+}
+
+/// 세션 경계 회귀 테스트(리뷰 H1·M1·M2·M3·L1).
+final class SessionBoundaryTests: XCTestCase {
+    private let base = URL(string: "http://localhost:8080")!
+
+    private func bootstrapReply() -> MockURLProtocol.Reply {
+        .json(200, ["schema_version": 1, "cursor_watermark": "w", "snapshot": [] as [Any]])
+    }
+
+    /// H1: flush 중 refresh가 401이면 세션이 끝나고 큐 파일이 되살아나지 않는다.
+    @MainActor
+    func testSessionEndDuringFlushLeavesNoQueueFile() async throws {
+        MockURLProtocol.install { req, _ in
+            switch req.url!.path {
+            case "/v1/auth/apple": return .json(200, TestTokens.sessionJSON(access: "a-1", refresh: "r-1"))
+            case "/v1/sync/bootstrap": return self.bootstrapReply()
+            case "/v1/sync": return .json(200, ["changes": [] as [Any], "cursor": "w2", "has_more": false])
+            default: return .error(401, code: "invalid_session")  // POST /v1/parties와 refresh
+            }
+        }
+        let queueStore = InMemoryMutationQueueStore()
+        let syncStore = InMemorySyncStore()
+        let api = APIClient(baseURL: base, session: MockURLProtocol.makeSession(), tokenStore: InMemoryTokenStore(), sleep: { _ in })
+        let session = SessionStore(api: api, syncStore: syncStore, queueStore: queueStore)
+        await session.devLogin(name: "alice", displayName: "앨리스")
+        try await session.mutationQueue?.enqueue(try .json("POST", "/v1/parties", body: ["name": "P"]))
+        XCTAssertNotNil(try queueStore.load())
+
+        await session.syncNow()
+
+        XCTAssertEqual(session.state, .signedOut)
+        XCTAssertNil(try queueStore.load(), "세션 종료 뒤 큐 파일이 다시 써지면 안 된다")
+        XCTAssertNil(try syncStore.load())
+    }
+
+    /// H1·L1: 로그아웃하는 동안 진행 중이던 flush·sync가 끝나도 큐·캐시 파일을 되살리지 않는다.
+    @MainActor
+    func testLogoutDuringFlushAndSyncLeavesNoFiles() async throws {
+        let posted = Counter()
+        MockURLProtocol.install { req, _ in
+            switch req.url!.path {
+            case "/v1/auth/apple": return .json(200, TestTokens.sessionJSON(access: "a-1", refresh: "r-1"))
+            case "/v1/sync/bootstrap": return self.bootstrapReply()
+            case "/v1/sync": return .json(200, ["changes": [] as [Any], "cursor": "w2", "has_more": false], delay: 0.3)
+            case "/v1/parties":
+                posted.increment()
+                return .json(201, [:], delay: 0.3)
+            default: return MockURLProtocol.Reply(status: 204)
+            }
+        }
+        let queueStore = InMemoryMutationQueueStore()
+        let syncStore = InMemorySyncStore()
+        let api = APIClient(baseURL: base, session: MockURLProtocol.makeSession(), tokenStore: InMemoryTokenStore(), sleep: { _ in })
+        let session = SessionStore(api: api, syncStore: syncStore, queueStore: queueStore)
+        await session.devLogin(name: "alice", displayName: "앨리스")
+        try await session.mutationQueue?.enqueue(try .json("POST", "/v1/parties", body: ["name": "A"]))
+        try await session.mutationQueue?.enqueue(try .json("POST", "/v1/parties", body: ["name": "B"]))
+
+        let running = Task { await session.syncNow() }
+        while posted.value == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+        await session.logout()
+        await running.value
+
+        XCTAssertEqual(session.state, .signedOut)
+        XCTAssertNil(session.syncState)
+        XCTAssertNil(session.lastError)
+        XCTAssertNil(try queueStore.load())
+        XCTAssertNil(try syncStore.load())
+    }
+
+    /// H1: 다른 사용자(또는 주인 없는 옛 파일)의 큐는 읽지 않고 보내지 않는다.
+    func testQueueOfAnotherUserIsDiscarded() async throws {
+        MockURLProtocol.install { _, _ in .json(201, [:]) }
+        let m = QueuedMutation(id: UUID(), idempotencyKey: "k", kind: .generic, method: "POST", path: "/v1/parties",
+                               body: Data("{}".utf8), ifMatchVersion: nil, createdAt: Date(), attemptCount: 0, lastError: nil)
+        let api = APIClient(baseURL: base, session: MockURLProtocol.makeSession(), tokenStore: InMemoryTokenStore(TestTokens.make("a-1")), sleep: { _ in })
+        for owner in ["someone-else", nil] {
+            let queue = MutationQueue(api: api, store: InMemoryMutationQueueStore(MutationQueueSnapshot(userID: owner, pending: [m])), userID: TestTokens.userID)
+            let pending = await queue.pending
+            XCTAssertTrue(pending.isEmpty)
+            let left = await queue.flush()
+            XCTAssertEqual(left, 0)
+        }
+        XCTAssertTrue(MockURLProtocol.requests.isEmpty)
+    }
+
+    /// M1: 로그아웃하는 동안 끝난 refresh는 token을 저장하지 않는다.
+    func testRefreshCompletingAfterLogoutDoesNotRestoreTokens() async throws {
+        let refreshing = Counter()
+        MockURLProtocol.install { req, _ in
+            switch req.url!.path {
+            case "/v1/auth/refresh":
+                refreshing.increment()
+                return .json(200, TestTokens.sessionJSON(access: "a-2", refresh: "r-2"), delay: 0.3)
+            case "/v1/auth/logout": return MockURLProtocol.Reply(status: 204)
+            default: return .error(401, code: "invalid_session")
+            }
+        }
+        let store = InMemoryTokenStore(TestTokens.make("a-1", refresh: "r-1"))
+        let api = APIClient(baseURL: base, session: MockURLProtocol.makeSession(), tokenStore: store, sleep: { _ in })
+        let request = Task { try await api.send(.get("/v1/me")) }
+        while refreshing.value == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+        await api.logout()
+        _ = try? await request.value
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertNil(try store.load(), "Keychain이 비어 있어야 한다")
+        let current = await api.currentTokens
+        XCTAssertNil(current)
+    }
+
+    /// M2: refresh 200 뒤 Keychain 저장이 실패해도 새 token을 쓰고, 소비된 refresh token을 다시 보내지 않는다.
+    /// 저장은 다음 요청 때 다시 시도한다.
+    func testRefreshSaveFailureKeepsNewTokensInMemory() async throws {
+        let refreshes = Counter()
+        MockURLProtocol.install { req, _ in
+            if req.url!.path == "/v1/auth/refresh" {
+                refreshes.increment()
+                return .json(200, TestTokens.sessionJSON(access: "a-2", refresh: "r-2"))
+            }
+            return req.value(forHTTPHeaderField: "Authorization") == "Bearer a-2" ? .json(200, [:]) : .error(401, code: "invalid_session")
+        }
+        let store = FlakyTokenStore(TestTokens.make("a-1", refresh: "r-1"), failingSaves: 1)
+        let api = APIClient(baseURL: base, session: MockURLProtocol.makeSession(), tokenStore: store, sleep: { _ in })
+
+        _ = try await api.send(.get("/v1/me"))
+        XCTAssertEqual(try store.load()?.accessToken, "a-1", "첫 저장은 실패했다")
+        _ = try await api.send(.get("/v1/me"))
+
+        XCTAssertEqual(refreshes.value, 1, "소비된 refresh token을 다시 보내지 않는다")
+        XCTAssertEqual(try store.load()?.refreshToken, "r-2", "다음 요청에서 저장을 다시 시도한다")
+    }
+
+    /// M3: 큐 저장이 실패해도 같은 mutation을 끝없이 다시 보내지 않는다.
+    func testQueueSaveFailureStopsFlush() async throws {
+        MockURLProtocol.install { _, _ in .json(201, [:]) }
+        let api = APIClient(baseURL: base, session: MockURLProtocol.makeSession(), tokenStore: InMemoryTokenStore(TestTokens.make("a-1")), sleep: { _ in })
+        let gate = SessionGate()
+        let queue = MutationQueue(api: api, store: GatedMutationQueueStore(base: InMemoryMutationQueueStore(), gate: gate), userID: TestTokens.userID)
+        try await queue.enqueue(try .json("POST", "/v1/parties", body: ["name": "A"]))
+        try await queue.enqueue(try .json("POST", "/v1/parties", body: ["name": "B"]))
+        gate.close()
+        let left = await queue.flush()
+        XCTAssertEqual(left, 2)
+        XCTAssertEqual(MockURLProtocol.requests.count, 1)
+    }
+}
+
+/// 처음 n번 save가 실패하는 token 저장소.
+final class FlakyTokenStore: TokenStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var tokens: AuthTokens?
+    private var failing: Int
+
+    init(_ tokens: AuthTokens?, failingSaves: Int) {
+        self.tokens = tokens
+        self.failing = failingSaves
+    }
+
+    func load() throws -> AuthTokens? {
+        lock.lock(); defer { lock.unlock() }
+        return tokens
+    }
+
+    func save(_ tokens: AuthTokens) throws {
+        lock.lock(); defer { lock.unlock() }
+        if failing > 0 {
+            failing -= 1
+            throw TokenStoreError.keychain(-1)
+        }
+        self.tokens = tokens
+    }
+
+    func clear() throws {
+        lock.lock(); defer { lock.unlock() }
+        tokens = nil
     }
 }

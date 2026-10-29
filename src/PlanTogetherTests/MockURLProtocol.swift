@@ -95,6 +95,8 @@ final class MockURLProtocol: URLProtocol {
 }
 
 enum TestTokens {
+    static let userID = "11111111-1111-1111-1111-111111111111"
+
     static func make(_ access: String, refresh: String = "r-0") -> AuthTokens {
         AuthTokens(userID: "11111111-1111-1111-1111-111111111111", deviceID: "22222222-2222-2222-2222-222222222222",
                    accessToken: access, accessTokenExpiresAt: Date(timeIntervalSince1970: 2_000_000_000),

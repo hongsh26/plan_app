@@ -118,7 +118,7 @@ final class APIClientTests: XCTestCase {
         let sleeps = SleepLog()
         let ended = Counter()
         let client = makeClient(InMemoryTokenStore(TestTokens.make("a-1", refresh: "r-1")), sleeps: sleeps)
-        await client.setSessionEndedHandler { ended.increment() }
+        client.setSessionEndedHandler { ended.increment() }
 
         _ = try await client.send(.get("/v1/me"))
 
@@ -134,7 +134,7 @@ final class APIClientTests: XCTestCase {
         let store = InMemoryTokenStore(TestTokens.make("a-1"))
         let ended = Counter()
         let client = makeClient(store)
-        await client.setSessionEndedHandler { ended.increment() }
+        client.setSessionEndedHandler { ended.increment() }
         do {
             _ = try await client.send(.get("/v1/me"))
             XCTFail("오류여야 한다")
