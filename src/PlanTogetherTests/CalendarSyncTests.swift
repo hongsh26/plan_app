@@ -249,7 +249,7 @@ final class CalendarSyncTests: XCTestCase {
 
     /// 선택하면 source key(HMAC)·sync 기기·시간대를 PUT하고 선택한 캘린더만 읽어 올린다.
     func testSelectionUploadsOnlySelectedCalendars() async throws {
-        let source = FakeEventSource(cals: [work, home], events: [work.id: [event("w1", day: 1), event("w2", day: 2)], home.id: [event("h1", day: 1)]])
+        let source = FakeEventSource(cals: [work, home], events: [work.id: [event("ekid-secret-work-1", day: 1), event("ekid-secret-work-2", day: 2)], home.id: [event("ekid-secret-home", day: 1)]])
         let server = FakeCalendarServer()
         server.exists = true; server.status = "selecting"; server.version = 2
         let store = InMemoryCalendarStateStore()
@@ -267,7 +267,8 @@ final class CalendarSyncTests: XCTestCase {
         XCTAssertEqual(keys.count, 1)
         XCTAssertFalse(keys[0].contains("cal-work"), "calendar identifier 원문은 보내지 않는다")
         XCTAssertNil(put["status"], "이미 업로드 가능한 상태면 status를 보내지 않는다")
-        XCTAssertFalse(server.pageBodies.contains { String(data: $0, encoding: .utf8)!.contains("w1") })
+        // 무작위 HMAC key가 우연히 짧은 문자열을 담을 수 있어, 우연히 나올 수 없는 identifier로 본다.
+        XCTAssertFalse(server.pageBodies.contains { String(data: $0, encoding: .utf8)!.contains("ekid-secret") }, "EventKit identifier가 나가면 안 된다")
         XCTAssertEqual(try store.load()?.lastRevision, 1)
         XCTAssertEqual(try store.load()?.selectedCalendarIDs, [work.id])
 
