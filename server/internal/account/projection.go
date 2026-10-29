@@ -2,10 +2,11 @@ package account
 
 import (
 	"context"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"plantogether/server/internal/auth"
 )
 
 // sync 변경 피드와 bootstrap snapshot이 싣는 entity projection이다.
@@ -43,54 +44,24 @@ func UserProjection(ctx context.Context, q Querier, userID uuid.UUID) (Projectio
 		Payload: map[string]any{"display_name": name, "status": status}}, nil
 }
 
-// device 투영의 열. push token은 암호문이라도 싣지 않고 유무만 싣는다.
-const deviceProjectionColumns = `
-		SELECT id, platform, push_authorization, time_sensitive_setting,
-		       push_token_ciphertext IS NOT NULL, revoked_at IS NOT NULL, last_seen_at, version
-		  FROM devices`
-
-func scanDeviceProjection(row pgx.Row) (Projection, error) {
-	var (
-		id                   uuid.UUID
-		platform, authz, tss string
-		hasToken, revoked    bool
-		lastSeen             *time.Time
-		version              int64
-	)
-	if err := row.Scan(&id, &platform, &authz, &tss, &hasToken, &revoked, &lastSeen, &version); err != nil {
+// DeviceProjection은 기기 하나의 투영이다. 폐기된 기기도 revoked=true로 나온다. 정의는 auth.LoadDevice에 있다.
+func DeviceProjection(ctx context.Context, q Querier, deviceID uuid.UUID) (Projection, error) {
+	d, err := auth.LoadDevice(ctx, q, deviceID)
+	if err != nil {
 		return Projection{}, err
 	}
-	payload := map[string]any{
-		"platform": platform, "push_authorization": authz, "time_sensitive_setting": tss,
-		"has_push_token": hasToken, "revoked": revoked, "last_seen_at": nil,
-	}
-	if lastSeen != nil {
-		payload["last_seen_at"] = lastSeen.UTC().Format(time.RFC3339)
-	}
-	return Projection{EntityType: entityDevice, ID: id, Version: version, Payload: payload}, nil
-}
-
-// DeviceProjection은 기기 하나의 투영이다. 폐기된 기기도 revoked=true로 나온다.
-func DeviceProjection(ctx context.Context, q Querier, deviceID uuid.UUID) (Projection, error) {
-	return scanDeviceProjection(q.QueryRow(ctx, deviceProjectionColumns+` WHERE id = $1`, deviceID))
+	return Projection{EntityType: entityDevice, ID: d.ID, Version: d.Version, Payload: d.Payload}, nil
 }
 
 // LiveDeviceProjections는 사용자의 폐기되지 않은 기기 투영이다. bootstrap이 쓴다.
 func LiveDeviceProjections(ctx context.Context, q Querier, userID uuid.UUID) ([]Projection, error) {
-	rows, err := q.Query(ctx, deviceProjectionColumns+`
-		 WHERE user_id = $1 AND revoked_at IS NULL
-		 ORDER BY created_at, id`, userID)
+	devices, err := auth.LoadLiveDevices(ctx, q, userID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []Projection
-	for rows.Next() {
-		p, err := scanDeviceProjection(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, p)
+	out := make([]Projection, 0, len(devices))
+	for _, d := range devices {
+		out = append(out, Projection{EntityType: entityDevice, ID: d.ID, Version: d.Version, Payload: d.Payload})
 	}
-	return out, rows.Err()
+	return out, nil
 }

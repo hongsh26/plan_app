@@ -153,7 +153,8 @@ func TestDeleteDevice(t *testing.T) {
 	var payload string
 	if err := s.pool.QueryRow(context.Background(), `
 		SELECT payload::text FROM sync_changes
-		 WHERE recipient_user_id = $1 AND entity_type = 'device' AND entity_id = $2 AND operation = 'upsert'`,
+		 WHERE recipient_user_id = $1 AND entity_type = 'device' AND entity_id = $2 AND operation = 'upsert'
+		 ORDER BY entity_version DESC LIMIT 1`, // 로그인 때 발행한 변경(version 1) 뒤의 폐기 변경
 		a.UserID, b.DeviceID).Scan(&payload); err != nil {
 		t.Fatalf("기기 폐기 sync 변경이 없다: %v", err)
 	}
@@ -322,7 +323,8 @@ func TestMeRefKeyStableAndDeviceChangeIsFullProjection(t *testing.T) {
 	var payload map[string]any
 	var raw []byte
 	if err := s.pool.QueryRow(context.Background(), `
-		SELECT payload FROM sync_changes WHERE recipient_user_id = $1 AND entity_id = $2`, a.UserID, b.DeviceID).Scan(&raw); err != nil {
+		SELECT payload FROM sync_changes WHERE recipient_user_id = $1 AND entity_id = $2
+		 ORDER BY entity_version DESC LIMIT 1`, a.UserID, b.DeviceID).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
 	_ = json.Unmarshal(raw, &payload)

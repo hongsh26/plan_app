@@ -112,8 +112,9 @@ func TestDeleteMeRequestsDeletionAndBlocksReplayAtAuth(t *testing.T) {
 	if n := s.syncCount(t, a.UserID, entityUser); n != 1 {
 		t.Errorf("user sync 변경 %d개, want 1", n)
 	}
-	if n := s.syncCount(t, a.UserID, entityDevice); n != 2 {
-		t.Errorf("device sync 변경 %d개, want 2", n)
+	// 기기 2개 × (로그인 때 발행 1 + 삭제 요청의 폐기 1).
+	if n := s.syncCount(t, a.UserID, entityDevice); n != 4 {
+		t.Errorf("device sync 변경 %d개, want 4", n)
 	}
 }
 

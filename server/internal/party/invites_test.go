@@ -241,7 +241,7 @@ func TestInviteAcceptFlow(t *testing.T) {
 	}
 
 	// sync: 신규 멤버는 party + 멤버십 2 + 본인 설정 1, 방장은 party + 멤버십 + 초대 upsert.
-	assertCount(t, s.pool, `SELECT count(*) FROM sync_changes WHERE recipient_user_id = $1`, joiner.UserID, 4)
+	assertCount(t, s.pool, `SELECT count(*) FROM sync_changes WHERE recipient_user_id = $1 AND entity_type <> 'device'`, joiner.UserID, 4)
 	if delta := countSync(t, s.pool, owner.UserID) - ownerSyncBefore; delta != 3 {
 		t.Fatalf("방장 sync 증가 = %d, want 3", delta)
 	}

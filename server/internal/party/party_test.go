@@ -217,7 +217,7 @@ func TestCreateGetPatchAndListParty(t *testing.T) {
 	assertCount(t, s.pool, `SELECT count(*) FROM party_memberships WHERE party_id = $1 AND role = 'owner' AND status = 'active'`, created.Party.ID, 1)
 	assertCount(t, s.pool, `SELECT count(*) FROM party_visibility_settings WHERE party_id = $1 AND visibility_level = 'busyOnly'`, created.Party.ID, 1)
 	assertCount(t, s.pool, `SELECT count(*) FROM party_schedule_projections WHERE party_id = $1`, created.Party.ID, 0)
-	assertCount(t, s.pool, `SELECT count(*) FROM sync_changes WHERE recipient_user_id = $1`, sess.UserID, 3)
+	assertCount(t, s.pool, `SELECT count(*) FROM sync_changes WHERE recipient_user_id = $1 AND entity_type <> 'device'`, sess.UserID, 3)
 
 	get := s.do(t, http.MethodGet, "/v1/parties/"+created.Party.ID.String(), sess.AccessToken, nil)
 	if get.Code != http.StatusOK {

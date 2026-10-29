@@ -267,6 +267,11 @@ func (s *Service) signInTx(ctx context.Context, subject, displayName string, sea
 		if err != nil {
 			return err
 		}
+		// 같은 사용자의 다른 세션이 새 기기를 증분으로 받는다. users는 위에서 FOR SHARE로 잡았고 devices는 방금
+		// 만든 row라 잠금 순서(users → devices → sessions)를 바꾸지 않는다.
+		if err := emitDevice(ctx, tx, userID, deviceID); err != nil {
+			return err
+		}
 		sess.NewUser = newUser
 		return audit.Record(ctx, tx, audit.Event{Actor: &userID, Action: "auth.apple_sign_in",
 			TargetType: "user", TargetID: &userID, Result: "success", RequestID: requestID})
@@ -384,8 +389,13 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, requestID uu
 			// token family는 기기 하나 안에서만 생긴다(로그인이 새 기기와 새 family를
 			// 함께 만들고 refresh는 기기를 바꾸지 않는다). 그래서 기기 폐기가 family
 			// 전체 폐기를 포함한다.
-			if _, _, err := RevokeDevice(ctx, tx, deviceID); err != nil {
+			if _, revoked, err := RevokeDevice(ctx, tx, deviceID); err != nil {
 				return err
+			} else if revoked {
+				// 다른 세션의 기기 목록에서도 빠지게 revoked=true 투영을 보낸다.
+				if err := emitDevice(ctx, tx, userID, deviceID); err != nil {
+					return err
+				}
 			}
 			outcome = ErrInvalidCredential
 			return audit.Record(ctx, tx, audit.Event{Actor: &userID, Action: "auth.refresh_reuse_detected",
@@ -480,8 +490,13 @@ func (s *Service) Logout(ctx context.Context, p Principal, requestID uuid.UUID) 
 		if err := LockUserAndDevice(ctx, tx, p.UserID, p.DeviceID); err != nil {
 			return err
 		}
-		if _, _, err := RevokeDevice(ctx, tx, p.DeviceID); err != nil {
+		if _, revoked, err := RevokeDevice(ctx, tx, p.DeviceID); err != nil {
 			return err
+		} else if revoked {
+			// 다른 세션의 기기 목록에서도 빠지게 revoked=true 투영을 보낸다(기기 폐기 API와 같다).
+			if err := emitDevice(ctx, tx, p.UserID, p.DeviceID); err != nil {
+				return err
+			}
 		}
 		return audit.Record(ctx, tx, audit.Event{Actor: &p.UserID, Action: "auth.logout",
 			TargetType: "device", TargetID: &p.DeviceID, Result: "success", RequestID: requestID})
