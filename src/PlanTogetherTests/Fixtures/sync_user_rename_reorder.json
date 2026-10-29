@@ -5,13 +5,13 @@
  "sessions": [
   {
    "name": "user",
-   "self_user_id": "4f8eeaab-bdb2-44ee-9413-5f203f078a7d",
+   "self_user_id": "f3142f09-aa5d-4685-a179-a33442fa5890",
    "bootstrap": {
-    "cursor_watermark": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzcyLi0x",
+    "cursor_watermark": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTc3MDc4Li0x",
     "schema_version": 1,
     "snapshot": [
      {
-      "entity_id": "4f8eeaab-bdb2-44ee-9413-5f203f078a7d",
+      "entity_id": "f3142f09-aa5d-4685-a179-a33442fa5890",
       "entity_type": "user",
       "operation": "upsert",
       "payload": {
@@ -22,12 +22,12 @@
       "version": 3
      },
      {
-      "entity_id": "4bbee5a0-d736-41e0-8393-efca596a798b",
+      "entity_id": "57e6704b-5331-461e-98cb-ebe7e55e96c7",
       "entity_type": "device",
       "operation": "upsert",
       "payload": {
        "has_push_token": false,
-       "last_seen_at": "2026-10-29T03:46:47Z",
+       "last_seen_at": "2026-10-29T04:42:48Z",
        "platform": "ios",
        "push_authorization": "unknown",
        "revoked": false,
@@ -37,12 +37,12 @@
       "version": 1
      },
      {
-      "entity_id": "c4c4b45c-2a78-4fef-a6f3-b223aa6253a2",
+      "entity_id": "c94d2e8f-6ea9-440e-8e83-42a3a752389f",
       "entity_type": "device",
       "operation": "upsert",
       "payload": {
        "has_push_token": false,
-       "last_seen_at": "2026-10-29T03:46:47Z",
+       "last_seen_at": "2026-10-29T04:42:48Z",
        "platform": "ios",
        "push_authorization": "unknown",
        "revoked": false,
@@ -52,12 +52,12 @@
       "version": 1
      },
      {
-      "entity_id": "00e5a293-f2cb-4c2d-89a9-18f929f92b2b",
+      "entity_id": "5b38c90b-a24f-4859-ace6-9ce0ecfb0af4",
       "entity_type": "device",
       "operation": "upsert",
       "payload": {
        "has_push_token": false,
-       "last_seen_at": "2026-10-29T03:46:47Z",
+       "last_seen_at": "2026-10-29T04:42:48Z",
        "platform": "ios",
        "push_authorization": "unknown",
        "revoked": false,
@@ -72,7 +72,7 @@
     {
      "changes": [
       {
-       "entity_id": "4f8eeaab-bdb2-44ee-9413-5f203f078a7d",
+       "entity_id": "f3142f09-aa5d-4685-a179-a33442fa5890",
        "entity_type": "user",
        "operation": "upsert",
        "payload": {
@@ -83,12 +83,12 @@
        "version": 2
       }
      ],
-     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzc1Li0x",
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTc3MDgxLi0x",
      "has_more": false
     },
     {
      "changes": [],
-     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzc1Li0x",
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTc3MDgxLi0x",
      "has_more": false
     }
    ],
@@ -96,11 +96,11 @@
    "expected": [
     {
      "entity_type": "device",
-     "entity_id": "00e5a293-f2cb-4c2d-89a9-18f929f92b2b",
+     "entity_id": "57e6704b-5331-461e-98cb-ebe7e55e96c7",
      "version": 1,
      "payload": {
       "has_push_token": false,
-      "last_seen_at": "2026-10-29T03:46:47Z",
+      "last_seen_at": "2026-10-29T04:42:48Z",
       "platform": "ios",
       "push_authorization": "unknown",
       "revoked": false,
@@ -109,11 +109,11 @@
     },
     {
      "entity_type": "device",
-     "entity_id": "4bbee5a0-d736-41e0-8393-efca596a798b",
+     "entity_id": "5b38c90b-a24f-4859-ace6-9ce0ecfb0af4",
      "version": 1,
      "payload": {
       "has_push_token": false,
-      "last_seen_at": "2026-10-29T03:46:47Z",
+      "last_seen_at": "2026-10-29T04:42:48Z",
       "platform": "ios",
       "push_authorization": "unknown",
       "revoked": false,
@@ -122,11 +122,11 @@
     },
     {
      "entity_type": "device",
-     "entity_id": "c4c4b45c-2a78-4fef-a6f3-b223aa6253a2",
+     "entity_id": "c94d2e8f-6ea9-440e-8e83-42a3a752389f",
      "version": 1,
      "payload": {
       "has_push_token": false,
-      "last_seen_at": "2026-10-29T03:46:47Z",
+      "last_seen_at": "2026-10-29T04:42:48Z",
       "platform": "ios",
       "push_authorization": "unknown",
       "revoked": false,
@@ -135,7 +135,7 @@
     },
     {
      "entity_type": "user",
-     "entity_id": "4f8eeaab-bdb2-44ee-9413-5f203f078a7d",
+     "entity_id": "f3142f09-aa5d-4685-a179-a33442fa5890",
      "version": 3,
      "payload": {
       "display_name": "나중",

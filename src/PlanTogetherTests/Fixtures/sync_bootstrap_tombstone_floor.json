@@ -7,13 +7,13 @@
  "sessions": [
   {
    "name": "A",
-   "self_user_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed",
+   "self_user_id": "e2a84b4f-4e25-45c2-9829-fe4306769052",
    "bootstrap": {
-    "cursor_watermark": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzUyLi0x",
+    "cursor_watermark": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTc3MDU4Li0x",
     "schema_version": 1,
     "snapshot": [
      {
-      "entity_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed",
+      "entity_id": "e2a84b4f-4e25-45c2-9829-fe4306769052",
       "entity_type": "user",
       "operation": "upsert",
       "payload": {
@@ -24,12 +24,12 @@
       "version": 1
      },
      {
-      "entity_id": "4d3ba99e-bec3-4430-a29b-0f246c59a420",
+      "entity_id": "79f3ee2a-fba3-4a4f-b27d-d9224be9e75f",
       "entity_type": "device",
       "operation": "upsert",
       "payload": {
        "has_push_token": false,
-       "last_seen_at": "2026-10-29T03:46:47Z",
+       "last_seen_at": "2026-10-29T04:42:48Z",
        "platform": "ios",
        "push_authorization": "unknown",
        "revoked": false,
@@ -39,12 +39,12 @@
       "version": 1
      },
      {
-      "entity_id": "faac6a65-a458-4276-8cb4-4c9278976863",
+      "entity_id": "2f0cf6df-da69-4a46-9cb7-e2824ca8baf8",
       "entity_type": "device",
       "operation": "upsert",
       "payload": {
        "has_push_token": false,
-       "last_seen_at": "2026-10-29T03:46:47Z",
+       "last_seen_at": "2026-10-29T04:42:48Z",
        "platform": "ios",
        "push_authorization": "unknown",
        "revoked": false,
@@ -54,85 +54,85 @@
       "version": 1
      },
      {
-      "entity_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+      "entity_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
       "entity_type": "party",
       "operation": "upsert",
       "payload": {
-       "created_at": "2026-10-29T03:46:47Z",
-       "created_by_user_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed",
+       "created_at": "2026-10-29T04:42:48Z",
+       "created_by_user_id": "e2a84b4f-4e25-45c2-9829-fe4306769052",
        "member_limit": 10,
        "name": "R6",
-       "owner_membership_id": "3f55c945-e730-41fc-8b4c-3384e4ad5d05",
+       "owner_membership_id": "4eb52737-eacf-42d0-bab4-f61c6bb8189f",
        "status": "active",
-       "updated_at": "2026-10-29T03:46:47Z"
+       "updated_at": "2026-10-29T04:42:48Z"
       },
-      "scope_membership_id": "be744851-06f0-4bf9-b85e-173e92e32bc9",
+      "scope_membership_id": "6f798f39-190c-44ef-b1eb-3ca4410e9837",
       "version": 4
      },
      {
-      "entity_id": "3f55c945-e730-41fc-8b4c-3384e4ad5d05",
+      "entity_id": "20df0e20-bc34-45e7-8049-3771c5fff632",
       "entity_type": "party_membership",
       "operation": "upsert",
       "payload": {
        "display_name": "P6",
-       "joined_at": "2026-10-29T03:46:47Z",
-       "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
-       "role": "owner",
-       "status": "active",
-       "user_id": "6fd1ed07-1fe0-46b4-9d52-3b0ca21bc72d"
-      },
-      "scope_membership_id": "be744851-06f0-4bf9-b85e-173e92e32bc9",
-      "version": 2
-     },
-     {
-      "entity_id": "9d5e59e4-5b61-4a85-9237-c98cadb23602",
-      "entity_type": "party_membership",
-      "operation": "upsert",
-      "payload": {
-       "display_name": "P6",
-       "joined_at": "2026-10-29T03:46:47Z",
-       "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+       "joined_at": "2026-10-29T04:42:48Z",
+       "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
        "role": "member",
        "status": "active",
-       "user_id": "d629ee16-69bd-4548-89ec-7f27bf5eeb97"
+       "user_id": "823c46b2-a661-42d6-b661-04604108cf13"
       },
-      "scope_membership_id": "be744851-06f0-4bf9-b85e-173e92e32bc9",
+      "scope_membership_id": "6f798f39-190c-44ef-b1eb-3ca4410e9837",
       "version": 1
      },
      {
-      "entity_id": "be744851-06f0-4bf9-b85e-173e92e32bc9",
+      "entity_id": "4eb52737-eacf-42d0-bab4-f61c6bb8189f",
       "entity_type": "party_membership",
       "operation": "upsert",
       "payload": {
        "display_name": "P6",
-       "joined_at": "2026-10-29T03:46:47Z",
-       "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
-       "role": "member",
+       "joined_at": "2026-10-29T04:42:48Z",
+       "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
+       "role": "owner",
        "status": "active",
-       "user_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed"
+       "user_id": "71accbf8-10f8-452d-a8ab-e90041f5fa39"
       },
-      "scope_membership_id": "be744851-06f0-4bf9-b85e-173e92e32bc9",
+      "scope_membership_id": "6f798f39-190c-44ef-b1eb-3ca4410e9837",
       "version": 2
      },
      {
-      "entity_id": "c7c52826-3b6b-4aa6-b7eb-0e88b37141f4",
+      "entity_id": "6f798f39-190c-44ef-b1eb-3ca4410e9837",
+      "entity_type": "party_membership",
+      "operation": "upsert",
+      "payload": {
+       "display_name": "P6",
+       "joined_at": "2026-10-29T04:42:48Z",
+       "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
+       "role": "member",
+       "status": "active",
+       "user_id": "e2a84b4f-4e25-45c2-9829-fe4306769052"
+      },
+      "scope_membership_id": "6f798f39-190c-44ef-b1eb-3ca4410e9837",
+      "version": 2
+     },
+     {
+      "entity_id": "ba022808-ef8c-455b-aa76-cf80c955dbb5",
       "entity_type": "party_visibility_setting",
       "operation": "upsert",
       "payload": {
-       "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+       "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
        "share_location": false,
-       "user_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed",
+       "user_id": "e2a84b4f-4e25-45c2-9829-fe4306769052",
        "visibility_level": "busyOnly"
       },
-      "scope_membership_id": "be744851-06f0-4bf9-b85e-173e92e32bc9",
+      "scope_membership_id": "6f798f39-190c-44ef-b1eb-3ca4410e9837",
       "version": 1
      },
      {
-      "entity_id": "203f3267-f6e8-4f8c-8367-486a7e2bfbb9",
+      "entity_id": "71f263d9-39ca-43dd-8f42-0fe99a9d1d40",
       "entity_type": "party_invite",
       "operation": "tombstone",
       "payload": null,
-      "scope_membership_id": "be744851-06f0-4bf9-b85e-173e92e32bc9",
+      "scope_membership_id": "6f798f39-190c-44ef-b1eb-3ca4410e9837",
       "version": 3
      }
     ]
@@ -141,69 +141,69 @@
     {
      "changes": [
       {
-       "entity_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+       "entity_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
        "entity_type": "party",
        "operation": "upsert",
        "payload": {
-        "created_at": "2026-10-29T03:46:47Z",
-        "created_by_user_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed",
+        "created_at": "2026-10-29T04:42:48Z",
+        "created_by_user_id": "e2a84b4f-4e25-45c2-9829-fe4306769052",
         "member_limit": 10,
         "name": "R6",
-        "owner_membership_id": "be744851-06f0-4bf9-b85e-173e92e32bc9",
+        "owner_membership_id": "6f798f39-190c-44ef-b1eb-3ca4410e9837",
         "status": "active",
-        "updated_at": "2026-10-29T03:46:47Z"
+        "updated_at": "2026-10-29T04:42:48Z"
        },
-       "scope_membership_id": "be744851-06f0-4bf9-b85e-173e92e32bc9",
+       "scope_membership_id": "6f798f39-190c-44ef-b1eb-3ca4410e9837",
        "version": 3
       },
       {
-       "entity_id": "9d5e59e4-5b61-4a85-9237-c98cadb23602",
+       "entity_id": "20df0e20-bc34-45e7-8049-3771c5fff632",
        "entity_type": "party_membership",
        "operation": "upsert",
        "payload": {
         "display_name": "P6",
-        "joined_at": "2026-10-29T03:46:47Z",
-        "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+        "joined_at": "2026-10-29T04:42:48Z",
+        "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
         "role": "member",
         "status": "active",
-        "user_id": "d629ee16-69bd-4548-89ec-7f27bf5eeb97"
+        "user_id": "823c46b2-a661-42d6-b661-04604108cf13"
        },
-       "scope_membership_id": "be744851-06f0-4bf9-b85e-173e92e32bc9",
+       "scope_membership_id": "6f798f39-190c-44ef-b1eb-3ca4410e9837",
        "version": 1
       },
       {
-       "entity_id": "203f3267-f6e8-4f8c-8367-486a7e2bfbb9",
+       "entity_id": "71f263d9-39ca-43dd-8f42-0fe99a9d1d40",
        "entity_type": "party_invite",
        "operation": "upsert",
        "payload": {
-        "created_at": "2026-10-29T03:46:47Z",
-        "created_by_membership_id": "be744851-06f0-4bf9-b85e-173e92e32bc9",
-        "expires_at": "2026-11-05T03:46:47Z",
+        "created_at": "2026-10-29T04:42:48Z",
+        "created_by_membership_id": "6f798f39-190c-44ef-b1eb-3ca4410e9837",
+        "expires_at": "2026-11-05T04:42:48Z",
         "max_uses": 5,
-        "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+        "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
         "status": "active",
         "used_count": 1
        },
-       "scope_membership_id": "be744851-06f0-4bf9-b85e-173e92e32bc9",
+       "scope_membership_id": "6f798f39-190c-44ef-b1eb-3ca4410e9837",
        "version": 2
       }
      ],
-     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzU1Li0x",
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTc3MDYxLi0x",
      "has_more": false
     },
     {
      "changes": [],
-     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzU1Li0x",
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTc3MDYxLi0x",
      "has_more": false
     },
     {
      "changes": [],
-     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzU1Li0x",
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTc3MDYxLi0x",
      "has_more": false
     },
     {
      "changes": [],
-     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzU1Li0x",
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTc3MDYxLi0x",
      "has_more": false
     }
    ],
@@ -213,65 +213,65 @@
      "entities": [
       {
        "entity_type": "party",
-       "entity_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+       "entity_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
        "version": 4,
        "payload": {
-        "created_at": "2026-10-29T03:46:47Z",
-        "created_by_user_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed",
+        "created_at": "2026-10-29T04:42:48Z",
+        "created_by_user_id": "e2a84b4f-4e25-45c2-9829-fe4306769052",
         "member_limit": 10,
         "name": "R6",
-        "owner_membership_id": "3f55c945-e730-41fc-8b4c-3384e4ad5d05",
+        "owner_membership_id": "4eb52737-eacf-42d0-bab4-f61c6bb8189f",
         "status": "active",
-        "updated_at": "2026-10-29T03:46:47Z"
+        "updated_at": "2026-10-29T04:42:48Z"
        }
       },
       {
        "entity_type": "party_membership",
-       "entity_id": "3f55c945-e730-41fc-8b4c-3384e4ad5d05",
-       "version": 2,
-       "payload": {
-        "display_name": "P6",
-        "joined_at": "2026-10-29T03:46:47Z",
-        "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
-        "role": "owner",
-        "status": "active",
-        "user_id": "6fd1ed07-1fe0-46b4-9d52-3b0ca21bc72d"
-       }
-      },
-      {
-       "entity_type": "party_membership",
-       "entity_id": "9d5e59e4-5b61-4a85-9237-c98cadb23602",
+       "entity_id": "20df0e20-bc34-45e7-8049-3771c5fff632",
        "version": 1,
        "payload": {
         "display_name": "P6",
-        "joined_at": "2026-10-29T03:46:47Z",
-        "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+        "joined_at": "2026-10-29T04:42:48Z",
+        "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
         "role": "member",
         "status": "active",
-        "user_id": "d629ee16-69bd-4548-89ec-7f27bf5eeb97"
+        "user_id": "823c46b2-a661-42d6-b661-04604108cf13"
        }
       },
       {
        "entity_type": "party_membership",
-       "entity_id": "be744851-06f0-4bf9-b85e-173e92e32bc9",
+       "entity_id": "4eb52737-eacf-42d0-bab4-f61c6bb8189f",
        "version": 2,
        "payload": {
         "display_name": "P6",
-        "joined_at": "2026-10-29T03:46:47Z",
-        "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+        "joined_at": "2026-10-29T04:42:48Z",
+        "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
+        "role": "owner",
+        "status": "active",
+        "user_id": "71accbf8-10f8-452d-a8ab-e90041f5fa39"
+       }
+      },
+      {
+       "entity_type": "party_membership",
+       "entity_id": "6f798f39-190c-44ef-b1eb-3ca4410e9837",
+       "version": 2,
+       "payload": {
+        "display_name": "P6",
+        "joined_at": "2026-10-29T04:42:48Z",
+        "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
         "role": "member",
         "status": "active",
-        "user_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed"
+        "user_id": "e2a84b4f-4e25-45c2-9829-fe4306769052"
        }
       },
       {
        "entity_type": "party_visibility_setting",
-       "entity_id": "c7c52826-3b6b-4aa6-b7eb-0e88b37141f4",
+       "entity_id": "ba022808-ef8c-455b-aa76-cf80c955dbb5",
        "version": 1,
        "payload": {
-        "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+        "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
         "share_location": false,
-        "user_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed",
+        "user_id": "e2a84b4f-4e25-45c2-9829-fe4306769052",
         "visibility_level": "busyOnly"
        }
       }
@@ -282,65 +282,65 @@
      "entities": [
       {
        "entity_type": "party",
-       "entity_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+       "entity_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
        "version": 4,
        "payload": {
-        "created_at": "2026-10-29T03:46:47Z",
-        "created_by_user_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed",
+        "created_at": "2026-10-29T04:42:48Z",
+        "created_by_user_id": "e2a84b4f-4e25-45c2-9829-fe4306769052",
         "member_limit": 10,
         "name": "R6",
-        "owner_membership_id": "3f55c945-e730-41fc-8b4c-3384e4ad5d05",
+        "owner_membership_id": "4eb52737-eacf-42d0-bab4-f61c6bb8189f",
         "status": "active",
-        "updated_at": "2026-10-29T03:46:47Z"
+        "updated_at": "2026-10-29T04:42:48Z"
        }
       },
       {
        "entity_type": "party_membership",
-       "entity_id": "3f55c945-e730-41fc-8b4c-3384e4ad5d05",
-       "version": 2,
-       "payload": {
-        "display_name": "P6",
-        "joined_at": "2026-10-29T03:46:47Z",
-        "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
-        "role": "owner",
-        "status": "active",
-        "user_id": "6fd1ed07-1fe0-46b4-9d52-3b0ca21bc72d"
-       }
-      },
-      {
-       "entity_type": "party_membership",
-       "entity_id": "9d5e59e4-5b61-4a85-9237-c98cadb23602",
+       "entity_id": "20df0e20-bc34-45e7-8049-3771c5fff632",
        "version": 1,
        "payload": {
         "display_name": "P6",
-        "joined_at": "2026-10-29T03:46:47Z",
-        "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+        "joined_at": "2026-10-29T04:42:48Z",
+        "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
         "role": "member",
         "status": "active",
-        "user_id": "d629ee16-69bd-4548-89ec-7f27bf5eeb97"
+        "user_id": "823c46b2-a661-42d6-b661-04604108cf13"
        }
       },
       {
        "entity_type": "party_membership",
-       "entity_id": "be744851-06f0-4bf9-b85e-173e92e32bc9",
+       "entity_id": "4eb52737-eacf-42d0-bab4-f61c6bb8189f",
        "version": 2,
        "payload": {
         "display_name": "P6",
-        "joined_at": "2026-10-29T03:46:47Z",
-        "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+        "joined_at": "2026-10-29T04:42:48Z",
+        "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
+        "role": "owner",
+        "status": "active",
+        "user_id": "71accbf8-10f8-452d-a8ab-e90041f5fa39"
+       }
+      },
+      {
+       "entity_type": "party_membership",
+       "entity_id": "6f798f39-190c-44ef-b1eb-3ca4410e9837",
+       "version": 2,
+       "payload": {
+        "display_name": "P6",
+        "joined_at": "2026-10-29T04:42:48Z",
+        "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
         "role": "member",
         "status": "active",
-        "user_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed"
+        "user_id": "e2a84b4f-4e25-45c2-9829-fe4306769052"
        }
       },
       {
        "entity_type": "party_visibility_setting",
-       "entity_id": "c7c52826-3b6b-4aa6-b7eb-0e88b37141f4",
+       "entity_id": "ba022808-ef8c-455b-aa76-cf80c955dbb5",
        "version": 1,
        "payload": {
-        "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+        "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
         "share_location": false,
-        "user_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed",
+        "user_id": "e2a84b4f-4e25-45c2-9829-fe4306769052",
         "visibility_level": "busyOnly"
        }
       }
@@ -350,11 +350,11 @@
    "expected": [
     {
      "entity_type": "device",
-     "entity_id": "4d3ba99e-bec3-4430-a29b-0f246c59a420",
+     "entity_id": "2f0cf6df-da69-4a46-9cb7-e2824ca8baf8",
      "version": 1,
      "payload": {
       "has_push_token": false,
-      "last_seen_at": "2026-10-29T03:46:47Z",
+      "last_seen_at": "2026-10-29T04:42:48Z",
       "platform": "ios",
       "push_authorization": "unknown",
       "revoked": false,
@@ -363,11 +363,11 @@
     },
     {
      "entity_type": "device",
-     "entity_id": "faac6a65-a458-4276-8cb4-4c9278976863",
+     "entity_id": "79f3ee2a-fba3-4a4f-b27d-d9224be9e75f",
      "version": 1,
      "payload": {
       "has_push_token": false,
-      "last_seen_at": "2026-10-29T03:46:47Z",
+      "last_seen_at": "2026-10-29T04:42:48Z",
       "platform": "ios",
       "push_authorization": "unknown",
       "revoked": false,
@@ -376,71 +376,71 @@
     },
     {
      "entity_type": "party",
-     "entity_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+     "entity_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
      "version": 4,
      "payload": {
-      "created_at": "2026-10-29T03:46:47Z",
-      "created_by_user_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed",
+      "created_at": "2026-10-29T04:42:48Z",
+      "created_by_user_id": "e2a84b4f-4e25-45c2-9829-fe4306769052",
       "member_limit": 10,
       "name": "R6",
-      "owner_membership_id": "3f55c945-e730-41fc-8b4c-3384e4ad5d05",
+      "owner_membership_id": "4eb52737-eacf-42d0-bab4-f61c6bb8189f",
       "status": "active",
-      "updated_at": "2026-10-29T03:46:47Z"
+      "updated_at": "2026-10-29T04:42:48Z"
      }
     },
     {
      "entity_type": "party_membership",
-     "entity_id": "3f55c945-e730-41fc-8b4c-3384e4ad5d05",
-     "version": 2,
-     "payload": {
-      "display_name": "P6",
-      "joined_at": "2026-10-29T03:46:47Z",
-      "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
-      "role": "owner",
-      "status": "active",
-      "user_id": "6fd1ed07-1fe0-46b4-9d52-3b0ca21bc72d"
-     }
-    },
-    {
-     "entity_type": "party_membership",
-     "entity_id": "9d5e59e4-5b61-4a85-9237-c98cadb23602",
+     "entity_id": "20df0e20-bc34-45e7-8049-3771c5fff632",
      "version": 1,
      "payload": {
       "display_name": "P6",
-      "joined_at": "2026-10-29T03:46:47Z",
-      "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+      "joined_at": "2026-10-29T04:42:48Z",
+      "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
       "role": "member",
       "status": "active",
-      "user_id": "d629ee16-69bd-4548-89ec-7f27bf5eeb97"
+      "user_id": "823c46b2-a661-42d6-b661-04604108cf13"
      }
     },
     {
      "entity_type": "party_membership",
-     "entity_id": "be744851-06f0-4bf9-b85e-173e92e32bc9",
+     "entity_id": "4eb52737-eacf-42d0-bab4-f61c6bb8189f",
      "version": 2,
      "payload": {
       "display_name": "P6",
-      "joined_at": "2026-10-29T03:46:47Z",
-      "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+      "joined_at": "2026-10-29T04:42:48Z",
+      "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
+      "role": "owner",
+      "status": "active",
+      "user_id": "71accbf8-10f8-452d-a8ab-e90041f5fa39"
+     }
+    },
+    {
+     "entity_type": "party_membership",
+     "entity_id": "6f798f39-190c-44ef-b1eb-3ca4410e9837",
+     "version": 2,
+     "payload": {
+      "display_name": "P6",
+      "joined_at": "2026-10-29T04:42:48Z",
+      "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
       "role": "member",
       "status": "active",
-      "user_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed"
+      "user_id": "e2a84b4f-4e25-45c2-9829-fe4306769052"
      }
     },
     {
      "entity_type": "party_visibility_setting",
-     "entity_id": "c7c52826-3b6b-4aa6-b7eb-0e88b37141f4",
+     "entity_id": "ba022808-ef8c-455b-aa76-cf80c955dbb5",
      "version": 1,
      "payload": {
-      "party_id": "a7ba2e0d-7196-4a2b-a264-1eec9c9bcdea",
+      "party_id": "7c9351c1-c89e-474f-83ae-3c1727ee8be0",
       "share_location": false,
-      "user_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed",
+      "user_id": "e2a84b4f-4e25-45c2-9829-fe4306769052",
       "visibility_level": "busyOnly"
      }
     },
     {
      "entity_type": "user",
-     "entity_id": "49ee16d1-5ff1-437a-9276-3cf62c4fe6ed",
+     "entity_id": "e2a84b4f-4e25-45c2-9829-fe4306769052",
      "version": 1,
      "payload": {
       "display_name": "P6",

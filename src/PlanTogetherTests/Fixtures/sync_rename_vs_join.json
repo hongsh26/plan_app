@@ -7,13 +7,13 @@
  "sessions": [
   {
    "name": "J",
-   "self_user_id": "1dd32498-b665-4748-8b06-04544dc9efb4",
+   "self_user_id": "8ba41bbf-d699-488e-b13e-86774b318d4c",
    "bootstrap": {
-    "cursor_watermark": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzIwLi0x",
+    "cursor_watermark": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTc3MDI2Li0x",
     "schema_version": 1,
     "snapshot": [
      {
-      "entity_id": "1dd32498-b665-4748-8b06-04544dc9efb4",
+      "entity_id": "8ba41bbf-d699-488e-b13e-86774b318d4c",
       "entity_type": "user",
       "operation": "upsert",
       "payload": {
@@ -24,12 +24,12 @@
       "version": 1
      },
      {
-      "entity_id": "e3412f52-c692-4b63-8a79-144b12376c56",
+      "entity_id": "e9ccceb3-7bcd-43a7-b4b7-6fa9199efbdb",
       "entity_type": "device",
       "operation": "upsert",
       "payload": {
        "has_push_token": false,
-       "last_seen_at": "2026-10-29T03:46:47Z",
+       "last_seen_at": "2026-10-29T04:42:47Z",
        "platform": "ios",
        "push_authorization": "unknown",
        "revoked": false,
@@ -39,12 +39,12 @@
       "version": 1
      },
      {
-      "entity_id": "575eaef1-37d7-42a7-a3b0-3c01a15bc5eb",
+      "entity_id": "4b38fd02-5e4c-4e26-879c-95535a5191d2",
       "entity_type": "device",
       "operation": "upsert",
       "payload": {
        "has_push_token": false,
-       "last_seen_at": "2026-10-29T03:46:47Z",
+       "last_seen_at": "2026-10-29T04:42:47Z",
        "platform": "ios",
        "push_authorization": "unknown",
        "revoked": false,
@@ -59,91 +59,91 @@
     {
      "changes": [
       {
-       "entity_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+       "entity_id": "8162f92b-db84-42d0-9e40-51d100291899",
        "entity_type": "party_membership",
        "operation": "upsert",
        "payload": {
         "display_name": "A 늦은 이름",
-        "joined_at": "2026-10-29T03:46:47Z",
-        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "joined_at": "2026-10-29T04:42:47Z",
+        "party_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
         "role": "owner",
         "status": "active",
-        "user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275"
+        "user_id": "131579d0-3f19-4c6b-bd65-4825157133eb"
        },
-       "scope_membership_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "scope_membership_id": "371bbf83-d666-4c32-9b7b-2db6acb52a0c",
        "version": 2
       },
       {
-       "entity_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+       "entity_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
        "entity_type": "party",
        "operation": "upsert",
        "payload": {
-        "created_at": "2026-10-29T03:46:47Z",
-        "created_by_user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275",
+        "created_at": "2026-10-29T04:42:47Z",
+        "created_by_user_id": "131579d0-3f19-4c6b-bd65-4825157133eb",
         "member_limit": 10,
         "name": "R4",
-        "owner_membership_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+        "owner_membership_id": "8162f92b-db84-42d0-9e40-51d100291899",
         "status": "active",
-        "updated_at": "2026-10-29T03:46:47Z"
+        "updated_at": "2026-10-29T04:42:48Z"
        },
-       "scope_membership_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "scope_membership_id": "371bbf83-d666-4c32-9b7b-2db6acb52a0c",
        "version": 2
       },
       {
-       "entity_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+       "entity_id": "8162f92b-db84-42d0-9e40-51d100291899",
        "entity_type": "party_membership",
        "operation": "upsert",
        "payload": {
         "display_name": "P6",
-        "joined_at": "2026-10-29T03:46:47Z",
-        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "joined_at": "2026-10-29T04:42:47Z",
+        "party_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
         "role": "owner",
         "status": "active",
-        "user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275"
+        "user_id": "131579d0-3f19-4c6b-bd65-4825157133eb"
        },
-       "scope_membership_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "scope_membership_id": "371bbf83-d666-4c32-9b7b-2db6acb52a0c",
        "version": 1
       },
       {
-       "entity_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "entity_id": "371bbf83-d666-4c32-9b7b-2db6acb52a0c",
        "entity_type": "party_membership",
        "operation": "upsert",
        "payload": {
         "display_name": "P6",
-        "joined_at": "2026-10-29T03:46:47Z",
-        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "joined_at": "2026-10-29T04:42:48Z",
+        "party_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
         "role": "member",
         "status": "active",
-        "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4"
+        "user_id": "8ba41bbf-d699-488e-b13e-86774b318d4c"
        },
-       "scope_membership_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "scope_membership_id": "371bbf83-d666-4c32-9b7b-2db6acb52a0c",
        "version": 1
       },
       {
-       "entity_id": "1b11b73c-5907-407e-87a7-d0732fb188ab",
+       "entity_id": "02922df1-78cb-44fa-a4a2-49d58ab5e9e9",
        "entity_type": "party_visibility_setting",
        "operation": "upsert",
        "payload": {
-        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "party_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
         "share_location": false,
-        "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4",
+        "user_id": "8ba41bbf-d699-488e-b13e-86774b318d4c",
         "visibility_level": "busyOnly"
        },
-       "scope_membership_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "scope_membership_id": "371bbf83-d666-4c32-9b7b-2db6acb52a0c",
        "version": 1
       }
      ],
-     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzI0Li0x",
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTc3MDMwLi0x",
      "has_more": false
     },
     {
      "changes": [],
-     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzI0Li0x",
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTc3MDMwLi0x",
      "has_more": false
     },
     {
      "changes": [],
-     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzI0Li0x",
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTc3MDMwLi0x",
      "has_more": false
     }
    ],
@@ -153,52 +153,52 @@
      "entities": [
       {
        "entity_type": "party",
-       "entity_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+       "entity_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
        "version": 2,
        "payload": {
-        "created_at": "2026-10-29T03:46:47Z",
-        "created_by_user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275",
+        "created_at": "2026-10-29T04:42:47Z",
+        "created_by_user_id": "131579d0-3f19-4c6b-bd65-4825157133eb",
         "member_limit": 10,
         "name": "R4",
-        "owner_membership_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+        "owner_membership_id": "8162f92b-db84-42d0-9e40-51d100291899",
         "status": "active",
-        "updated_at": "2026-10-29T03:46:47Z"
+        "updated_at": "2026-10-29T04:42:48Z"
        }
       },
       {
        "entity_type": "party_membership",
-       "entity_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "entity_id": "371bbf83-d666-4c32-9b7b-2db6acb52a0c",
        "version": 1,
        "payload": {
         "display_name": "P6",
-        "joined_at": "2026-10-29T03:46:47Z",
-        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "joined_at": "2026-10-29T04:42:48Z",
+        "party_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
         "role": "member",
         "status": "active",
-        "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4"
+        "user_id": "8ba41bbf-d699-488e-b13e-86774b318d4c"
        }
       },
       {
        "entity_type": "party_membership",
-       "entity_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+       "entity_id": "8162f92b-db84-42d0-9e40-51d100291899",
        "version": 2,
        "payload": {
         "display_name": "A 늦은 이름",
-        "joined_at": "2026-10-29T03:46:47Z",
-        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "joined_at": "2026-10-29T04:42:47Z",
+        "party_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
         "role": "owner",
         "status": "active",
-        "user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275"
+        "user_id": "131579d0-3f19-4c6b-bd65-4825157133eb"
        }
       },
       {
        "entity_type": "party_visibility_setting",
-       "entity_id": "1b11b73c-5907-407e-87a7-d0732fb188ab",
+       "entity_id": "02922df1-78cb-44fa-a4a2-49d58ab5e9e9",
        "version": 1,
        "payload": {
-        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "party_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
         "share_location": false,
-        "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4",
+        "user_id": "8ba41bbf-d699-488e-b13e-86774b318d4c",
         "visibility_level": "busyOnly"
        }
       }
@@ -209,52 +209,52 @@
      "entities": [
       {
        "entity_type": "party",
-       "entity_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+       "entity_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
        "version": 2,
        "payload": {
-        "created_at": "2026-10-29T03:46:47Z",
-        "created_by_user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275",
+        "created_at": "2026-10-29T04:42:47Z",
+        "created_by_user_id": "131579d0-3f19-4c6b-bd65-4825157133eb",
         "member_limit": 10,
         "name": "R4",
-        "owner_membership_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+        "owner_membership_id": "8162f92b-db84-42d0-9e40-51d100291899",
         "status": "active",
-        "updated_at": "2026-10-29T03:46:47Z"
+        "updated_at": "2026-10-29T04:42:48Z"
        }
       },
       {
        "entity_type": "party_membership",
-       "entity_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "entity_id": "371bbf83-d666-4c32-9b7b-2db6acb52a0c",
        "version": 1,
        "payload": {
         "display_name": "P6",
-        "joined_at": "2026-10-29T03:46:47Z",
-        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "joined_at": "2026-10-29T04:42:48Z",
+        "party_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
         "role": "member",
         "status": "active",
-        "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4"
+        "user_id": "8ba41bbf-d699-488e-b13e-86774b318d4c"
        }
       },
       {
        "entity_type": "party_membership",
-       "entity_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+       "entity_id": "8162f92b-db84-42d0-9e40-51d100291899",
        "version": 2,
        "payload": {
         "display_name": "A 늦은 이름",
-        "joined_at": "2026-10-29T03:46:47Z",
-        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "joined_at": "2026-10-29T04:42:47Z",
+        "party_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
         "role": "owner",
         "status": "active",
-        "user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275"
+        "user_id": "131579d0-3f19-4c6b-bd65-4825157133eb"
        }
       },
       {
        "entity_type": "party_visibility_setting",
-       "entity_id": "1b11b73c-5907-407e-87a7-d0732fb188ab",
+       "entity_id": "02922df1-78cb-44fa-a4a2-49d58ab5e9e9",
        "version": 1,
        "payload": {
-        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "party_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
         "share_location": false,
-        "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4",
+        "user_id": "8ba41bbf-d699-488e-b13e-86774b318d4c",
         "visibility_level": "busyOnly"
        }
       }
@@ -264,11 +264,11 @@
    "expected": [
     {
      "entity_type": "device",
-     "entity_id": "575eaef1-37d7-42a7-a3b0-3c01a15bc5eb",
+     "entity_id": "4b38fd02-5e4c-4e26-879c-95535a5191d2",
      "version": 1,
      "payload": {
       "has_push_token": false,
-      "last_seen_at": "2026-10-29T03:46:47Z",
+      "last_seen_at": "2026-10-29T04:42:47Z",
       "platform": "ios",
       "push_authorization": "unknown",
       "revoked": false,
@@ -277,11 +277,11 @@
     },
     {
      "entity_type": "device",
-     "entity_id": "e3412f52-c692-4b63-8a79-144b12376c56",
+     "entity_id": "e9ccceb3-7bcd-43a7-b4b7-6fa9199efbdb",
      "version": 1,
      "payload": {
       "has_push_token": false,
-      "last_seen_at": "2026-10-29T03:46:47Z",
+      "last_seen_at": "2026-10-29T04:42:47Z",
       "platform": "ios",
       "push_authorization": "unknown",
       "revoked": false,
@@ -290,58 +290,58 @@
     },
     {
      "entity_type": "party",
-     "entity_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+     "entity_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
      "version": 2,
      "payload": {
-      "created_at": "2026-10-29T03:46:47Z",
-      "created_by_user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275",
+      "created_at": "2026-10-29T04:42:47Z",
+      "created_by_user_id": "131579d0-3f19-4c6b-bd65-4825157133eb",
       "member_limit": 10,
       "name": "R4",
-      "owner_membership_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+      "owner_membership_id": "8162f92b-db84-42d0-9e40-51d100291899",
       "status": "active",
-      "updated_at": "2026-10-29T03:46:47Z"
+      "updated_at": "2026-10-29T04:42:48Z"
      }
     },
     {
      "entity_type": "party_membership",
-     "entity_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+     "entity_id": "371bbf83-d666-4c32-9b7b-2db6acb52a0c",
      "version": 1,
      "payload": {
       "display_name": "P6",
-      "joined_at": "2026-10-29T03:46:47Z",
-      "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+      "joined_at": "2026-10-29T04:42:48Z",
+      "party_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
       "role": "member",
       "status": "active",
-      "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4"
+      "user_id": "8ba41bbf-d699-488e-b13e-86774b318d4c"
      }
     },
     {
      "entity_type": "party_membership",
-     "entity_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+     "entity_id": "8162f92b-db84-42d0-9e40-51d100291899",
      "version": 2,
      "payload": {
       "display_name": "A 늦은 이름",
-      "joined_at": "2026-10-29T03:46:47Z",
-      "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+      "joined_at": "2026-10-29T04:42:47Z",
+      "party_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
       "role": "owner",
       "status": "active",
-      "user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275"
+      "user_id": "131579d0-3f19-4c6b-bd65-4825157133eb"
      }
     },
     {
      "entity_type": "party_visibility_setting",
-     "entity_id": "1b11b73c-5907-407e-87a7-d0732fb188ab",
+     "entity_id": "02922df1-78cb-44fa-a4a2-49d58ab5e9e9",
      "version": 1,
      "payload": {
-      "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+      "party_id": "ba215485-94cb-47d3-8ed7-3bbf3e83bd34",
       "share_location": false,
-      "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4",
+      "user_id": "8ba41bbf-d699-488e-b13e-86774b318d4c",
       "visibility_level": "busyOnly"
      }
     },
     {
      "entity_type": "user",
-     "entity_id": "1dd32498-b665-4748-8b06-04544dc9efb4",
+     "entity_id": "8ba41bbf-d699-488e-b13e-86774b318d4c",
      "version": 1,
      "payload": {
       "display_name": "P6",
