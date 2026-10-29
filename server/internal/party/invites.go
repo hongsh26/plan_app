@@ -391,7 +391,7 @@ func (h *Handler) acceptInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	now := h.now()
 	tokenHash := hashToken(token)
-	out, ok := h.run(w, r, p, prep, "party.invite.accept", func(ctx context.Context, tx *mutation.Tx) (mutation.Result, error) {
+	out, ok := h.runLockingUser(w, r, p, prep, "party.invite.accept", func(ctx context.Context, tx *mutation.Tx) (mutation.Result, error) {
 		if err := lockUserForPartyCreate(ctx, tx, p.UserID); err != nil {
 			return mutation.Result{}, err
 		}

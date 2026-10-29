@@ -39,6 +39,9 @@ func (h *Handler) run(w http.ResponseWriter, r *http.Request, p auth.Principal, 
 		DeviceID: p.DeviceID,
 		Key:      prep.Key,
 		Hash:     mutation.RequestHash(r.Method, r.URL.EscapedPath(), prep.Body),
+		// 표시 이름 변경과 삭제 요청이 users row를 FOR NO KEY UPDATE로 바꾼다. 계정 mutation은 모두 같은
+		// 모드로 잡아 업그레이드 교착을 없앤다.
+		LockUserForUpdate: true,
 	}, h.now(), fn)
 	if err == nil {
 		if out.Replayed {

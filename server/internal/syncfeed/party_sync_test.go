@@ -30,10 +30,11 @@ import (
 
 	"plantogether/server/internal/account"
 	"plantogether/server/internal/auth"
+	"plantogether/server/internal/availability"
+	"plantogether/server/internal/calendar"
 	"plantogether/server/internal/party"
 	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/httpapi"
-	"plantogether/server/internal/platform/jobs"
 	"plantogether/server/internal/platform/mutation"
 	"plantogether/server/internal/platform/postgres/pgtest"
 	"plantogether/server/internal/platform/secretbox"
@@ -80,6 +81,13 @@ func newPartyStack(t *testing.T) *partyStack {
 	authHandler.Register(mux)
 	account.NewHandler(account.Deps{Pool: pool, Logger: logger, Sealer: box, RefKeyBox: box}).Register(mux, authHandler.Require)
 	party.NewHandler(party.Deps{Pool: pool, Logger: logger}).Register(mux, authHandler.Require)
+	// 계정 삭제 테스트가 활동 시간·캘린더 쓰기와 삭제의 경합을 본다(account_deletion_test.go).
+	calendar.NewHandler(calendar.Deps{Pool: pool, Logger: logger, SecretBox: box}).Register(mux, authHandler.Require)
+	availabilityHandler, err := availability.NewHandler(availability.Deps{Pool: pool, Logger: logger, VersionSecret: bytes.Repeat([]byte{6}, 32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	availabilityHandler.Register(mux, authHandler.Require)
 	NewHandler(Deps{Pool: pool, Logger: logger, RefKeyBox: box}).Register(mux, authHandler.Require)
 	return &partyStack{h: httpapi.Wrap(logger, mux), pool: pool, box: box}
 }
@@ -1150,42 +1158,6 @@ func TestSameDisplayNameIsNoop(t *testing.T) {
 type noRevoke struct{}
 
 func (noRevoke) Revoke(context.Context, string) error { return nil }
-
-// 계정 삭제 완료가 표시 이름을 익명화하면 같은 Party 멤버의 모델도 bootstrap과 같게 익명화된다.
-// 멤버십 자체의 정리(강제 위임·해산)는 P8이다.
-func TestAccountDeletionAnonymizesNameForCoMembers(t *testing.T) {
-	s := newPartyStack(t)
-	a, d := s.newUser(t, "del.a"), s.newUser(t, "del.d")
-	aTok := s.signIn(t, a.subject).token
-	dTok := s.signIn(t, d.subject).token
-	p := s.createParty(t, aTok, "D")
-	_, inv := s.invite(t, aTok, p, "")
-	s.must(t, http.StatusCreated, http.MethodPost, "/v1/invites/"+inv+"/accept", dTok, "", "")
-	ac := s.newClient(t, "A", aTok, 0)
-
-	me := s.req(t, http.MethodGet, "/v1/me", dTok, "", "", "")
-	if rec := s.req(t, http.MethodDelete, "/v1/me", dTok, uuid.NewString(), etagOf(me), ""); rec.Code != http.StatusAccepted {
-		t.Fatalf("삭제 요청 = %d: %s", rec.Code, rec.Body.String())
-	}
-	if _, err := s.pool.Exec(context.Background(),
-		`UPDATE users SET deletion_requested_at = now() - interval '25 hours' WHERE id = $1`, d.id); err != nil {
-		t.Fatal(err)
-	}
-	// 삭제 worker는 운영과 같이 worker 역할로 돈다.
-	workerPool := pgtest.Pool(t, pgtest.WorkerRoleURLEnv)
-	svc, err := account.NewDeletionService(account.DeletionDeps{Pool: workerPool, Opener: s.box, Apple: noRevoke{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.HandleJob(context.Background(), jobs.Job{Type: account.AccountDeletionJobType,
-		Payload: []byte(`{"user_id":"` + d.id.String() + `"}`), Attempt: 1}); err != nil {
-		t.Fatal(err)
-	}
-	s.converge(t, "deletion", ac)
-	if got := memberName(ac, d.id); got != "탈퇴한 사용자" {
-		t.Fatalf("A가 본 삭제 사용자 이름 = %q", got)
-	}
-}
 
 // 재현 5: 탈퇴 L이 먼저 txid를 받고 방장 이름 변경 E가 먼저 커밋한 뒤, 그 사이 txid를 받은 열린 트랜잭션이 horizon을
 // 붙잡은 채 탈퇴자가 새로 bootstrap한다. snapshot은 탈퇴 뒤 상태(Party 없음)인데 E는 watermark 뒤라 다시 온다.

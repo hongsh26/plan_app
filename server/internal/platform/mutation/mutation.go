@@ -45,6 +45,10 @@ const IdempotencyTTL = 30 * 24 * time.Hour
 // ErrIdempotencyMismatch는 같은 Idempotency-Key를 다른 요청에 재사용했을 때다.
 var ErrIdempotencyMismatch = errors.New("mutation: 같은 Idempotency-Key가 다른 요청에 쓰였다")
 
+// ErrAccountLocked는 요청자 계정이 active가 아닐 때다(삭제 요청·삭제 중·삭제됨). auth.ErrAccountLocked가
+// 같은 값이며 HTTP 423 account_locked로 나간다. auth가 이 패키지를 가져오므로 정의는 여기에 둔다.
+var ErrAccountLocked = errors.New("auth: 계정이 잠겨 있다")
+
 // VersionConflictError는 expected_version이 현재 version과 다를 때다.
 // 클라이언트는 Current로 서버 상태를 다시 받아 사용자에게 보여준다(§7.4).
 type VersionConflictError struct {
@@ -62,6 +66,10 @@ type Request struct {
 	Key      string
 	// Hash는 요청의 지문이다. RequestHash로 만든다.
 	Hash []byte
+	// LockUserForUpdate이면 요청자 users row를 FOR SHARE 대신 FOR NO KEY UPDATE로 잡는다. fn 안에서
+	// users row를 FOR NO KEY UPDATE로 다시 잡는 mutation(표시 이름 변경, 삭제 요청, Party 생성·가입)은
+	// 반드시 켠다. SHARE를 쥔 같은 사용자의 두 요청이 서로 업그레이드를 기다리면 교착한다.
+	LockUserForUpdate bool
 }
 
 // RequestHash는 method, 실제 요청 경로, 원본 본문 바이트로 요청 지문을 만든다.
@@ -288,6 +296,13 @@ func runOnce(ctx context.Context, pool *pgxpool.Pool, req Request, now time.Time
 		if err != nil {
 			return err
 		}
+		// 인증(Authenticate)은 트랜잭션 밖에서 계정 상태를 본다. 그 사이 계정 삭제 요청이 커밋되면 이 요청이
+		// 삭제 정리 뒤에 데이터를 되살릴 수 있다. 여기서 users row를 잡고 상태를 다시 본다. 삭제 요청은 같은
+		// row를 FOR NO KEY UPDATE로 바꾸므로 어느 쪽이 먼저 커밋하든 이 요청은 바뀐 상태를 본다. 재전송도
+		// 현재 상태를 먼저 평가한다(§8).
+		if err := lockActiveUser(ctx, ptx, req.UserID, req.LockUserForUpdate); err != nil {
+			return err
+		}
 		if replay {
 			out = Outcome{Result: stored, Replayed: true}
 			return nil
@@ -314,6 +329,34 @@ func runOnce(ctx context.Context, pool *pgxpool.Pool, req Request, now time.Time
 		return Outcome{}, err
 	}
 	return out, nil
+}
+
+// lockActiveUser는 요청자 users row를 잠그고 active가 아니면 ErrAccountLocked다. 잠금 순서는
+// users → devices → sessions(auth 패키지 lockOrder)이고, idempotency INSERT가 이미 users에 KEY SHARE를
+// 걸었으므로 FOR UPDATE는 쓰지 않는다(패키지 문서).
+func lockActiveUser(ctx context.Context, tx pgx.Tx, userID uuid.UUID, forUpdate bool) error {
+	q := `SELECT status FROM users WHERE id = $1 FOR SHARE`
+	if forUpdate {
+		q = `SELECT status FROM users WHERE id = $1 FOR NO KEY UPDATE`
+	}
+	var status string
+	err := tx.QueryRow(ctx, q, userID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrAccountLocked
+	}
+	if err != nil {
+		return err
+	}
+	if status != "active" {
+		return ErrAccountLocked
+	}
+	return nil
+}
+
+// LockActiveUser는 mutation.Run 밖의 사용자 쓰기 트랜잭션(snapshot page 업로드)이 맨 앞에서 부른다.
+// users row를 FOR SHARE로 잡고 active가 아니면 ErrAccountLocked다.
+func LockActiveUser(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
+	return lockActiveUser(ctx, tx, userID, false)
 }
 
 // claimOrLoad는 키를 새로 점유하거나(replay=false) 커밋된 결과를 읽는다(replay=true).

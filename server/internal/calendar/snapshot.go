@@ -327,6 +327,11 @@ func (h *Handler) putPage(w http.ResponseWriter, r *http.Request) {
 
 	err = pgx.BeginFunc(r.Context(), h.pool, func(tx pgx.Tx) error {
 		ctx := r.Context()
+		// page 업로드는 mutation.Run을 거치지 않는다. 계정 삭제 요청 뒤에 staging을 다시 쓰지 않게 같은 상태 확인을
+		// 맨 앞에서 한다(잠금 순서 users → snapshot session).
+		if err := mutation.LockActiveUser(ctx, tx, p.UserID); err != nil {
+			return err
+		}
 		var (
 			connID  uuid.UUID
 			syncDev *uuid.UUID

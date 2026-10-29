@@ -34,8 +34,9 @@ var (
 	// 클라이언트에 구분해 알리지 않는다.
 	ErrInvalidCredential = errors.New("auth: 자격이 유효하지 않다")
 
-	// ErrAccountLocked는 계정이 active가 아닐 때다. HTTP 423 account_locked.
-	ErrAccountLocked = errors.New("auth: 계정이 잠겨 있다")
+	// ErrAccountLocked는 계정이 active가 아닐 때다. HTTP 423 account_locked. mutation helper가 트랜잭션
+	// 안에서 같은 판정을 하므로 같은 sentinel을 쓴다.
+	ErrAccountLocked = mutation.ErrAccountLocked
 
 	// ErrUnavailable은 Apple 같은 외부 의존성 장애로 판단할 수 없을 때다.
 	// HTTP 503. 사용자의 자격이 틀렸다고 말하지 않는다.

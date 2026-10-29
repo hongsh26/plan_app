@@ -124,7 +124,7 @@ func (h *Handler) createParty(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var createdID uuid.UUID
-	out, ok := h.run(w, r, p, prep, "party.create", func(ctx context.Context, tx *mutation.Tx) (mutation.Result, error) {
+	out, ok := h.runLockingUser(w, r, p, prep, "party.create", func(ctx context.Context, tx *mutation.Tx) (mutation.Result, error) {
 		if err := lockUserForPartyCreate(ctx, tx, p.UserID); err != nil {
 			return mutation.Result{}, err
 		}
@@ -382,9 +382,19 @@ func (h *Handler) listMemberships(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) run(w http.ResponseWriter, r *http.Request, p auth.Principal, prep mutation.Prepared, action string, fn mutation.Func) (mutation.Outcome, bool) {
+	return h.runWithUserLock(w, r, p, prep, action, false, fn)
+}
+
+// runLockingUser는 fn이 lockUserForPartyCreate로 users row를 FOR NO KEY UPDATE로 잡는 mutation(생성·가입)이다.
+func (h *Handler) runLockingUser(w http.ResponseWriter, r *http.Request, p auth.Principal, prep mutation.Prepared, action string, fn mutation.Func) (mutation.Outcome, bool) {
+	return h.runWithUserLock(w, r, p, prep, action, true, fn)
+}
+
+func (h *Handler) runWithUserLock(w http.ResponseWriter, r *http.Request, p auth.Principal, prep mutation.Prepared, action string, lockUser bool, fn mutation.Func) (mutation.Outcome, bool) {
 	out, err := mutation.Run(r.Context(), h.pool, mutation.Request{
 		UserID: p.UserID, DeviceID: p.DeviceID, Key: prep.Key,
-		Hash: mutation.RequestHash(r.Method, r.URL.EscapedPath(), prep.Body),
+		Hash:              mutation.RequestHash(r.Method, r.URL.EscapedPath(), prep.Body),
+		LockUserForUpdate: lockUser,
 	}, h.now(), fn)
 	if err == nil {
 		if out.Replayed {

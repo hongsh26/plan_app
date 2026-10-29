@@ -114,66 +114,11 @@ func (h *Handler) transferOwner(w http.ResponseWriter, r *http.Request) {
 			return mutation.Result{}, errInvalidTransferTarget
 		}
 
-		// owner partial unique index는 즉시 검증되므로 기존 방장을 먼저 내리고 대상을 올린다.
-		if _, err := tx.Exec(ctx, `
-			UPDATE party_memberships
-			   SET role = 'member', version = version + 1, updated_at = now()
-			 WHERE id = $1`, oldOwnerMembership); err != nil {
-			return mutation.Result{}, err
-		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE party_memberships
-			   SET role = 'owner', version = version + 1, updated_at = now()
-			 WHERE id = $1`, newOwnerMembership); err != nil {
-			return mutation.Result{}, err
-		}
-		var version int64
-		if err := tx.QueryRow(ctx, `
-			UPDATE parties
-			   SET owner_membership_id = $2, version = version + 1, updated_at = now()
-			 WHERE id = $1
-			RETURNING version`, partyID, newOwnerMembership).Scan(&version); err != nil {
-			return mutation.Result{}, err
-		}
-
-		// 이전 방장이 뿌린 링크가 새 방장 모르게 멤버를 늘리지 못하게 활성 초대를 모두 무효화한다.
-		revoked, err := revokeActiveInvites(ctx, tx, partyID, h.now())
+		version, err := transferOwnerTx(ctx, tx, partyID,
+			memberRef{id: oldOwnerMembership, userID: p.UserID},
+			memberRef{id: newOwnerMembership, userID: targetUserID},
+			jobOwnerTransferred, h.now())
 		if err != nil {
-			return mutation.Result{}, err
-		}
-
-		members, err := activeMemberships(ctx, tx, partyID)
-		if err != nil {
-			return mutation.Result{}, err
-		}
-		batch := newProjectionBatch(partyID)
-		for _, m := range members {
-			for _, id := range []uuid.UUID{partyID, oldOwnerMembership, newOwnerMembership} {
-				if err := batch.add(ctx, tx, m.userID, id); err != nil {
-					return mutation.Result{}, err
-				}
-			}
-		}
-		if err := batch.emit(ctx, tx); err != nil {
-			return mutation.Result{}, err
-		}
-		// 초대 entity는 방장만 본다(§6, §9.2). 무효화 tombstone은 이전 방장과 새 방장에게만 간다.
-		var tombs []mutation.Change
-		for _, inv := range revoked {
-			for _, recipient := range []uuid.UUID{p.UserID, targetUserID} {
-				tombs = append(tombs, inviteTombstone(recipient, inv.id, inv.used))
-			}
-		}
-		if err := emitScoped(ctx, tx, partyID, tombs...); err != nil {
-			return mutation.Result{}, err
-		}
-
-		dedupe := partyID.String() + ":" + strconv.FormatInt(version, 10)
-		if err := tx.Enqueue(ctx, mutation.Job{
-			Type:      jobOwnerTransferred,
-			Payload:   map[string]string{"party_id": partyID.String(), "membership_id": newOwnerMembership.String()},
-			DedupeKey: &dedupe,
-		}); err != nil {
 			return mutation.Result{}, err
 		}
 		return mutation.Result{StatusCode: http.StatusOK, ResourceType: entityParty, ResourceID: partyID, ResourceVersion: version}, nil
@@ -192,6 +137,75 @@ func (h *Handler) transferOwner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writePartyResponse(w, r, party, out.StatusCode)
+}
+
+// transferOwnerTx는 T4 step 3~8이다. 호출자는 parties 행과 두 멤버십을 잠그고 oldOwner가 활성 방장,
+// newOwner가 같은 Party의 다른 활성 멤버임을 확인한 뒤 부른다. 사용자 요청(T4)은 jobOwnerTransferred,
+// 계정 삭제의 강제 위임(설계 4 §5.8)은 jobOwnerTransferredByDeletion을 넘긴다. 반환값은 새 Party version이다.
+func transferOwnerTx(ctx context.Context, tx *mutation.Tx, partyID uuid.UUID, oldOwner, newOwner memberRef, jobType string, now time.Time) (int64, error) {
+	// owner partial unique index는 즉시 검증되므로 기존 방장을 먼저 내리고 대상을 올린다.
+	if _, err := tx.Exec(ctx, `
+		UPDATE party_memberships
+		   SET role = 'member', version = version + 1, updated_at = now()
+		 WHERE id = $1`, oldOwner.id); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE party_memberships
+		   SET role = 'owner', version = version + 1, updated_at = now()
+		 WHERE id = $1`, newOwner.id); err != nil {
+		return 0, err
+	}
+	var version int64
+	if err := tx.QueryRow(ctx, `
+		UPDATE parties
+		   SET owner_membership_id = $2, version = version + 1, updated_at = now()
+		 WHERE id = $1
+		RETURNING version`, partyID, newOwner.id).Scan(&version); err != nil {
+		return 0, err
+	}
+
+	// 이전 방장이 뿌린 링크가 새 방장 모르게 멤버를 늘리지 못하게 활성 초대를 모두 무효화한다.
+	revoked, err := revokeActiveInvites(ctx, tx, partyID, now)
+	if err != nil {
+		return 0, err
+	}
+
+	members, err := activeMemberships(ctx, tx, partyID)
+	if err != nil {
+		return 0, err
+	}
+	batch := newProjectionBatch(partyID)
+	for _, m := range members {
+		for _, id := range []uuid.UUID{partyID, oldOwner.id, newOwner.id} {
+			if err := batch.add(ctx, tx, m.userID, id); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if err := batch.emit(ctx, tx); err != nil {
+		return 0, err
+	}
+	// 초대 entity는 방장만 본다(§6, §9.2). 무효화 tombstone은 이전 방장과 새 방장에게만 간다.
+	var tombs []mutation.Change
+	for _, inv := range revoked {
+		for _, recipient := range []uuid.UUID{oldOwner.userID, newOwner.userID} {
+			tombs = append(tombs, inviteTombstone(recipient, inv.id, inv.used))
+		}
+	}
+	if err := emitScoped(ctx, tx, partyID, tombs...); err != nil {
+		return 0, err
+	}
+
+	dedupe := partyID.String() + ":" + strconv.FormatInt(version, 10)
+	if err := tx.Enqueue(ctx, mutation.Job{
+		Type:      jobType,
+		Payload:   map[string]string{"party_id": partyID.String(), "membership_id": newOwner.id.String()},
+		DedupeKey: &dedupe,
+	}); err != nil {
+		return 0, err
+	}
+	return version, nil
 }
 
 type revokedInvite struct {

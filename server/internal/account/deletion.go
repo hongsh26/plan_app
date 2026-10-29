@@ -264,14 +264,22 @@ func (s *DeletionService) markDeleting(ctx context.Context, userID uuid.UUID) ([
 		if requestedAt == nil {
 			return jobs.Permanent(errors.New("account deletion: 삭제 요청 시각이 없다"))
 		}
-		return tx.QueryRow(ctx, `
+		// §10 2단계(설계 4 §5.8): Apple revoke보다 먼저 Party 강제 위임·해산·멤버십 종료를 커밋한다. revoke가
+		// 실패해 재시도해도 이미 끝난 멤버십은 건너뛴다. 잠금은 users → parties → 멤버십이다.
+		if err := party.EndMembershipsForDeletedUser(ctx, mutation.NewTx(tx), userID, time.Now()); err != nil {
+			return err
+		}
+		err = tx.QueryRow(ctx, `
 			SELECT provider_refresh_token_ciphertext
 			  FROM auth_identities
 			 WHERE user_id = $1 AND provider = 'apple'`, userID).Scan(&token)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Apple identity가 없는 계정(개발용 로그인)이다. 위 정리는 커밋해야 하므로 롤백하지 않는다.
+			token = nil
+			return nil
+		}
+		return err
 	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
 	return token, err
 }
 
@@ -335,10 +343,34 @@ func (s *DeletionService) finish(ctx context.Context, userID uuid.UUID) error {
 			 WHERE id = $1`, userID); err != nil {
 			return err
 		}
-		// 익명화한 이름을 같은 Party 멤버에게 보낸다(party_membership 투영이 display_name을 싣는다). 멤버십 자체의
-		// 정리(강제 위임·해산)는 P8이다. 잠금은 users → devices → sessions 뒤 parties FOR SHARE → 멤버십이다.
-		return party.PropagateDisplayName(ctx, mutation.NewTx(tx), userID)
+		mtx := mutation.NewTx(tx)
+		// 익명화한 이름을 같은 Party 멤버에게 보낸다(party_membership 투영이 display_name을 싣는다). 멤버십은
+		// markDeleting에서 이미 끝났으므로 보통 대상이 없다. 잠금은 users → devices → sessions 뒤 parties FOR SHARE →
+		// 멤버십이다.
+		if err := party.PropagateDisplayName(ctx, mtx, userID); err != nil {
+			return err
+		}
+		return deletePersonalData(ctx, mtx, userID)
 	})
+}
+
+// deletePersonalData는 §10 4단계의 캘린더 데이터와 설계 6의 활동 시간을 지운다. users row를 물리 삭제하지 않으므로
+// FK cascade에 맡길 수 없다.
+//   - calendar_connections를 지우면 source 선택, snapshot session(page·staging 포함), busy facts가 cascade로 지워진다.
+//   - 연결이 없어진 뒤 projection을 다시 맞춘다. 멤버십이 모두 끝나 보통 지울 것이 없지만, 남은 활성 멤버십이
+//     있다면 같은 Party 멤버에게 tombstone이 간다(연결 해제와 같은 경로).
+//   - availability_preferences를 지우면 요일별 구간이 cascade로 지워진다.
+//
+// 잠금: 사용자의 활성 Party(FOR SHARE, PropagateDisplayName이 이미 잡았다) 뒤 connection이다(migration 00012).
+func deletePersonalData(ctx context.Context, tx *mutation.Tx, userID uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM calendar_connections WHERE user_id = $1`, userID); err != nil {
+		return err
+	}
+	if err := party.RebuildBusyProjections(ctx, tx, userID, nil, false); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `DELETE FROM availability_preferences WHERE user_id = $1`, userID)
+	return err
 }
 
 func deletionRevokeAlreadyDone(err error) bool {
