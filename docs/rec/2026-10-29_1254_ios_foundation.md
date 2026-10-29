@@ -30,11 +30,12 @@
 ## 결정
 
 - **저장소: SwiftData 대신 JSON 파일 하나.** 캐시는 수백 entity이고 질의는 Party별 필터뿐이다. 한 파일 원자 교체가 "bootstrap을 한 트랜잭션에서 교체"(§7.2)를 가장 단순하게 만족한다. 설계 §7.3의 SwiftData·App Group은 알림 확장(설계 9)이 캐시를 읽어야 할 때 옮긴다. `notification_ref_key`도 그때 공유 Keychain에 둔다(I1은 읽지 않는다)
-- **ATS:** `src/PlanTogether/Info.plist`(`NSAllowsLocalNetworking`)를 `INFOPLIST_FILE`로 연결하고 `GENERATE_INFOPLIST_FILE: YES`로 합친다. 빌드 산출물 plist에서 ATS 키와 캘린더 사용 설명이 모두 있는 것을 `plutil`로 확인했다. 캘린더 설명은 `INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription` 빌드 설정이 산출 plist에 들어가지 않아 같은 파일로 옮겼다
+- **ATS:** `src/PlanTogether/Info.plist`(`NSAllowsLocalNetworking`)를 `INFOPLIST_FILE`로 연결하고 `GENERATE_INFOPLIST_FILE: YES`로 합친다. 빌드 산출물 plist에서 ATS 키와 캘린더 사용 설명이 모두 있는 것을 `plutil`로 확인했다. `INFOPLIST_FILE`을 쓰자 `INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription` 빌드 설정 값이 산출 plist에 보이지 않아 캘린더 설명을 같은 파일로 옮겼다(XcodeGen이 sources의 Info.plist를 스스로 잡아 원인을 따로 떼어 보지는 못했다)
 - **테스트 target Info.plist:** `PlanTogetherTests`에 `GENERATE_INFOPLIST_FILE: YES`가 없어 `xcodebuild test`가 코드 서명 단계에서 실패했다(main에서도 같다). 켰다
 - **fixture 방식:** 별도 Go 테스트를 만들지 않고 기존 인수·역전 재현 테스트에 수동 기록기를 붙였다(`server/internal/syncfeed/swift_fixture_test.go`). `DUMP_SWIFT_FIXTURES=<디렉터리>`일 때만 세션별 bootstrap·페이지 원문·checkpoint(converge 시점 bootstrap)·최종 기대 모델을 기록하고 **테스트가 통과한 뒤에만** 쓴다. 변수가 없으면 요청·쿼리를 더하지 않아 CI 시간·순서가 그대로이고, 건너뛰는 테스트도 생기지 않는다. `request_id`·`server_time`·`notification_ref_key`는 지운다. 생성 명령은 그 파일 머리말에 있다
-- **대조군:** fixture마다 서버 Go 테스트가 증명한 대조군을 적는다. rules(재현 1·3·5), floors(재현 2·5·6·7), orphans(재현 4). 재현 8은 서버 성질(snapshot entity에 하한을 싣지 않음)이라 클라이언트 대조군이 없다고 명시했다
-- **큐 범위:** 최소. 생성 순서 직렬 전송, 독립 entity 병렬 전송과 bootstrap 뒤 의존 version 재검증(§7.2 마지막 항목)은 화면이 mutation을 만들기 시작하는 I3에서 한다
+- **대조군:** fixture마다 끄면 bootstrap과 달라져야 하는 스위치를 적는다. rules(재현 1·3·5), floors(재현 2·5·6·7), orphans(재현 4). 재현 1·2·3·5·6·7의 대조군은 서버 Go 테스트가 먼저 증명한 것이고, 재현 5의 rules와 재현 4의 orphans는 Swift 대조군 테스트로만 확인했다. 재현 8은 서버 성질(snapshot entity에 하한을 싣지 않음)이라 클라이언트 대조군이 없다고 명시했다
+- **fixture 리소스:** `PlanTogetherTests/Fixtures/*.json`은 XcodeGen이 sources 아래 JSON을 자동으로 test target 리소스에 넣는다(`project.yml`에 따로 `resources:`를 적지 않았다). 빠지면 `SyncFixtureTests`의 시나리오 집합 단언이 실패한다
+- **큐 범위:** 최소. flush는 single-flight(동시 호출이 같은 mutation을 겹쳐 보내지 않는다), 생성 순서 직렬 전송, 독립 entity 병렬 전송과 bootstrap 뒤 의존 version 재검증(§7.2 마지막 항목)은 화면이 mutation을 만들기 시작하는 I3에서 한다
 
 ## 설계 대비 편차
 
@@ -44,16 +45,16 @@
 
 ## 발견한 서버 공백
 
-- **로그인이 새 기기의 sync 변경을 발행하지 않는다**(`auth.signInTx`의 `INSERT INTO devices`). 같은 사용자의 기존 세션은 새 기기를 bootstrap이나 `GET /v1/devices`로만 안다. 순차 fixture의 B1이 B2 기기를 증분으로 받지 못해 드러났다. Swift fixture 비교는 기기 **누락**만 허용하고, 남음(폐기 기기 부활)과 version 차이는 그대로 실패로 본다. 기기 목록 화면을 만들 때 서버에서 발행하거나 화면이 GET을 쓰도록 정한다
+- **로그인이 새 기기의 sync 변경을 발행하지 않는다**(`auth.signInTx`의 `INSERT INTO devices`). 같은 사용자의 기존 세션은 새 기기를 bootstrap이나 `GET /v1/devices`로만 안다. 순차 fixture의 B1이 B2 기기를 증분으로 받지 못해 드러났다. Swift fixture 비교는 그 세션이 bootstrap·페이지로 **한 번도 받지 못한** 기기의 누락만 허용한다. 받은 기기가 빠지거나, 남거나(폐기 기기 부활), version이 다르면 실패다. 기기 목록 화면을 만들 때 서버에서 발행하거나 화면이 GET을 쓰도록 정한다
 
 ## 테스트
 
-- iOS: `xcodebuild … build test` 46개(기존 4개 포함) 통과, 1개(실서버 스모크) 건너뜀
+- iOS: `xcodebuild … build test` 47개 실행 — 46개 통과(기존 4개 포함), 1개(실서버 스모크) 건너뜀. iPhone 16(iOS 18.3.1)과 iPhone 15(iOS 17.4)에서 같다. 시뮬레이터 런타임이 18.3.1이라 `OS=18.3` destination은 맞지 않아 기기 id로 지정했다
   - API: 인증 헤더·Idempotency-Key·If-Match 따옴표·본문, 오류 해석, 429 Retry-After, 동시 401 다섯 개 → refresh 1회와 각 요청 1회 재시도(같은 키·본문), refresh 429 재시도(로그아웃 없음), refresh 401·423 세션 종료, refresh 네트워크 오류 시 재전송 없음·세션 유지, 개발용 로그인
   - 날짜(소수 0~9자리, 오프셋), JSONValue Bool·숫자 구분, snake_case 키
   - fixture 9개 시나리오(순차 인수 5세션 — limit=2 페이지·늦은 bootstrap 포함, 재현 8개): checkpoint와 최종 모델이 bootstrap과 같음. 대조군 rules·floors·orphans가 해당 fixture에서 달라짐
   - 적용기 단위(하한, 규칙 (a)(b), 캐시 삭제 조건, 기기 폐기, 활동 시간 표시, bootstrap 교체), 파일 저장소 원자 교체, 엔진 페이지·410 재bootstrap·다른 410 구별·다른 사용자 캐시 무시
-  - 큐: 재실행 후 같은 키·본문 재전송, 탈퇴 200·410 완료, 거절은 failed, 429에서 순서 보존. 로그아웃이 Keychain·캐시·큐를 지움, Keychain 왕복
+  - 큐: 재실행 후 같은 키·본문 재전송, 동시 flush에서 한 번만 전송, 탈퇴 200·410 완료, 거절은 failed, 429에서 순서 보존. 로그아웃이 Keychain·캐시·큐를 지움, Keychain 왕복
 - 실서버 스모크: `run_api_dev.sh`로 띄운 서버에 `TEST_RUNNER_PLAN_LIVE_SERVER_URL=http://localhost:8080`으로 실행해 통과(로그인 → `/v1/me` → bootstrap → 증분 → Party 생성 → 증분에 Party·멤버십 도착 → 로그아웃, 서버 로그 전부 2xx). 앱 프로세스에서 http://localhost가 ATS에 막히지 않음을 함께 확인했다
 - 서버: gofmt·vet 통과, `REQUIRE_DB_TESTS=1 go test -count=1 ./...` 596개 통과, skip 0
 

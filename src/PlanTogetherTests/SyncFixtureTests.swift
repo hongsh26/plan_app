@@ -87,11 +87,14 @@ final class SyncFixtureTests: XCTestCase {
         }
         XCTAssertTrue(checkpoints.isEmpty, "\(s.name): 쓰지 않은 checkpoint")
         XCTAssertEqual(applier.state.cursor, s.pages.last?.cursor ?? s.bootstrap.cursorWatermark)
-        diffs += diff(applier.state, s.expected, partyOnly: false).map { "[final] \($0)" }
+        // 이 세션이 bootstrap·페이지로 한 번이라도 받은 기기. 받은 적 없는 기기만 누락을 허용한다(diff 참고).
+        let seenDevices = Set((s.bootstrap.snapshot + s.pages.flatMap(\.changes))
+            .filter { $0.entityType == SyncEntityType.device }.map(\.entityID))
+        diffs += diff(applier.state, s.expected, partyOnly: false, seenDevices: seenDevices).map { "[final] \($0)" }
         return diffs
     }
 
-    private func diff(_ state: SyncState, _ expected: [ExpectedEntity], partyOnly: Bool) -> [String] {
+    private func diff(_ state: SyncState, _ expected: [ExpectedEntity], partyOnly: Bool, seenDevices: Set<String> = []) -> [String] {
         var out: [String] = []
         var want: [EntityKey: ExpectedEntity] = [:]
         for e in expected { want[EntityKey(e.entityType, e.entityID)] = e }
@@ -99,8 +102,9 @@ final class SyncFixtureTests: XCTestCase {
         for (k, w) in want {
             guard let g = got[k] else {
                 // 서버 로그인은 새 기기의 sync 변경을 발행하지 않는다(auth signInTx). 다른 세션은 새 기기를 bootstrap이나
-                // GET /v1/devices로만 안다. 그래서 기기 누락은 허용하고, 남음(폐기 기기 부활)과 version 차이만 본다.
-                if k.type != SyncEntityType.device { out.append("누락 \(k) v\(w.version)") }
+                // GET /v1/devices로만 안다. 그래서 이 세션이 한 번도 받지 못한 기기의 누락만 허용한다. 받은 기기가
+                // 빠지면(잘못된 폐기 처리) 실패다.
+                if k.type != SyncEntityType.device || seenDevices.contains(k.id) { out.append("누락 \(k) v\(w.version)") }
                 continue
             }
             if g.version != w.version {

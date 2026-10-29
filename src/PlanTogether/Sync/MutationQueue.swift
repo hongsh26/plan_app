@@ -99,6 +99,7 @@ actor MutationQueue {
     private let api: APIClient
     private let store: MutationQueueStore
     private var snapshot: MutationQueueSnapshot
+    private var flushing: Task<Int, Never>?
 
     init(api: APIClient, store: MutationQueueStore) {
         self.api = api
@@ -126,9 +127,18 @@ actor MutationQueue {
         try enqueue(APIRequest(method: "DELETE", path: "/v1/parties/\(partyID)/memberships/me"), kind: .leaveParty)
     }
 
-    /// 보낼 수 있는 만큼 보낸다. 남은 개수를 돌려준다.
+    /// 보낼 수 있는 만큼 보낸다. 남은 개수를 돌려준다. 동시에 부르면 진행 중인 한 번을 함께 기다린다. 겹쳐 돌면
+    /// 같은 mutation을 같은 키로 동시에 보내고 두 결과를 따로 처리하게 된다.
     @discardableResult
     func flush() async -> Int {
+        if let flushing { return await flushing.value }
+        let task = Task { await self.drain() }
+        flushing = task
+        defer { flushing = nil }
+        return await task.value
+    }
+
+    private func drain() async -> Int {
         while let m = snapshot.pending.first {
             var sent = m
             sent.attemptCount += 1

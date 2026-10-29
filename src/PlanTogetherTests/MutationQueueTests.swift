@@ -144,3 +144,21 @@ final class SessionStoreTests: XCTestCase {
 }
 
 private typealias Reply = MockURLProtocol.Reply
+
+final class MutationQueueConcurrencyTests: XCTestCase {
+    /// flush를 동시에 불러도 같은 mutation은 한 번만 간다.
+    func testConcurrentFlushSendsEachMutationOnce() async throws {
+        MockURLProtocol.install { _, _ in .json(201, [:], delay: 0.1) }
+        let api = APIClient(baseURL: URL(string: "http://localhost:8080")!, session: MockURLProtocol.makeSession(),
+                            tokenStore: InMemoryTokenStore(TestTokens.make("a-1")), sleep: { _ in })
+        let queue = MutationQueue(api: api, store: InMemoryMutationQueueStore())
+        try await queue.enqueue(try .json("POST", "/v1/parties", body: ["name": "A"]))
+        async let first = queue.flush()
+        async let second = queue.flush()
+        let results = await [first, second]
+        XCTAssertEqual(results, [0, 0])
+        XCTAssertEqual(MockURLProtocol.requests.count, 1)
+        let failed = await queue.failed
+        XCTAssertTrue(failed.isEmpty)
+    }
+}

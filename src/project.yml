@@ -19,7 +19,8 @@ targets:
         CURRENT_PROJECT_VERSION: 1
         GENERATE_INFOPLIST_FILE: YES
         # 생성 Info.plist에 PlanTogether/Info.plist(ATS 로컬 예외, 캘린더 사용 설명)를 합친다.
-        # INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription 빌드 설정은 Xcode 16.2가 plist에 넣지 않아 파일로 옮겼다.
+        # INFOPLIST_FILE을 쓰자 INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription 빌드 설정 값이 산출 plist에 보이지
+        # 않아 캘린더 사용 설명을 파일로 옮겼다.
         INFOPLIST_FILE: PlanTogether/Info.plist
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
     scheme:
