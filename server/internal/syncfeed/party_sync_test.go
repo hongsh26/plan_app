@@ -265,6 +265,10 @@ type client struct {
 	self      uuid.UUID
 	// shadow는 같은 변경을 규칙 없이 적용하는 대조군이다(nil이면 없음).
 	shadow *client
+	// bootstrapBody는 이 모델을 만든 bootstrap 응답 원문이다. rec가 있으면 받은 피드 페이지를 Swift fixture로
+	// 기록한다(swift_fixture_test.go, DUMP_SWIFT_FIXTURES일 때만).
+	bootstrapBody []byte
+	rec           *fixtureSession
 }
 
 type wireChange struct {
@@ -279,7 +283,7 @@ type wireChange struct {
 // fetchBootstrap은 비교 기준인 snapshot의 upsert entity만 준다(하한 항목은 적용하지 않는다).
 func (s *partyStack) fetchBootstrap(t *testing.T, token string) (map[entityKey]entity, string) {
 	t.Helper()
-	raw, _, _, w := s.fetchBootstrapAll(t, token)
+	raw, _, _, w, _ := s.fetchBootstrapAll(t, token)
 	return raw, w
 }
 
@@ -288,11 +292,11 @@ func (s *partyStack) fetchBootstrap(t *testing.T, token string) (map[entityKey]e
 // 빠져 기준(fetchBootstrap)과 달라진다.
 func (s *partyStack) fetchBootstrapFloors(t *testing.T, token string) (map[entityKey]entity, map[entityKey]int64, string) {
 	t.Helper()
-	_, applied, floors, w := s.fetchBootstrapAll(t, token)
+	_, applied, floors, w, _ := s.fetchBootstrapAll(t, token)
 	return applied, floors, w
 }
 
-func (s *partyStack) fetchBootstrapAll(t *testing.T, token string) (map[entityKey]entity, map[entityKey]entity, map[entityKey]int64, string) {
+func (s *partyStack) fetchBootstrapAll(t *testing.T, token string) (map[entityKey]entity, map[entityKey]entity, map[entityKey]int64, string, []byte) {
 	t.Helper()
 	rec := s.req(t, http.MethodGet, "/v1/sync/bootstrap", token, "", "", "")
 	if rec.Code != http.StatusOK {
@@ -329,7 +333,7 @@ func (s *partyStack) fetchBootstrapAll(t *testing.T, token string) (map[entityKe
 		}
 		applied[k] = e
 	}
-	return raw, applied, floors, body.Watermark
+	return raw, applied, floors, body.Watermark, rec.Body.Bytes()
 }
 
 func decodePayload(t *testing.T, raw json.RawMessage) map[string]any {
@@ -344,7 +348,7 @@ func decodePayload(t *testing.T, raw json.RawMessage) map[string]any {
 func (s *partyStack) newClient(t *testing.T, name, token string, limit int) *client {
 	t.Helper()
 	c := &client{name: name, token: token, limit: limit, strictOrder: true, rules: true, self: s.userOf(t, token)}
-	c.model, c.floors, c.cursor = s.fetchBootstrapFloors(t, token)
+	_, c.model, c.floors, c.cursor, c.bootstrapBody = s.fetchBootstrapAll(t, token)
 	return c
 }
 
@@ -451,6 +455,9 @@ func (s *partyStack) pull(t *testing.T, c *client) {
 		for _, ch := range page.Changes {
 			c.apply(t, ch)
 		}
+		if c.rec != nil {
+			c.rec.addPage(rec.Body.Bytes())
+		}
 		c.pulled += len(page.Changes)
 		c.cursor = page.Cursor
 		if !page.HasMore {
@@ -470,6 +477,9 @@ func (s *partyStack) converge(t *testing.T, step string, cs ...*client) {
 			fresh, _ := s.fetchBootstrap(t, c.token)
 			diff := diffModels(c.model, fresh)
 			if diff == "" {
+				if c.rec != nil {
+					c.rec.addCheckpoint(fresh)
+				}
 				break
 			}
 			if time.Now().After(deadline) {
@@ -625,6 +635,10 @@ func TestPartySyncIncrementalMatchesBootstrap(t *testing.T) {
 	b1 := s.newClient(t, "B1", bTok, 0)
 	c1 := s.newClient(t, "C1", cTok, 0)
 	all := []*client{a1, b1, c1}
+	fx := s.fixture(t, "sequential_acceptance", "순차 인수 시나리오: 생성·초대·수락·공개 수준·이름 변경·위임·탈퇴·재가입·강퇴·해산")
+	for _, cl := range []*client{a1, a2, b1, c1} {
+		fx.client(cl)
+	}
 
 	// C의 다른 Party. C가 P를 떠나도 남아 있어야 한다.
 	q := uuid.MustParse(s.must(t, http.StatusCreated, http.MethodPost, "/v1/parties", cTok, "", `{"name":"Q"}`)["party"].(map[string]any)["id"].(string))
@@ -673,6 +687,7 @@ func TestPartySyncIncrementalMatchesBootstrap(t *testing.T) {
 
 	// B의 두 번째 기기는 여기서 처음 bootstrap한다(늦게 들어온 세션).
 	b2 := s.newClient(t, "B2", s.signIn(t, b.subject).token, 0)
+	fx.client(b2)
 
 	// 5. 방장 위임 A → B. 활성 초대는 무효화되고 tombstone은 이전·새 방장에게만 간다.
 	s.must(t, http.StatusOK, http.MethodPost, "/v1/parties/"+p.String()+"/owner", aTok, s.partyETag(t, aTok, p), `{"user_id":"`+b.id.String()+`"}`)
@@ -961,6 +976,7 @@ func TestLeaveRacingPartyChangeDoesNotResurrect(t *testing.T) {
 	s.must(t, http.StatusCreated, http.MethodPost, "/v1/invites/"+inv+"/accept", uTok, "", "")
 	uc := s.newClient(t, "U", uTok, 0).withShadow()
 	uc.strictOrder = false
+	s.fixture(t, "leave_vs_rename", "재현 1: 탈퇴 tombstone 뒤에 먼저 직렬화된 Party·멤버십 upsert가 온다", "rules").client(uc)
 
 	b := s.blockDevice(t, uDev)
 	leave := s.async(t, http.MethodDelete, "/v1/parties/"+p.String()+"/memberships/me", uTok, "", "")
@@ -999,6 +1015,7 @@ func TestTransferRacingAcceptDoesNotResurrectInvite(t *testing.T) {
 	ac.strictOrder = false
 	bc := s.newClient(t, "B", bTok, 0)
 	bc.strictOrder = false
+	s.fixture(t, "transfer_vs_accept", "재현 2: 위임의 초대 tombstone 뒤에 먼저 직렬화된 초대 upsert가 온다", "floors").client(ac)
 
 	// 수락이 Party version을 1 올리므로 위임은 그 다음 version을 If-Match로 보낸다.
 	v, _ := strconv.ParseInt(strings.Trim(s.partyETag(t, aTok, p), `"`), 10, 64)
@@ -1037,6 +1054,7 @@ func TestRejoinRacingLeaveKeepsNewScope(t *testing.T) {
 	s.must(t, http.StatusCreated, http.MethodPost, "/v1/invites/"+inv+"/accept", u1Tok, "", "")
 	uc := s.newClient(t, "U", u2Tok, 0).withShadow()
 	uc.strictOrder = false
+	s.fixture(t, "rejoin_vs_leave", "재현 3: 재가입 부트스트랩 뒤에 다른 기기 탈퇴의 version 없는 scope tombstone이 온다", "rules").client(uc)
 
 	blk := s.blockDevice(t, u1Dev)
 	rejoin := s.async(t, http.MethodPost, "/v1/invites/"+inv+"/accept", u1Tok, "", "")
@@ -1067,6 +1085,7 @@ func TestRenameRacingJoinDeliversNewName(t *testing.T) {
 	_, inv := s.invite(t, aTok, p, "")
 	jc := s.newClient(t, "J", jTok, 0)
 	jc.strictOrder = false
+	s.fixture(t, "rename_vs_join", "재현 4: 가입 부트스트랩보다 먼저 부모 없는 멤버십 upsert(새 이름)가 온다", "orphans").client(jc)
 
 	me := s.req(t, http.MethodGet, "/v1/me", aTok, "", "", "")
 	blk := s.blockDevice(t, aDev)
@@ -1217,6 +1236,7 @@ func TestBootstrapCarriesEndedMembershipFloors(t *testing.T) {
 	uc.strictOrder = false
 	noFloor.strictOrder = false
 	noFloor.floors = map[entityKey]int64{}
+	s.fixture(t, "bootstrap_ended_membership_floor", "재현 5: snapshot의 끝난 본인 멤버십 하한이 다시 오는 Party upsert를 막는다", "floors", "rules").client(uc)
 	if len(uc.floors) == 0 || uc.count(p)["party"] != 0 {
 		t.Fatalf("snapshot이 탈퇴 뒤 상태와 하한을 싣지 않았다: floors %v, entity %v", uc.floors, uc.count(p))
 	}
@@ -1281,6 +1301,7 @@ func TestBootstrapCarriesTombstoneFloorsForRedeliveredUpserts(t *testing.T) {
 	}
 	ac.strictOrder, noFloor.strictOrder = false, false
 	noFloor.floors = map[entityKey]int64{}
+	s.fixture(t, "bootstrap_tombstone_floor", "재현 6: snapshot의 초대 tombstone 하한이 다시 오는 초대 upsert를 막는다", "floors").client(ac)
 	if _, ok := ac.floors[entityKey{"party_invite", id}]; !ok {
 		t.Fatalf("snapshot에 초대 하한이 없다: %v", ac.floors)
 	}
@@ -1306,6 +1327,9 @@ type deviceModel struct {
 	cursor  string
 	// raw는 snapshot의 upsert만 담은 비교 기준이다.
 	raw map[uuid.UUID]int64
+	// bootstrapBody·rec는 client의 같은 이름 필드와 같다(Swift fixture 기록).
+	bootstrapBody []byte
+	rec           *fixtureSession
 }
 
 func (s *partyStack) bootstrapDevices(t *testing.T, token string, useFloors bool) *deviceModel {
@@ -1327,7 +1351,7 @@ func (s *partyStack) bootstrapEntities(t *testing.T, token, typ string, useFloor
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	m := &deviceModel{typ: typ, present: map[uuid.UUID]int64{}, floors: map[uuid.UUID]int64{}, raw: map[uuid.UUID]int64{}, cursor: body.Watermark}
+	m := &deviceModel{typ: typ, present: map[uuid.UUID]int64{}, floors: map[uuid.UUID]int64{}, raw: map[uuid.UUID]int64{}, cursor: body.Watermark, bootstrapBody: rec.Body.Bytes()}
 	for _, c := range body.Snapshot {
 		if c.EntityType == typ && c.Version != nil && c.Operation == "tombstone" && useFloors && *c.Version > m.floors[c.EntityID] {
 			m.floors[c.EntityID] = *c.Version
@@ -1385,6 +1409,9 @@ func (s *partyStack) drainDevices(t *testing.T, m *deviceModel, token string, us
 		_ = json.Unmarshal(rec.Body.Bytes(), &page)
 		for _, ch := range page.Changes {
 			m.apply(t, ch)
+		}
+		if m.rec != nil {
+			m.rec.addPage(rec.Body.Bytes())
 		}
 		m.cursor = page.Cursor
 		cur, _ := DecodeCursor(m.cursor)
@@ -1456,6 +1483,7 @@ func TestBootstrapFloorKeepsRevokedDeviceRevoked(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	s.fixture(t, "device_revoke_floor", "재현 7: snapshot의 폐기 기기 하한이 다시 오는 push 갱신 upsert를 막는다", "floors").devices(withFloor, t2, d.id)
 	if _, ok := withFloor.present[d1]; ok || withFloor.floors[d1] == 0 {
 		t.Fatalf("snapshot이 폐기 뒤 상태와 하한을 싣지 않았다: present %v floors %v", withFloor.present, withFloor.floors)
 	}
@@ -1556,6 +1584,8 @@ func TestBootstrapOmitsFloorsForSnapshotEntities(t *testing.T) {
 	// 실제 클라이언트처럼 snapshot을 한 저장소에 적용하고(하한 먼저) 다시 오는 옛 이름 변경까지 받은 뒤에도 본인
 	// user가 최신 version으로 남아 새 bootstrap과 같아야 한다.
 	m := s.bootstrapEntities(t, t1, "user", true)
+	// 클라이언트 쪽 대조군이 없다. 서버가 snapshot entity에 하한을 싣지 않는 성질이고, 클라이언트는 version 비교로 수렴한다.
+	s.fixture(t, "user_rename_reorder", "재현 8: 같은 사용자의 이름 변경 두 건이 역전되고 옛 upsert가 snapshot 뒤에 다시 온다").devices(m, t1, u.id)
 	if m.present[u.id] != v+2 {
 		t.Fatalf("snapshot 적용 뒤 user = v%d, want v%d (하한 %v)", m.present[u.id], v+2, m.floors)
 	}
