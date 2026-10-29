@@ -163,12 +163,15 @@ type DeletionService struct {
 	pool   *pgxpool.Pool
 	opener Opener
 	apple  AppleRevoker
+	now    func() time.Time
 }
 
 type DeletionDeps struct {
 	Pool   *pgxpool.Pool
 	Opener Opener
 	Apple  AppleRevoker
+	// Now는 Party 정리 시각(ended_at·disbanded_at)의 시계다. nil이면 time.Now다.
+	Now func() time.Time
 }
 
 // NewDeletionService는 삭제 worker 서비스를 만든다.
@@ -176,7 +179,10 @@ func NewDeletionService(d DeletionDeps) (*DeletionService, error) {
 	if d.Pool == nil || d.Opener == nil {
 		return nil, errors.New("account: 삭제 worker에는 Pool과 Opener가 필요하다")
 	}
-	return &DeletionService{pool: d.Pool, opener: d.Opener, apple: d.Apple}, nil
+	if d.Now == nil {
+		d.Now = time.Now
+	}
+	return &DeletionService{pool: d.Pool, opener: d.Opener, apple: d.Apple, now: d.Now}, nil
 }
 
 // JobKind는 jobs.Runner에 등록할 account_deletion kind다.
@@ -266,7 +272,7 @@ func (s *DeletionService) markDeleting(ctx context.Context, userID uuid.UUID) ([
 		}
 		// §10 2단계(설계 4 §5.8): Apple revoke보다 먼저 Party 강제 위임·해산·멤버십 종료를 커밋한다. revoke가
 		// 실패해 재시도해도 이미 끝난 멤버십은 건너뛴다. 잠금은 users → parties → 멤버십이다.
-		if err := party.EndMembershipsForDeletedUser(ctx, mutation.NewTx(tx), userID, time.Now()); err != nil {
+		if err := party.EndMembershipsForDeletedUser(ctx, mutation.NewTx(tx), userID, s.now()); err != nil {
 			return err
 		}
 		err = tx.QueryRow(ctx, `
@@ -347,7 +353,7 @@ func (s *DeletionService) finish(ctx context.Context, userID uuid.UUID) error {
 		// markDeleting이 이미 멤버십을 정리했지만 한 번 더 부른다. 활성 멤버십이 남지 않음을 이 트랜잭션에서 보장해야
 		// 아래 캘린더 삭제가 다른 멤버의 projection을 남기지 않는다. 보통 할 일이 없다. 잠금은 users → devices → sessions
 		// 뒤 parties → 멤버십이다.
-		if err := party.EndMembershipsForDeletedUser(ctx, mtx, userID, time.Now()); err != nil {
+		if err := party.EndMembershipsForDeletedUser(ctx, mtx, userID, s.now()); err != nil {
 			return err
 		}
 		// 익명화한 이름을 남은 활성 멤버십의 Party 멤버에게 보낸다(위 정리 뒤라 보통 대상이 없다).

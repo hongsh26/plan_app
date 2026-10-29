@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -30,13 +31,42 @@ func (s *partyStack) requestDeletion(t *testing.T, token string) {
 // runDeletion은 삭제 job 하나를 worker 역할로 끝까지 처리한다.
 func (s *partyStack) runDeletion(t *testing.T, userID uuid.UUID) {
 	t.Helper()
-	svc, err := account.NewDeletionService(account.DeletionDeps{Pool: pgtest.Pool(t, pgtest.WorkerRoleURLEnv), Opener: s.box, Apple: noRevoke{}})
+	if err := s.deletionJob(t, userID, nil)(); err != nil {
+		t.Fatalf("삭제 job: %v", err)
+	}
+}
+
+// deletionJob은 worker 역할 삭제 job을 실행할 함수를 준다. 고루틴에서 부를 수 있게 오류를 돌려준다.
+func (s *partyStack) deletionJob(t *testing.T, userID uuid.UUID, now func() time.Time) func() error {
+	t.Helper()
+	svc, err := account.NewDeletionService(account.DeletionDeps{Pool: pgtest.Pool(t, pgtest.WorkerRoleURLEnv), Opener: s.box, Apple: noRevoke{}, Now: now})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.HandleJob(context.Background(), jobs.Job{Type: account.AccountDeletionJobType,
-		Payload: []byte(`{"user_id":"` + userID.String() + `"}`), Attempt: 1}); err != nil {
-		t.Fatalf("삭제 job: %v", err)
+	return func() error {
+		return svc.HandleJob(context.Background(), jobs.Job{Type: account.AccountDeletionJobType,
+			Payload: []byte(`{"user_id":"` + userID.String() + `"}`), Attempt: 1})
+	}
+}
+
+// waitLockWaiters는 pid가 쥔 잠금을 (직접 또는 앞선 대기자 뒤에서) 기다리는 backend가 n개 이상이 될 때까지 기다린다.
+// 같은 row의 두 번째 대기자는 첫 대기자가 쥔 tuple lock을 기다리므로 한 단계 간접 대기도 센다. worker 역할 backend의
+// wait_event는 api 역할에게 보이지 않으므로 pg_blocking_pids만 본다.
+func (s *partyStack) waitLockWaiters(t *testing.T, pid int32, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if got := s.count(t, `
+			WITH direct AS (SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))
+			SELECT count(*) FROM pg_stat_activity a
+			 WHERE $1 = ANY(pg_blocking_pids(a.pid))
+			    OR EXISTS (SELECT 1 FROM direct d WHERE d.pid = ANY(pg_blocking_pids(a.pid)))`, pid); got >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("잠금 대기자가 %d개가 되지 않았다", n)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -113,7 +143,17 @@ func TestAccountDeletionEndsMemberMembershipAndPersonalData(t *testing.T) {
 	dMembership, _, _, _ := s.membershipOf(t, p, d.id)
 
 	s.requestDeletion(t, dTok)
-	s.runDeletion(t, d.id)
+	endedAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	if err := s.deletionJob(t, d.id, func() time.Time { return endedAt })(); err != nil {
+		t.Fatalf("삭제 job: %v", err)
+	}
+	var gotEnded time.Time
+	if err := s.pool.QueryRow(context.Background(), `SELECT ended_at FROM party_memberships WHERE id = $1`, dMembership).Scan(&gotEnded); err != nil {
+		t.Fatal(err)
+	}
+	if !gotEnded.Equal(endedAt) {
+		t.Fatalf("ended_at = %s, want 주입한 시각 %s", gotEnded, endedAt)
+	}
 
 	s.converge(t, "member deleted", ac)
 	ac.expect(t, "member deleted", p, map[string]int{"party": 1, "party_invite": 1, "party_membership": 1, "party_visibility_setting": 1, "party_schedule_projection": 1})
@@ -291,5 +331,62 @@ func TestRequestAuthenticatedBeforeDeletionCannotWriteAfterIt(t *testing.T) {
 				t.Fatalf("mutation 재시도 %d회", d)
 			}
 		})
+	}
+}
+
+// 삭제 worker(삭제 대상 users → parties FOR UPDATE)와 승계자의 표시 이름 변경(승계자 users FOR NO KEY UPDATE → parties
+// FOR SHARE)이 겹쳐도 교착·재시도 없이 끝난다. Party 잠금을 쥔 채 worker를 먼저, 이름 변경을 다음에 줄 세운 뒤 놓는다.
+// worker가 Party를 먼저 잡은 상태에서 승계자 users row를 잠그면(설계 대비 잠금 순서 위반) 이름 변경과 교착한다.
+func TestAccountDeletionRacingSuccessorMutationDoesNotDeadlock(t *testing.T) {
+	s := newPartyStack(t)
+	retriesBefore := mutation.Retries()
+	d, b := s.newUser(t, "p8x.d"), s.newUser(t, "p8x.b")
+	dTok := s.signIn(t, d.subject).token
+	bTok := s.signIn(t, b.subject).token
+	p := s.createParty(t, dTok, "X")
+	_, inv := s.invite(t, dTok, p, "")
+	s.must(t, http.StatusCreated, http.MethodPost, "/v1/invites/"+inv+"/accept", bTok, "", "")
+	s.requestDeletion(t, dTok)
+	bc := s.newClient(t, "B", bTok, 0)
+
+	ctx := context.Background()
+	hold, err := s.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = hold.Rollback(ctx) })
+	var pid int32
+	if err := hold.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hold.Exec(ctx, `SELECT 1 FROM parties WHERE id = $1 FOR UPDATE`, p); err != nil {
+		t.Fatal(err)
+	}
+
+	job := s.deletionJob(t, d.id, nil)
+	workerErr := make(chan error, 1)
+	go func() { workerErr <- job() }()
+	s.waitLockWaiters(t, pid, 1)
+	me := s.req(t, http.MethodGet, "/v1/me", bTok, "", "", "")
+	rename := s.async(t, http.MethodPatch, "/v1/me", bTok, etagOf(me), `{"display_name":"B 새 이름"}`)
+	s.waitLockWaiters(t, pid, 2)
+	if err := hold.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := <-workerErr; err != nil {
+		t.Fatalf("삭제 worker: %v", err)
+	}
+	expectStatus(t, <-rename, http.StatusOK)
+	if d := mutation.Retries() - retriesBefore; d != 0 {
+		t.Fatalf("mutation 재시도 %d회: 잠금 순서 위반", d)
+	}
+	_, _, role, _ := s.membershipOf(t, p, b.id)
+	if role != "owner" || s.count(t, `SELECT count(*) FROM party_memberships WHERE party_id = $1 AND status = 'active' AND role = 'owner'`, p) != 1 {
+		t.Fatalf("B role = %s, 방장이 1명이 아니다", role)
+	}
+	s.converge(t, "racing rename", bc)
+	if got := memberName(bc, b.id); got != "B 새 이름" {
+		t.Fatalf("B 이름 = %q", got)
 	}
 }

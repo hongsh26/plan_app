@@ -59,11 +59,14 @@
 - **기존 테스트 변경:** `TestAccountDeletionAnonymizesNameForCoMembers`를 지웠다. 삭제된 사용자의 멤버십이 이제 tombstone되므로
   같은 Party 멤버의 모델에 이름이 남지 않는다. 이 동작은 새 테스트 `TestAccountDeletionEndsMemberMembershipAndPersonalData`가 본다.
   동작이 바뀌었기 때문이지, 테스트를 맞추려고 고친 것이 아니다.
-- 삭제 worker는 시각을 `time.Now()`로 쓴다. `DeletionService`에는 clock 주입이 없다(기존과 같다).
 - 삭제된 사용자의 `idempotency_keys`(30일 TTL)와 그 사용자에게 가는 `sync_changes`는 prune 전까지 남는다. 이름이나 본문은 없다.
   §10 단계에서 즉시 지울지는 설계 결정으로 남긴다.
-- 방장 삭제는 `notify_owner_transferred_by_deletion`과 `notify_member_left`를 둘 다 enqueue한다. 설계 9에서 묶을지 정한다.
-- worker 삭제와 같은 Party 멤버 mutation이 겹치는 동시성 테스트는 없다. 잠금 순서 분석(users → parties → 멤버십)과 리뷰로 확인했다.
+- **방장 삭제 알림은 두 개다:** `notify_owner_transferred_by_deletion`(활성 멤버 전원, dedupe `party_id:party_version`)과
+  `notify_member_left`(남은 활성 멤버, dedupe `membership_id`)를 둘 다 enqueue한다. 근거: 설계 4 §5.8은 강제 위임이 "T4와 같은
+  트랜잭션 규칙을 따르되 알림 type은 by_deletion"이고, 이어 멤버십을 "T5와 동일하게" 종료한다고 한다. T5 step 9가
+  `notify_member_left`다. 설계 9 표 A·§12에도 둘 중 하나를 억제하는 규칙이 없다. 두 사건(방장 변경, 멤버 이탈)이 따로 있으므로
+  설계대로 둔다. 묶음 표시는 설계 9의 묶음 처리 몫이다.
+- `DeletionDeps.Now`로 시계를 주입한다(nil이면 `time.Now`). Party 정리의 `ended_at`·`disbanded_at`에 쓴다.
 - `notification_ref_keys`(사용자별 알림 참조 키)는 §10 목록에 없어 이번에 지우지 않았다. 알림 구현(설계 9) 때 삭제 단계에 넣을지 정한다.
 
 ## 테스트
@@ -78,7 +81,12 @@
   삭제는 `removed`/`party_disbanded`를 바꾸지 않는다.
 - `TestRequestAuthenticatedBeforeDeletionCannotWriteAfterIt`(availability·calendar·visibility): 기기 잠금으로 요청을 idempotency INSERT에서
   멈춘 뒤 계정 상태를 바꾼다. 요청은 423이고 아무것도 쓰지 않으며 재시도도 0이다. 세 경로 모두 도메인 코드가 계정 상태를 보지 않으므로,
-  상태 확인을 끄면 200으로 쓴다(availability·calendar는 실제로 확인했다).
+  상태 확인을 끄면 세 경로 모두 200으로 쓰는 것을 확인했다.
+- `TestAccountDeletionRacingSuccessorMutationDoesNotDeadlock`: worker 삭제와 승계자 B의 표시 이름 변경이 겹치는 경우다. Party 잠금을
+  쥔 트랜잭션 뒤에 worker를 먼저, 이름 변경을 다음에 줄 세운 뒤 놓는다(결정적). worker 오류가 없고 이름 변경은 200이며 재시도 0,
+  방장은 B 1명, B 모델은 새 이름이다. 승계자 조회에 `FOR SHARE OF u`를 넣으면 교착해 재시도 1회로 실패하는 것을 확인했다.
+  worker 역할 backend의 `wait_event`는 api 역할에게 보이지 않아 `pg_blocking_pids`(간접 대기 포함)로 줄 선 것을 판정한다.
+- `TestAccountDeletionEndsMemberMembershipAndPersonalData`는 주입한 시계(`DeletionDeps.Now`)가 `ended_at`이 되는지도 본다.
 - `internal/party/user_lock_test.go` `TestSameUserConcurrentCreatesDoNotRetry`: 같은 사용자가 두 기기에서 Party를 동시에 만들어도 재시도가 0이다.
   `runLockingUser`를 `run`으로 바꾸면 실패한다. 계정 mutation 쪽은 기존 `TestConcurrentMutationsDoNotDeadlock`이 같은 역할을 한다
   (`LockUserForUpdate`를 끄면 실패하는 것을 확인했다).
@@ -86,7 +94,7 @@
   동안 page 요청이 그 잠금에서 기다리게 한다. 커밋 뒤 423이고 staging 0행이다. 확인을 끄면 200이다.
 - `TestPartySyncIncrementalMatchesBootstrap`에 11단계(방장 D 삭제 → A 강제 위임, 모든 세션 증분 == bootstrap)와 12단계(승계자 없는
   방장 E 삭제 → 해산, 기존 세션 불변)를 더했다. Swift fixture `sync_sequential_acceptance.json`을 다시 기록했다(다른 fixture는 그대로).
-- 게이트: gofmt·vet, `migrate reset → up`, `go test -count=1 ./...` 606 pass, skip 0. iOS `xcodegen` + `xcodebuild build test` 성공.
+- 게이트: gofmt·vet, `migrate reset → up`, `go test -count=1 ./...` 607 pass, skip 0. iOS `xcodegen` + `xcodebuild build test` 성공.
   - `migrate reset` 직후 첫 실행에서 `ratelimit` `TestExceededIsReportedOnceAndCacheDoesNotHideIt`가 한 번 실패했다("요청 제한을
     확인할 수 없다"). 단독으로 3회, 전체로 다시 돌리면 통과했다. 이번 변경과 무관한 간헐 실패로 보인다.
 
