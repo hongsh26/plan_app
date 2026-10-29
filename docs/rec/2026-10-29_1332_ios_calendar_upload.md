@@ -44,16 +44,18 @@
 
 **이 판정은 상태를 바꾸는 모든 연결 PUT보다 먼저다(리뷰 High).** 연결 상태는 사용자 하나에 하나라, sync 기기가 아닌 iPad가 자기 권한(거부·제한, MDM이면 사용자 행동 없이도)이나 빈 선택으로 PUT하면 iPhone의 projection이 숨겨지고 두 기기가 앱을 열 때마다 상태를 번갈아 뒤집는다. 그래서 다른 살아 있는 기기가 맡고 있으면 iPad는 앱 활성화·선택 변경·새로고침에서 아무 PUT도 하지 않는다. 선택은 iPad 로컬에만 저장된다.
 
+**자동으로 맡는 것도 올릴 수 있는 기기만 한다(재검증 Medium).** sync 기기가 폐기됐어도(iPhone 재로그인) 권한이 없거나 선택이 빈 iPad가 앱을 열면 맡지 않고 아무것도 바꾸지 않는다. 맡으면서 거부·재선택 상태를 PUT하면 iPhone이 그 뒤 iPad를 살아 있는 sync 기기로 보고 물러나 projection이 숨겨진 채 남기 때문이다. iPhone의 다음 앱 활성화가 맡아 올린다. sync 기기가 한 번도 없던 연결(올린 적 없어 노출할 generation이 없다)에서는 맡지 않고 권한 상태만 맞춘다.
+
 ### 업로드 (설계 3 §7.2)
 
 - 시점: 연결 직후(선택 후), 앱 활성화, 수동 "지금 업로드", 선택 변경. 앱 활성화는 마지막 업로드 60초 안이면 건너뛴다(서버 snapshot 한도 10/분). 백그라운드 갱신·EventKit 변경 알림 debounce는 하지 않는다
 - 서버 한도: page 250 facts·본문 60,000바이트(64KB에 여유) 이하, 200 page, 20,000 facts. 넘으면 **잘라 올리지 않고** 실패한다(빠진 일정이 빈 시간으로 보인다). fact는 key 순 정렬이라 같은 일정이면 같은 page 바이트다
-- revision: 사용자별 로컬 상태에 저장한 뒤 보낸다. 409 `version_conflict`면 서버 마지막 revision + 1로 다시 만든다. 같은 revision의 기존 session(200)이 열려 있으면 이어 쓰고, 끝났거나 중단됐으면 revision을 올린다. 최대 세 번(로그아웃이 로컬 revision을 지운 뒤 재로그인해도 409 → 서버 revision + 1로 이어진다)
-- **시간대 대체:** 서버는 시간대를 자기 tzdata(`time.LoadLocation`, 배포 이미지의 zoneinfo)로 검사한다. 기기가 아는 IANA 이름을 서버가 모르면 page 전체가 400이 되어 업로드가 계속 실패한다. page가 400 `invalid_request`면 그 session을 abort하고 모든 fact의 시간대를 UTC로 바꿔 한 번 다시 올린다. 시작·끝은 이미 UTC라 바쁜 시간은 같고 원래 시간대 표시만 잃는다. 화면에 표시가 남는다. 서버가 `time/tzdata`를 내장하면 이 경우가 사라진다(서버 후속 과제)
+- revision: 사용자별 로컬 상태에 저장한 뒤 보낸다. 409 `version_conflict`면 서버 마지막 revision + 1로 다시 만든다. 같은 revision의 기존 session(200)을 돌려받으면 열려 있어도 이어 쓰지 않고 revision을 올린다(옛 session의 다른 page에 남은 staging과 새 page의 key가 겹쳐 400이 날 수 있다. 새 revision의 create가 서버에서 옛 열린 session을 abort한다). 최대 세 번(로그아웃이 로컬 revision을 지운 뒤 재로그인해도 409 → 서버 revision + 1로 이어진다)
+- **시간대 대체:** 서버는 시간대를 `time.LoadLocation`으로 검사하고 `time/tzdata`를 내장하지 않는다(확인: server에 import 없음). 그래서 서버가 아는 이름은 배포 이미지의 zoneinfo에 달려 있고, 기기 tz DB가 더 새로우면 기기가 아는 IANA 이름을 서버가 몰라 page 전체가 400이 된다. **page가 400으로 거부될 때만**(create·complete의 400은 해당 없음) 그 session을 abort하고 두 단계로 다시 올린다: ① 사용자 시간대와 다른(일정 고유) 시간대만 UTC로, ② 그래도 거부되면 사용자 시간대까지 UTC로. 시작·끝은 이미 UTC라 바쁜 시간은 같고 원래 시간대 표시만 잃는다. 시간대와 무관한 거부면 두 단계 모두 실패해 오류로 끝나고 대체 표시도 남지 않는다. 서버가 `time/tzdata`를 내장하면(`cmd/api`에 `import _ "time/tzdata"`) 이미지 차이로 생기는 경우는 사라지고, 기기 tz DB가 Go 배포보다 새로운 경우만 남는다(서버 후속 과제)
 - page·complete는 네트워크 오류·5xx·429(Retry-After)에서 같은 키·본문으로 최대 3번. 그 밖의 실패(400, `calendar_snapshot_incomplete` 등)는 abort(빈 본문)해 기존 ready generation을 그대로 둔다. 이미 닫힌 session(`calendar_snapshot_state`)·다른 기기(403)·세션 종료면 abort하지 않는다
 - **재시작 정책:** 중단된 업로드를 이어 하지 않는다. 다음 업로드가 새 revision으로 처음부터 하고, 서버가 그때 열린 옛 session을 abort한다(설계 §12 "staging 유지 후 page 재시도"는 한 업로드 안의 재시도로만 한다)
 - 사용자별 로컬 상태(비밀 키, 선택 캘린더, revision, 마지막 업로드 시각)는 I1의 `SessionGate` 안에서 쓰고, 다른 사용자 것은 읽지 않으며, 로그아웃하면 지운다. `CalendarSync`와 업로더는 요청마다 gate가 열려 있는지 확인한다. 로그아웃 뒤 재로그인하면 같은 APIClient가 새 token을 쓰므로, 옛 세션의 실행이 새 token으로 PUT하지 않게 한다
-- 실행은 사슬로 하나씩 돈다. 앱 활성화만 진행 중 결과를 함께 쓰고, 연결·선택 변경·새로고침은 앞 실행이 끝난 뒤 새로 돈다
+- 실행은 사슬로 하나씩 돈다. 앱 활성화만 진행 중 결과를 함께 쓰고, 연결·선택 변경·새로고침은 앞 실행이 끝난 뒤 새로 돈다. 참고: 앱 활성화가 받는 결과는 진행 중이던 실행(연결일 수도 있다)의 것이라 그 note는 앱 활성화 의도와 다를 수 있다. 서버 상태에는 영향이 없다
 
 ## 시연 준비: DEBUG "시연 일정 만들기" 버튼
 
@@ -65,10 +67,10 @@
 
 ## 테스트
 
-- iOS 게이트 92개 실행, 88개 통과, 4개 건너뜀(선택 실행)
+- iOS 게이트 94개 실행, 90개 통과, 4개 건너뜀(선택 실행)
   - 변환 9개: window, 분류, 반복 key 고정·중복 제거·입력 순서 무관, all-day(서울, 뉴욕 DST), 시간대 대체, 긴 일정 자르기·초 미만, page JSON allowlist, page 경계(250/251, 20,000 = 80 page, 20,001 실패, 각 page ≤ 60,000바이트)
-  - 업로더 8개: 정상 흐름·본문, revision 충돌, 재사용 session(닫힘 → 새 revision, 열림 → 이어 쓰기), 409 → 닫힌 200 → 생성, page 재시도(같은 키·본문, Retry-After), 거절 page abort, complete incomplete만 abort
-  - 조정자 16개. 가짜 서버는 실제 handler의 create-only·If-Match, 전이 표, 기기별 판정(token으로 구별), claim 때 ready → syncing, syncing 중 source 변경 → selecting, 같은 revision 200, complete의 syncing·fact 수 검사, 다른 기기 403을 흉내 낸다. 리뷰 반영 7개: 두 기기(iPad 거부·제한·빈 선택이 iPhone 상태를 안 바꿈, 연결 누르면 가져옴, 그 뒤 iPhone은 안 바꿈), disconnected 되살림 없음, 409 뒤 다시 판단, needs_source_reselection 유지, 시간대 UTC 대체, 닫힌 세션은 요청 없음, 진행 중 실행 뒤 선택 변경이 새로 돔. 앞의 둘은 수정 전 동작으로 되돌리면 실패하는 것을 확인했다. 그 밖: 전이 표, 연결 안 한 사용자 앱 활성화, 연결 흐름(create-only, 권한, 선택 대기, 읽지 않음), 선택한 캘린더만 읽기·HMAC key·재업로드 바이트 동일, 앱 활성화 억제, revoked·denied·restricted, 전체 해제 → needs_source_reselection, 삭제된 캘린더, sync 기기 규칙(살아 있는 다른 기기·연결 누름·폐기된 기기), 다른 사용자 상태 무시
+  - 업로더 8개: 정상 흐름·본문, revision 충돌, 재사용 session(닫힘·열림 모두 새 revision), 409 → 닫힌 200 → 생성, page 재시도(같은 키·본문, Retry-After), 거절 page abort, complete incomplete만 abort
+  - 조정자 16개. 가짜 서버는 실제 handler의 create-only·If-Match, 전이 표, 기기별 판정(token으로 구별), claim 때 ready → syncing, syncing 중 source 변경 → selecting, 같은 revision 200, complete의 syncing·fact 수 검사, 다른 기기 403을 흉내 낸다. 리뷰 반영 7개: 두 기기(iPad 거부·제한·빈 선택이 iPhone 상태를 안 바꿈, 연결 누르면 가져옴, 그 뒤 iPhone은 안 바꿈), disconnected 되살림 없음, 409 뒤 다시 판단, needs_source_reselection 유지, 시간대 UTC 대체, 닫힌 세션은 요청 없음, 진행 중 실행 뒤 선택 변경이 새로 돔. 재검증 반영 2개: 폐기된 sync 기기 + 올릴 수 없는 iPad 앱 활성화 → PUT 없음 → iPhone이 맡아 올림, 시간대 대체 두 단계(일정 고유 시간대만 UTC, 무관한 거부는 오류). 두 기기·disconnected·폐기 sync 기기 테스트는 수정 전 동작으로 되돌리면 실패하는 것을 확인했다. 그 밖: 전이 표, 연결 안 한 사용자 앱 활성화, 연결 흐름(create-only, 권한, 선택 대기, 읽지 않음), 선택한 캘린더만 읽기·HMAC key·재업로드 바이트 동일, 앱 활성화 억제, revoked·denied·restricted, 전체 해제 → needs_source_reselection, 삭제된 캘린더, sync 기기 규칙(살아 있는 다른 기기·연결 누름·폐기된 기기), 다른 사용자 상태 무시
   - 로그아웃이 캘린더 로컬 상태를 지운다
 - 선택 실행(로컬 서버 `run_api_dev.sh`, 시뮬레이터 권한 `xcrun simctl privacy <udid> grant calendar com.example.PlanTogether`), 모두 통과
   - `LiveCalendarSmokeTests`: 가짜 source 301개 일정 → 2 page → ready, 두 번째 revision, 전체 해제 → needs_source_reselection. 서버 로그 모두 2xx
