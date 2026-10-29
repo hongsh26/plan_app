@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -75,24 +76,24 @@ func HoldSyncReader(t *testing.T, pool *pgxpool.Pool) { holdAdvisory(t, pool, fa
 // HoldSyncPruner는 테스트가 끝날 때까지 정리 잠금을 배타로 잡는다. sync 정리를 실행하는 테스트가 부른다.
 func HoldSyncPruner(t *testing.T, pool *pgxpool.Pool) { holdAdvisory(t, pool, true) }
 
-// holdAdvisory는 세션 잠금이라 전용 연결을 잡고, 끝나면 풀고 반납한다(잠금을 쥔 채 pool로 돌아가지 않게).
+// holdAdvisory는 세션 잠금이라 pool 밖의 전용 연결로 잡고, 끝나면 연결을 닫는다(닫으면 잠금도 풀린다).
+//
+// 테스트 pool에서 연결을 빌려 쥐고 있으면 안 된다. pgxpool 기본 크기는 max(4, CPU 수)라 CPU가 2개인 CI에서는
+// 4개뿐이고, 열린 트랜잭션과 멈춘 요청을 함께 쓰는 재현 테스트가 남은 연결을 다 써서 Acquire에서 영원히 멈춘다.
 func holdAdvisory(t *testing.T, pool *pgxpool.Pool, exclusive bool) {
 	t.Helper()
 	ctx := context.Background()
-	conn, err := pool.Acquire(ctx)
+	conn, err := pgx.ConnectConfig(ctx, pool.Config().ConnConfig.Copy())
 	if err != nil {
 		t.Fatal(err)
 	}
-	lock, unlock := "pg_advisory_lock_shared", "pg_advisory_unlock_shared"
+	lock := "pg_advisory_lock_shared"
 	if exclusive {
-		lock, unlock = "pg_advisory_lock", "pg_advisory_unlock"
+		lock = "pg_advisory_lock"
 	}
 	if _, err := conn.Exec(ctx, `SELECT `+lock+`($1)`, SyncPruneLockKey); err != nil {
-		conn.Release()
+		_ = conn.Close(ctx)
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_, _ = conn.Exec(context.Background(), `SELECT `+unlock+`($1)`, SyncPruneLockKey)
-		conn.Release()
-	})
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 }
