@@ -66,7 +66,8 @@
   트랜잭션 규칙을 따르되 알림 type은 by_deletion"이고, 이어 멤버십을 "T5와 동일하게" 종료한다고 한다. T5 step 9가
   `notify_member_left`다. 설계 9 표 A·§12에도 둘 중 하나를 억제하는 규칙이 없다. 두 사건(방장 변경, 멤버 이탈)이 따로 있으므로
   설계대로 둔다. 묶음 표시는 설계 9의 묶음 처리 몫이다.
-- `DeletionDeps.Now`로 시계를 주입한다(nil이면 `time.Now`). Party 정리의 `ended_at`·`disbanded_at`에 쓴다.
+- `DeletionDeps.Now`로 시계를 주입한다(nil이면 `time.Now`). markDeleting과 finish의 Party 정리(`ended_at`·`disbanded_at`)가 모두
+  이 시계를 쓴다. users·devices·sessions의 시각은 기존처럼 DB `now()`다.
 - `notification_ref_keys`(사용자별 알림 참조 키)는 §10 목록에 없어 이번에 지우지 않았다. 알림 구현(설계 9) 때 삭제 단계에 넣을지 정한다.
 
 ## 테스트
@@ -87,9 +88,10 @@
   방장은 B 1명, B 모델은 새 이름이다. 승계자 조회에 `FOR SHARE OF u`를 넣으면 교착해 재시도 1회로 실패하는 것을 확인했다.
   worker 역할 backend의 `wait_event`는 api 역할에게 보이지 않아 `pg_blocking_pids`(간접 대기 포함)로 줄 선 것을 판정한다.
 - `TestAccountDeletionEndsMemberMembershipAndPersonalData`는 주입한 시계(`DeletionDeps.Now`)가 `ended_at`이 되는지도 본다.
-- `internal/party/user_lock_test.go` `TestSameUserConcurrentCreatesDoNotRetry`: 같은 사용자가 두 기기에서 Party를 동시에 만들어도 재시도가 0이다.
-  `runLockingUser`를 `run`으로 바꾸면 실패한다. 계정 mutation 쪽은 기존 `TestConcurrentMutationsDoNotDeadlock`이 같은 역할을 한다
-  (`LockUserForUpdate`를 끄면 실패하는 것을 확인했다).
+- `internal/party/user_lock_test.go` `TestSameUserConcurrentCreatesDoNotRetry`: 같은 사용자의 두 기기 Party 생성을 결정적으로 겹친다.
+  외부 트랜잭션이 users row를 FOR SHARE로 쥔 채 A, B를 차례로 줄 세운 뒤 놓으면, 둘 다 201이고 재시도는 0이다.
+  `runLockingUser`를 `run`으로 바꾸면 A·B가 모두 SHARE를 얻고 업그레이드를 기다리다 교착해 재시도 1회로 실패한다(3회 반복 모두 실패).
+  계정 mutation 쪽은 기존 `TestConcurrentMutationsDoNotDeadlock`이 같은 역할을 한다(`LockUserForUpdate`를 끄면 실패하는 것을 확인했다).
 - `internal/calendar/deletion_race_test.go` `TestSnapshotPageWaitingOnDeletionRequestIsRejected`: 삭제 요청 트랜잭션이 users row를 쥔
   동안 page 요청이 그 잠금에서 기다리게 한다. 커밋 뒤 423이고 staging 0행이다. 확인을 끄면 200이다.
 - `TestPartySyncIncrementalMatchesBootstrap`에 11단계(방장 D 삭제 → A 강제 위임, 모든 세션 증분 == bootstrap)와 12단계(승계자 없는
