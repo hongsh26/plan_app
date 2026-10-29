@@ -147,6 +147,8 @@ actor APIClient {
             return response
         }
         guard let used = tokens else { throw APIError.notSignedIn }
+        // 요청을 시작한 세대. 재로그인을 지나 도착한 옛 응답의 423이 새 세션을 끝내지 않게 한다.
+        let gen = generation
         if needsTokenSave, (try? tokenStore.save(used)) != nil { needsTokenSave = false }
         var response = try await perform(req, accessToken: used.accessToken)
         if response.status == 401 {
@@ -154,7 +156,7 @@ actor APIClient {
             response = try await perform(req, accessToken: fresh.accessToken)
         }
         if response.status == 423 {
-            await endSession(generation)
+            await endSession(gen)
             throw APIError.sessionEnded
         }
         guard (200..<300).contains(response.status) else { throw error(from: response) }
@@ -175,7 +177,8 @@ actor APIClient {
         let gen = generation
         let task = Task { try await self.performRefresh(refreshToken, generation: gen) }
         refreshTask = task
-        defer { refreshTask = nil }
+        // 로그아웃·재로그인 뒤 새 세대의 refresh를 지우지 않게 자기 task일 때만 비운다.
+        defer { if refreshTask == task { refreshTask = nil } }
         return try await task.value
     }
 
