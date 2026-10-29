@@ -181,7 +181,7 @@ struct PartyDetailView: View {
                 }
                 Section {
                     NavigationLink { VisibilityView(partyID: partyID) } label: {
-                        LabeledContent("내 일정 공개", value: VisibilityView.title(session.syncState?.myVisibility(party: partyID) ?? "busyOnly"))
+                        LabeledContent("내 일정 공개", value: VisibilityView.summary(session.syncState?.myVisibility(party: partyID) ?? "busyOnly"))
                     }
                 }
                 if let error { Section { Text(error).font(.footnote).foregroundStyle(.red) } }
@@ -216,10 +216,16 @@ struct VisibilityView: View {
 
     static func title(_ level: String) -> String {
         switch level {
+        case "busyOnly": return "시간만 공개"
         case "hidden": return "숨김"
         case "details": return "상세 공개"
-        default: return "시간만 공개"
+        default: return "알 수 없음"   // 이 앱이 모르는 값(서버의 새 수준)
         }
+    }
+
+    /// Party 상세의 요약 라벨. 이 화면에서 바꿀 수 없는 값이면 그렇게 적는다.
+    static func summary(_ level: String) -> String {
+        isEditable(level) ? title(level) : "\(title(level)) (이 앱 버전에서는 변경 불가)"
     }
 
     /// 이 화면에서 바꿀 수 있는 현재 값인가. 다른 기기에서 고른 상세 공개는 이 앱 버전이 다루지 못하므로(제목 업로드는

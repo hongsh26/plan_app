@@ -275,6 +275,12 @@ final class PartyDataTests: XCTestCase {
         XCTAssertFalse(VisibilityView.isEditable("details"))
         XCTAssertFalse(VisibilityView.isEditable(nil), "불러오기 전에는 바꾸지 않는다")
         XCTAssertEqual(VisibilityView.title("details"), "상세 공개")
+        XCTAssertEqual(VisibilityView.title("busyOnly"), "시간만 공개")
+        XCTAssertEqual(VisibilityView.title("someFutureLevel"), "알 수 없음", "모르는 값을 시간만 공개로 보이지 않는다")
+        XCTAssertFalse(VisibilityView.isEditable("someFutureLevel"))
+        XCTAssertEqual(VisibilityView.summary("details"), "상세 공개 (이 앱 버전에서는 변경 불가)")
+        XCTAssertEqual(VisibilityView.summary("someFutureLevel"), "알 수 없음 (이 앱 버전에서는 변경 불가)")
+        XCTAssertEqual(VisibilityView.summary("hidden"), "숨김")
     }
 
     func testUserMessagesDoNotExposeOtherMembers() {
