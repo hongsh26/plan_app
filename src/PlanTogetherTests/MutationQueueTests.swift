@@ -349,3 +349,89 @@ final class FlakyTokenStore: TokenStore, @unchecked Sendable {
         tokens = nil
     }
 }
+
+/// 재로그인 경계 회귀 테스트(재검증 Low 1·2).
+final class GenerationBoundaryTests: XCTestCase {
+    private let base = URL(string: "http://localhost:8080")!
+
+    private func signInRequest() -> SignInRequest {
+        SignInRequest(identityToken: "dev:alice", authorizationCode: "dev", rawNonce: "dev", displayName: nil)
+    }
+
+    private func refreshBodies(_ token: String) -> Int {
+        MockURLProtocol.requests.filter {
+            $0.request.url!.path == "/v1/auth/refresh" && $0.body.flatMap { String(data: $0, encoding: .utf8) } == #"{"refresh_token":"\#(token)"}"#
+        }.count
+    }
+
+    /// 옛 세대 refresh가 재로그인 뒤 늦게 끝나도 새 세대의 refresh task를 지우지 않는다. 지우면 다음 401이 같은
+    /// refresh token을 다시 보내 서버가 기기를 폐기한다.
+    func testLateOldRefreshDoesNotClearNewGenerationTask() async throws {
+        MockURLProtocol.install { req, body in
+            let path = req.url!.path
+            let text = body.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            switch path {
+            case "/v1/auth/refresh" where text.contains("r-1"):
+                return .json(200, TestTokens.sessionJSON(access: "a-2", refresh: "r-2"), delay: 0.4)
+            case "/v1/auth/refresh":
+                return .json(200, TestTokens.sessionJSON(access: "a-new2", refresh: "r-new2"), delay: 0.9)
+            case "/v1/auth/apple": return .json(200, TestTokens.sessionJSON(access: "a-new", refresh: "r-new"))
+            case "/v1/auth/logout": return MockURLProtocol.Reply(status: 204)
+            default:
+                return req.value(forHTTPHeaderField: "Authorization") == "Bearer a-new2" ? .json(200, [:]) : .error(401, code: "invalid_session")
+            }
+        }
+        let api = APIClient(baseURL: base, session: MockURLProtocol.makeSession(), tokenStore: InMemoryTokenStore(TestTokens.make("a-1", refresh: "r-1")), sleep: { _ in })
+
+        let old = Task { try await api.send(.get("/v1/me")) }
+        while refreshBodies("r-1") == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+        await api.logout()
+        _ = try await api.signIn(signInRequest())
+        let first = Task { try await api.send(.get("/v1/me")) }
+        while refreshBodies("r-new") == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+        _ = try? await old.value  // 옛 응답 도착(버려진다). 옛 호출자의 정리가 여기서 돈다.
+        let second = Task { try await api.send(.get("/v1/me")) }
+        _ = try await first.value
+        _ = try await second.value
+
+        XCTAssertEqual(refreshBodies("r-new"), 1, "새 refresh token은 한 번만 보낸다")
+        let current = await api.currentTokens
+        XCTAssertEqual(current?.accessToken, "a-new2")
+    }
+
+    /// 재로그인 전에 보낸 요청의 423이 늦게 와도 새 세션을 끝내지 않는다.
+    func testLate423FromOldGenerationDoesNotEndNewSession() async throws {
+        MockURLProtocol.install { req, _ in
+            switch req.url!.path {
+            case "/v1/auth/apple": return .json(200, TestTokens.sessionJSON(access: "a-new", refresh: "r-new"))
+            case "/v1/auth/logout": return MockURLProtocol.Reply(status: 204)
+            default:
+                return req.value(forHTTPHeaderField: "Authorization") == "Bearer a-1"
+                    ? .error(423, code: "account_locked").withDelay(0.4) : .json(200, [:])
+            }
+        }
+        let store = InMemoryTokenStore(TestTokens.make("a-1", refresh: "r-1"))
+        let ended = Counter()
+        let api = APIClient(baseURL: base, session: MockURLProtocol.makeSession(), tokenStore: store, sleep: { _ in })
+        api.setSessionEndedHandler { ended.increment() }
+
+        let old = Task { try await api.send(.get("/v1/parties")) }
+        while MockURLProtocol.requests.isEmpty { try await Task.sleep(nanoseconds: 10_000_000) }
+        await api.logout()
+        _ = try await api.signIn(signInRequest())
+        _ = try? await old.value
+
+        XCTAssertEqual(ended.value, 0)
+        let current = await api.currentTokens
+        XCTAssertEqual(current?.accessToken, "a-new")
+        XCTAssertEqual(try store.load()?.accessToken, "a-new")
+    }
+}
+
+private extension MockURLProtocol.Reply {
+    func withDelay(_ d: TimeInterval) -> MockURLProtocol.Reply {
+        var r = self
+        r.delay = d
+        return r
+    }
+}
