@@ -268,6 +268,15 @@ final class PartyDataTests: XCTestCase {
         XCTAssertNil(s.myVisibility(party: "p3"))
     }
 
+    /// 다른 기기에서 고른 상세 공개는 읽기 전용이다(lead 결정: 이 앱 버전에서 덮어쓰지 않는다).
+    func testDetailsVisibilityIsReadOnly() {
+        XCTAssertTrue(VisibilityView.isEditable("busyOnly"))
+        XCTAssertTrue(VisibilityView.isEditable("hidden"))
+        XCTAssertFalse(VisibilityView.isEditable("details"))
+        XCTAssertFalse(VisibilityView.isEditable(nil), "불러오기 전에는 바꾸지 않는다")
+        XCTAssertEqual(VisibilityView.title("details"), "상세 공개")
+    }
+
     func testUserMessagesDoNotExposeOtherMembers() {
         let e = APIError.server(ServerError(status: 409, code: "party_full", message: "", requestID: nil, currentVersion: nil, retryAfter: nil))
         XCTAssertEqual(UserMessage.of(e), "정원이 찼습니다.")

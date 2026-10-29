@@ -235,16 +235,32 @@ struct VisibilityView: View {
         }
     }
 
+    /// 이 화면에서 바꿀 수 있는 현재 값인가. 다른 기기에서 고른 상세 공개는 이 앱 버전이 다루지 못하므로(제목 업로드는
+    /// V5) 읽기 전용으로 두고 덮어쓰지 않는다.
+    static func isEditable(_ level: String?) -> Bool {
+        guard let level else { return false }
+        return level == "busyOnly" || level == "hidden"
+    }
+
     var body: some View {
         Form {
+            if let level = current?.level, !Self.isEditable(level) {
+                Section {
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text("\(Self.title(level)) (이 앱 버전에서는 변경 불가)")
+                            Text("다른 기기에서 고른 설정입니다. 이 화면에서는 바꾸지 않습니다.").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
             Section {
                 option("busyOnly", "시간만 일정 있음으로 표시합니다.")
                 option("hidden", "일정은 보이지 않지만 모두 가능한 시간과 충돌 검사에는 반영됩니다.")
             } footer: {
                 Text("다른 멤버의 공개 수준은 보이지 않습니다. 상세 공개(제목 공유)는 다음 단계에서 추가됩니다.")
-            }
-            if current?.level == "details" {
-                Section { Text("현재 상세 공개입니다. 이 화면에서는 시간만 공개나 숨김으로 바꿀 수 있습니다.").font(.footnote) }
             }
             if let error { Section { Text(error).font(.footnote).foregroundStyle(.red) } }
         }
@@ -271,7 +287,7 @@ struct VisibilityView: View {
                 if current?.level == level { Image(systemName: "checkmark") }
             }
         }
-        .disabled(busy || current == nil || current?.level == level)
+        .disabled(busy || !Self.isEditable(current?.level) || current?.level == level)
     }
 
     private func load() async {
@@ -280,7 +296,7 @@ struct VisibilityView: View {
 
     /// 오프라인에서 큐에 넣지 않는다(설계 5 §4.2: 서버 적용 여부를 바로 확인한다).
     private func set(_ level: String) async {
-        guard let current else { return }
+        guard let current, Self.isEditable(current.level) else { return }
         busy = true
         defer { busy = false }
         do {
