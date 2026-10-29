@@ -627,7 +627,10 @@ func TestPartySyncIncrementalMatchesBootstrap(t *testing.T) {
 	a := s.newUser(t, "a")
 	b := s.newUser(t, "b")
 	c := s.newUser(t, "c")
-	for _, u := range []user{a, b, c} {
+	// 11~12단계(방장 계정 삭제)의 사용자. 정리(t.Cleanup)가 fixture 기록보다 늦게 돌도록 fixture보다 먼저 만든다.
+	// 정리는 그 사용자가 속했던 Party를 통째로 지운다.
+	dUser, eUser, fUser := s.newUser(t, "d"), s.newUser(t, "e"), s.newUser(t, "f")
+	for _, u := range []user{a, b, c, dUser} {
 		s.seedReadyCalendar(t, u.id)
 	}
 	a1Sess := s.signIn(t, a.subject)
@@ -643,7 +646,7 @@ func TestPartySyncIncrementalMatchesBootstrap(t *testing.T) {
 	b1 := s.newClient(t, "B1", bTok, 0)
 	c1 := s.newClient(t, "C1", cTok, 0)
 	all := []*client{a1, b1, c1}
-	fx := s.fixture(t, "sequential_acceptance", "순차 인수 시나리오: 생성·초대·수락·공개 수준·이름 변경·위임·탈퇴·재가입·강퇴·해산")
+	fx := s.fixture(t, "sequential_acceptance", "순차 인수 시나리오: 생성·초대·수락·공개 수준·이름 변경·위임·탈퇴·재가입·강퇴·해산·방장 계정 삭제(강제 위임·해산)")
 	for _, cl := range []*client{a1, a2, b1, c1} {
 		fx.client(cl)
 	}
@@ -737,6 +740,48 @@ func TestPartySyncIncrementalMatchesBootstrap(t *testing.T) {
 		cl.expect(t, "disband", p, nil)
 	}
 	c1.expect(t, "disband", q, map[string]int{"party": 1, "party_membership": 1, "party_visibility_setting": 1, "party_schedule_projection": 1})
+
+	// 11. 방장 계정 삭제, 승계자 있음(설계 4 §5.8, 계획 P8). D가 만든 R에 A, B 순으로 가입한 뒤 D가 계정을 지운다.
+	// 가장 먼저 가입한 활성 멤버 A가 방장이 되고 남은 멤버는 D의 멤버십·projection tombstone을 받는다.
+	dTok := s.signIn(t, dUser.subject).token
+	r := s.createParty(t, dTok, "R")
+	_, tokR := s.invite(t, dTok, r, `{"max_uses":5}`)
+	s.must(t, http.StatusCreated, http.MethodPost, "/v1/invites/"+tokR+"/accept", aTok, "", "")
+	s.must(t, http.StatusCreated, http.MethodPost, "/v1/invites/"+tokR+"/accept", bTok, "", "")
+	s.converge(t, "join R", all...)
+	a1.expect(t, "join R", r, map[string]int{"party": 1, "party_membership": 3, "party_visibility_setting": 1, "party_schedule_projection": 3})
+	s.requestDeletion(t, dTok)
+	s.runDeletion(t, dUser.id)
+	s.converge(t, "delete owner D", append(all, a2, b2)...)
+	for _, cl := range []*client{a1, b1} {
+		cl.expect(t, "delete owner D", r, map[string]int{"party": 1, "party_membership": 2, "party_visibility_setting": 1, "party_schedule_projection": 2})
+	}
+	aR, _, _, _ := s.membershipOf(t, r, a.id)
+	if got := a1.model[entityKey{"party", r}].payload["owner_membership_id"]; got != aR.String() {
+		t.Fatalf("D 삭제 뒤 R 방장 = %v, want A 멤버십 %s", got, aR)
+	}
+
+	// 12. 방장 계정 삭제, 승계자 없음. E가 만든 S에 F가 가입하고 F가 먼저 삭제를 요청한다(worker 전). E가 계정을 지우면
+	// 활성 승계자가 없어 해산되고, 뒤이은 F의 삭제는 해산으로 끝난 멤버십을 다시 바꾸지 않는다. 남은 활성 멤버가 없으므로
+	// 기존 세션의 모델은 bootstrap과 같은 채로 바뀌지 않는다.
+	eTok, fTok := s.signIn(t, eUser.subject).token, s.signIn(t, fUser.subject).token
+	sp := s.createParty(t, eTok, "S")
+	_, tokS := s.invite(t, eTok, sp, "")
+	s.must(t, http.StatusCreated, http.MethodPost, "/v1/invites/"+tokS+"/accept", fTok, "", "")
+	s.requestDeletion(t, fTok)
+	s.requestDeletion(t, eTok)
+	s.runDeletion(t, eUser.id)
+	s.runDeletion(t, fUser.id)
+	var spStatus string
+	if err := s.pool.QueryRow(context.Background(), `SELECT status FROM parties WHERE id = $1`, sp).Scan(&spStatus); err != nil {
+		t.Fatal(err)
+	}
+	if spStatus != "disbanded" {
+		t.Fatalf("S status = %s, want disbanded", spStatus)
+	}
+	s.assertEnded(t, sp, fUser.id, "removed", "party_disbanded")
+	s.converge(t, "delete owner E", append(all, a2, b2)...)
+	a1.expect(t, "delete owner E", r, map[string]int{"party": 1, "party_membership": 2, "party_visibility_setting": 1, "party_schedule_projection": 2})
 
 	// scope를 실어 발행된 type은 모두 party.ScopedEntityTypes에 있어야 한다. 빠지면 bootstrap 하한이 그 type을
 	// 비-Party로 다뤄 재가입한 entity를 막는다.
