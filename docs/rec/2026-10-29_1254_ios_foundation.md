@@ -7,13 +7,13 @@
 | 영역 | 파일 | 내용 |
 |---|---|---|
 | API 클라이언트 | `src/PlanTogether/Networking/` | URLSession async/await actor. Bearer, GET이 아닌 요청마다 `Idempotency-Key`, `If-Match: "<v>"`, 오류 본문 `{code,message,request_id,current_version}` → `ServerError`, 429·503 `Retry-After`(초·HTTP 날짜). JSON은 모델마다 명시적 `CodingKeys`(snake_case 자동 변환 안 씀). 시각은 RFC 3339(소수 초 0~9자리, 오프셋 허용 — 3자리로 잘라 해석) |
-| refresh | `APIClient.refreshed/performRefresh` | 실패한 access token 기준 single-flight. 401 요청은 refresh 뒤 같은 키·같은 본문 바이트로 한 번만 재시도. refresh 429만 Retry-After 뒤 같은 token으로 재시도(최대 5회, 로그아웃 안 함). 네트워크 오류·5xx는 재전송하지 않는다(서버가 token을 소비했으면 재사용 탐지로 기기가 폐기된다). 세션 종료는 refresh 401·423과 모든 요청의 423뿐. 새 token은 Keychain에 저장한 뒤 넘긴다 |
+| refresh | `APIClient.refreshed/performRefresh` | 실패한 access token 기준 single-flight. 401 요청은 refresh 뒤 같은 키·같은 본문 바이트로 한 번만 재시도. refresh 429만 Retry-After 뒤 같은 token으로 재시도(최대 5회, 로그아웃 안 함). 네트워크 오류·5xx는 그 자리에서 재전송하지 않고 로그아웃하지 않는다. **위험:** 서버가 회전을 커밋했는데 응답을 잃으면 다음 401의 refresh가 같은 token을 보내 재사용 탐지로 기기가 폐기되고 다시 로그인해야 한다. 서버에 유예가 없어 클라이언트만으로는 피할 수 없다. 세션 종료는 refresh 401·423과 모든 요청의 423뿐. 새 token은 메모리에 먼저 반영하고 Keychain 저장이 실패하면 다음 요청 때 다시 저장한다(소비된 refresh token을 다시 보내지 않게). 로그아웃·세션 종료마다 세대를 올려 그 전에 시작한 refresh 결과는 버린다. 세션 종료 handler는 동기로 등록한다 |
 | token | `Auth/TokenStore.swift` | Keychain generic password(`AfterFirstUnlockThisDeviceOnly`)에 user_id·device_id·token 쌍. 서버는 로그인마다 기기를 발급하므로 별도 기기 등록 호출은 없다 |
-| 세션 | `Auth/SessionStore.swift` | `signedOut / signedIn(user)`. 개발용 로그인(`dev:<이름>`), 복원, sync, 로그아웃(서버 `POST /v1/auth/logout` + Keychain·캐시·큐 삭제). 서버가 세션을 끝내면 같은 정리 |
+| 세션 | `Auth/SessionStore.swift` | `signedOut / signedIn(user)`. 개발용 로그인(`dev:<이름>`), 복원, sync, 로그아웃(서버 `POST /v1/auth/logout` + Keychain·캐시·큐 삭제). 서버가 세션을 끝내면 같은 정리. 세션마다 `SessionGate`를 두고 큐·캐시 쓰기를 그 안에서 한다. 로그아웃·세션 종료는 gate를 먼저 닫고(진행 중인 쓰기는 끝날 때까지 기다린다) 파일을 지우므로, 그 뒤 끝나는 flush·sync가 파일을 되살리지 못한다 |
 | 캐시 | `Sync/LocalStore.swift`, `SyncState.swift` | Application Support/PlanTogether/sync-cache.json 한 파일(백업 제외, 파일 보호). cursor·entity·하한을 함께 `.atomic`으로 써서 bootstrap 교체와 페이지 적용이 각각 원자적이다. 다른 user_id 캐시는 읽지 않는다 |
 | 적용기 | `Sync/SyncApplier.swift` | §7 계약 전부(아래). 순수 값 타입이라 fixture로 재생한다 |
 | 엔진 | `Sync/SyncEngine.swift` | cursor 없으면 bootstrap, 있으면 `has_more` false까지 페이지(페이지마다 저장). `410`이고 **code가** `sync_cursor_expired`일 때만 bootstrap으로 교체(같은 410인 `party_disbanded`와 구별). 동시 호출은 한 번을 공유 |
-| 큐 | `Sync/MutationQueue.swift` | 파일 저장. Idempotency-Key와 **본문 바이트**를 저장해 재실행 후에도 그대로 재전송. 2xx 완료, 탈퇴는 410도 완료. 네트워크·5xx·429는 남기고 멈춤(순서 보존), 그 밖 4xx는 failed로 옮김 |
+| 큐 | `Sync/MutationQueue.swift` | 파일 저장. Idempotency-Key와 **본문 바이트**를 저장해 재실행 후에도 그대로 재전송. 파일에 주인 user_id를 두고 다른 사용자(또는 주인 없는) 큐는 버린다. 2xx 완료, 탈퇴는 410 `party_disbanded`(code로 판정)도 완료. 네트워크·5xx·429·401은 남기고 멈춤(순서 보존), 세션이 끝났으면 저장 없이 멈춤, 그 밖 4xx는 failed로 옮김. 저장이 실패하면 멈추고, 한 flush는 시작할 때 있던 개수만큼만 돈다. flush는 single-flight |
 | 화면 | `ServerDebugView.swift` | 개발용 로그인, sync, 캐시 개수, Party 이름, 로그아웃. 디자인 없음 |
 
 ### 적용 규칙 (`SyncApplier`, 기준 구현 `party_sync_test.go`의 `client.apply`)
@@ -49,11 +49,12 @@
 
 ## 테스트
 
-- iOS: `xcodebuild … build test` 47개 실행 — 46개 통과(기존 4개 포함), 1개(실서버 스모크) 건너뜀. iPhone 16(iOS 18.3.1)과 iPhone 15(iOS 17.4)에서 같다. 시뮬레이터 런타임이 18.3.1이라 `OS=18.3` destination은 맞지 않아 기기 id로 지정했다
+- iOS: `xcodebuild … build test` 53개 실행 — 52개 통과(기존 4개 포함), 1개(실서버 스모크) 건너뜀. iPhone 16(iOS 18.3.1)과 iPhone 15(iOS 17.4)에서 같다. 시뮬레이터 런타임이 18.3.1이라 `OS=18.3` destination은 맞지 않아 기기 id로 지정했다
   - API: 인증 헤더·Idempotency-Key·If-Match 따옴표·본문, 오류 해석, 429 Retry-After, 동시 401 다섯 개 → refresh 1회와 각 요청 1회 재시도(같은 키·본문), refresh 429 재시도(로그아웃 없음), refresh 401·423 세션 종료, refresh 네트워크 오류 시 재전송 없음·세션 유지, 개발용 로그인
   - 날짜(소수 0~9자리, 오프셋), JSONValue Bool·숫자 구분, snake_case 키
   - fixture 9개 시나리오(순차 인수 5세션 — limit=2 페이지·늦은 bootstrap 포함, 재현 8개): checkpoint와 최종 모델이 bootstrap과 같음. 대조군 rules·floors·orphans가 해당 fixture에서 달라짐
   - 적용기 단위(하한, 규칙 (a)(b), 캐시 삭제 조건, 기기 폐기, 활동 시간 표시, bootstrap 교체), 파일 저장소 원자 교체, 엔진 페이지·410 재bootstrap·다른 410 구별·다른 사용자 캐시 무시
+  - 세션 경계(리뷰 반영): flush 중 refresh 401로 세션 종료 → 큐·캐시 파일 없음, 로그아웃 중 끝난 flush·sync → 파일 없음·오류 표시 없음, 다른 사용자·주인 없는 큐 폐기, 로그아웃 중 끝난 refresh → Keychain 비어 있음, refresh 뒤 Keychain 저장 실패 → 새 token 사용·refresh 재전송 없음·다음 요청에서 저장, 큐 저장 실패 → 무한 재전송 없음. 각 테스트는 수정 전 동작으로 되돌리면 실패하는 것을 확인했다
   - 큐: 재실행 후 같은 키·본문 재전송, 동시 flush에서 한 번만 전송, 탈퇴 200·410 완료, 거절은 failed, 429에서 순서 보존. 로그아웃이 Keychain·캐시·큐를 지움, Keychain 왕복
 - 실서버 스모크: `run_api_dev.sh`로 띄운 서버에 `TEST_RUNNER_PLAN_LIVE_SERVER_URL=http://localhost:8080`으로 실행해 통과(로그인 → `/v1/me` → bootstrap → 증분 → Party 생성 → 증분에 Party·멤버십 도착 → 로그아웃, 서버 로그 전부 2xx). 앱 프로세스에서 http://localhost가 ATS에 막히지 않음을 함께 확인했다
 - 서버: gofmt·vet 통과, `REQUIRE_DB_TESTS=1 go test -count=1 ./...` 596개 통과, skip 0
