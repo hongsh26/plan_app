@@ -581,6 +581,7 @@ func lockUserForPartyCreate(ctx context.Context, tx pgx.Tx, userID uuid.UUID) er
 	if err := tx.QueryRow(ctx, `SELECT status FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID).Scan(&status); err != nil {
 		return err
 	}
+	// mutation.Run이 이미 같은 확인을 했다. 잠금을 올린 뒤의 방어용으로 남긴다.
 	if status != "active" {
 		return auth.ErrAccountLocked
 	}

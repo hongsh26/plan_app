@@ -344,9 +344,13 @@ func (s *DeletionService) finish(ctx context.Context, userID uuid.UUID) error {
 			return err
 		}
 		mtx := mutation.NewTx(tx)
-		// 익명화한 이름을 같은 Party 멤버에게 보낸다(party_membership 투영이 display_name을 싣는다). 멤버십은
-		// markDeleting에서 이미 끝났으므로 보통 대상이 없다. 잠금은 users → devices → sessions 뒤 parties FOR SHARE →
-		// 멤버십이다.
+		// markDeleting이 이미 멤버십을 정리했지만 한 번 더 부른다. 활성 멤버십이 남지 않음을 이 트랜잭션에서 보장해야
+		// 아래 캘린더 삭제가 다른 멤버의 projection을 남기지 않는다. 보통 할 일이 없다. 잠금은 users → devices → sessions
+		// 뒤 parties → 멤버십이다.
+		if err := party.EndMembershipsForDeletedUser(ctx, mtx, userID, time.Now()); err != nil {
+			return err
+		}
+		// 익명화한 이름을 남은 활성 멤버십의 Party 멤버에게 보낸다(위 정리 뒤라 보통 대상이 없다).
 		if err := party.PropagateDisplayName(ctx, mtx, userID); err != nil {
 			return err
 		}
@@ -355,18 +359,12 @@ func (s *DeletionService) finish(ctx context.Context, userID uuid.UUID) error {
 }
 
 // deletePersonalData는 §10 4단계의 캘린더 데이터와 설계 6의 활동 시간을 지운다. users row를 물리 삭제하지 않으므로
-// FK cascade에 맡길 수 없다.
+// FK cascade에 맡길 수 없다. 호출자는 활성 멤버십이 없음을 보장한다. 그러면 이 사용자의 projection도 없어 다시 맞출
+// 것이 없다(멤버십 종료가 projection을 지운다).
 //   - calendar_connections를 지우면 source 선택, snapshot session(page·staging 포함), busy facts가 cascade로 지워진다.
-//   - 연결이 없어진 뒤 projection을 다시 맞춘다. 멤버십이 모두 끝나 보통 지울 것이 없지만, 남은 활성 멤버십이
-//     있다면 같은 Party 멤버에게 tombstone이 간다(연결 해제와 같은 경로).
 //   - availability_preferences를 지우면 요일별 구간이 cascade로 지워진다.
-//
-// 잠금: 사용자의 활성 Party(FOR SHARE, PropagateDisplayName이 이미 잡았다) 뒤 connection이다(migration 00012).
 func deletePersonalData(ctx context.Context, tx *mutation.Tx, userID uuid.UUID) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM calendar_connections WHERE user_id = $1`, userID); err != nil {
-		return err
-	}
-	if err := party.RebuildBusyProjections(ctx, tx, userID, nil, false); err != nil {
 		return err
 	}
 	_, err := tx.Exec(ctx, `DELETE FROM availability_preferences WHERE user_id = $1`, userID)

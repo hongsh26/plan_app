@@ -19,8 +19,8 @@
 - **T4 코어 분리:** `transferOwner` handler의 본문을 `transferOwnerTx(…, jobType, now)`로 옮겼다. handler 동작은 그대로다.
 - **개인 데이터 삭제 (§10 4단계, §5.8 4):** `finish` 트랜잭션의 `deletePersonalData`가 지운다.
   - `calendar_connections`를 지운다. source 선택, snapshot session(page·staging), busy facts는 FK cascade로 함께 지워진다.
-  - 그다음 `party.RebuildBusyProjections`로 projection을 다시 맞춘다(연결 해제와 같은 경로). 멤버십이 이미 끝나 보통 지울 것이
-    없지만, 남은 활성 멤버십이 있으면 같은 Party 멤버에게 tombstone이 간다.
+  - 그 전에 같은 트랜잭션에서 `EndMembershipsForDeletedUser`를 한 번 더 부른다(보통 할 일이 없다). 활성 멤버십이 없으므로 이 사용자의
+    projection도 없다. 따라서 connection을 지운 뒤 projection을 다시 맞출 필요가 없고, migration 00012의 "connection 마지막" 잠금 순서와도 어긋나지 않는다.
   - `availability_preferences`를 지운다. 요일별 구간은 cascade로 지워진다.
   - `users` row는 물리 삭제하지 않으므로 FK cascade에 맡길 수 없었다(rec `2026-10-28_1404`의 P8 차단 항목).
 - **삭제 뒤 쓰기 경합 차단:** `Authenticate`는 트랜잭션 밖에서 계정 상태를 본다. 그래서 삭제 요청 직전에 인증을 통과한 요청이
@@ -59,6 +59,11 @@
 - **기존 테스트 변경:** `TestAccountDeletionAnonymizesNameForCoMembers`를 지웠다. 삭제된 사용자의 멤버십이 이제 tombstone되므로
   같은 Party 멤버의 모델에 이름이 남지 않는다. 이 동작은 새 테스트 `TestAccountDeletionEndsMemberMembershipAndPersonalData`가 본다.
   동작이 바뀌었기 때문이지, 테스트를 맞추려고 고친 것이 아니다.
+- 삭제 worker는 시각을 `time.Now()`로 쓴다. `DeletionService`에는 clock 주입이 없다(기존과 같다).
+- 삭제된 사용자의 `idempotency_keys`(30일 TTL)와 그 사용자에게 가는 `sync_changes`는 prune 전까지 남는다. 이름이나 본문은 없다.
+  §10 단계에서 즉시 지울지는 설계 결정으로 남긴다.
+- 방장 삭제는 `notify_owner_transferred_by_deletion`과 `notify_member_left`를 둘 다 enqueue한다. 설계 9에서 묶을지 정한다.
+- worker 삭제와 같은 Party 멤버 mutation이 겹치는 동시성 테스트는 없다. 잠금 순서 분석(users → parties → 멤버십)과 리뷰로 확인했다.
 - `notification_ref_keys`(사용자별 알림 참조 키)는 §10 목록에 없어 이번에 지우지 않았다. 알림 구현(설계 9) 때 삭제 단계에 넣을지 정한다.
 
 ## 테스트
@@ -71,14 +76,17 @@
   Party는 active이고 활성 방장은 1명이다(P8 완료 기준). 초대는 무효화되고 by_deletion 알림이 1건이다. 이어 E의 삭제가 돌아도 방장은 1명이다.
 - `TestAccountDeletionDisbandsWhenNoActiveSuccessor`: 남은 멤버가 삭제 요청 중인 Party와 단독 방장 Party가 해산된다. 뒤이은 멤버
   삭제는 `removed`/`party_disbanded`를 바꾸지 않는다.
-- `TestRequestAuthenticatedBeforeDeletionCannotWriteAfterIt`(availability·calendar·party): 기기 잠금으로 요청을 idempotency INSERT에서
-  멈춘 뒤 계정 상태를 바꾼다. 요청은 423이고 아무것도 쓰지 않으며 재시도도 0이다. 상태 확인을 끄면 availability와 calendar가
-  200으로 쓴다는 것을 확인했다.
+- `TestRequestAuthenticatedBeforeDeletionCannotWriteAfterIt`(availability·calendar·visibility): 기기 잠금으로 요청을 idempotency INSERT에서
+  멈춘 뒤 계정 상태를 바꾼다. 요청은 423이고 아무것도 쓰지 않으며 재시도도 0이다. 세 경로 모두 도메인 코드가 계정 상태를 보지 않으므로,
+  상태 확인을 끄면 200으로 쓴다(availability·calendar는 실제로 확인했다).
+- `internal/party/user_lock_test.go` `TestSameUserConcurrentCreatesDoNotRetry`: 같은 사용자가 두 기기에서 Party를 동시에 만들어도 재시도가 0이다.
+  `runLockingUser`를 `run`으로 바꾸면 실패한다. 계정 mutation 쪽은 기존 `TestConcurrentMutationsDoNotDeadlock`이 같은 역할을 한다
+  (`LockUserForUpdate`를 끄면 실패하는 것을 확인했다).
 - `internal/calendar/deletion_race_test.go` `TestSnapshotPageWaitingOnDeletionRequestIsRejected`: 삭제 요청 트랜잭션이 users row를 쥔
   동안 page 요청이 그 잠금에서 기다리게 한다. 커밋 뒤 423이고 staging 0행이다. 확인을 끄면 200이다.
 - `TestPartySyncIncrementalMatchesBootstrap`에 11단계(방장 D 삭제 → A 강제 위임, 모든 세션 증분 == bootstrap)와 12단계(승계자 없는
   방장 E 삭제 → 해산, 기존 세션 불변)를 더했다. Swift fixture `sync_sequential_acceptance.json`을 다시 기록했다(다른 fixture는 그대로).
-- 게이트: gofmt·vet, `migrate reset → up`, `go test -count=1 ./...` 605 pass, skip 0. iOS `xcodegen` + `xcodebuild build test` 성공.
+- 게이트: gofmt·vet, `migrate reset → up`, `go test -count=1 ./...` 606 pass, skip 0. iOS `xcodegen` + `xcodebuild build test` 성공.
   - `migrate reset` 직후 첫 실행에서 `ratelimit` `TestExceededIsReportedOnceAndCacheDoesNotHideIt`가 한 번 실패했다("요청 제한을
     확인할 수 없다"). 단독으로 3회, 전체로 다시 돌리면 통과했다. 이번 변경과 무관한 간헐 실패로 보인다.
 

@@ -250,7 +250,8 @@ func TestRequestAuthenticatedBeforeDeletionCannotWriteAfterIt(t *testing.T) {
 	}{
 		{"availability", http.MethodPut, "/v1/availability/preferences/me", prefBody, "availability_preferences"},
 		{"calendar", http.MethodPut, "/v1/calendar/connection", `{"status":"selecting","time_zone":"Asia/Seoul"}`, "calendar_connections"},
-		{"party", http.MethodPost, "/v1/parties", `{"name":"R"}`, "party_memberships"},
+		// 공개 수준 변경은 도메인 코드가 계정 상태를 보지 않는다. 경로의 {party}는 미리 만든 Party로 바꾼다.
+		{"visibility", http.MethodPatch, "/v1/parties/{party}/visibility/me", `{"visibility_level":"hidden","share_location":false}`, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -258,9 +259,16 @@ func TestRequestAuthenticatedBeforeDeletionCannotWriteAfterIt(t *testing.T) {
 			retriesBefore := mutation.Retries()
 			u := s.newUser(t, "p8r."+tc.name)
 			tok, deviceID := s.signInDevice(t, u.subject)
+			path, ifMatch := tc.path, ""
+			var partyID uuid.UUID
+			if tc.name == "visibility" {
+				partyID = s.createParty(t, tok, "V")
+				path = "/v1/parties/" + partyID.String() + "/visibility/me"
+				ifMatch = s.visibilityETag(t, tok, partyID)
+			}
 
 			b := s.blockDevice(t, deviceID)
-			done := s.async(t, tc.method, tc.path, tok, "", tc.body)
+			done := s.async(t, tc.method, path, tok, ifMatch, tc.body)
 			b.waitBlocked(t)
 			if _, err := s.pool.Exec(context.Background(), `
 				UPDATE users SET status = 'deletion_requested', deletion_requested_at = now(), version = version + 1
@@ -272,8 +280,12 @@ func TestRequestAuthenticatedBeforeDeletionCannotWriteAfterIt(t *testing.T) {
 			if rec.Code != http.StatusLocked {
 				t.Fatalf("삭제 뒤 커밋하려던 요청 = %d, want 423: %s", rec.Code, rec.Body.String())
 			}
-			if n := s.count(t, `SELECT count(*) FROM `+tc.table+` WHERE user_id = $1`, u.id); n != 0 {
-				t.Fatalf("%s에 %d행이 쓰였다", tc.table, n)
+			if tc.table != "" {
+				if n := s.count(t, `SELECT count(*) FROM `+tc.table+` WHERE user_id = $1`, u.id); n != 0 {
+					t.Fatalf("%s에 %d행이 쓰였다", tc.table, n)
+				}
+			} else if n := s.count(t, `SELECT count(*) FROM party_visibility_settings WHERE party_id = $1 AND visibility_level = 'hidden'`, partyID); n != 0 {
+				t.Fatalf("공개 수준이 바뀌었다")
 			}
 			if d := mutation.Retries() - retriesBefore; d != 0 {
 				t.Fatalf("mutation 재시도 %d회", d)
