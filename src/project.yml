@@ -17,6 +17,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.PlanTogether
         MARKETING_VERSION: 1.0
         CURRENT_PROJECT_VERSION: 1
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: YES
         # 생성 Info.plist에 PlanTogether/Info.plist(ATS 로컬 예외, 캘린더 사용 설명)를 합친다.
         # INFOPLIST_FILE을 쓰자 INFOPLIST_KEY_NSCalendarsFullAccessUsageDescription 빌드 설정 값이 산출 plist에 보이지
