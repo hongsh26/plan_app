@@ -4,6 +4,7 @@ import SwiftUI
 struct PlanTogetherApp: App {
     @StateObject private var store = AppStore.demo
     @StateObject private var session = SessionStore.live()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -11,6 +12,9 @@ struct PlanTogetherApp: App {
                 .environmentObject(store)
                 .environmentObject(session)
                 .task { await session.restore() }
+                .onChange(of: scenePhase) { _, phase in
+                    if phase == .active { Task { await session.appBecameActive() } }
+                }
         }
     }
 }

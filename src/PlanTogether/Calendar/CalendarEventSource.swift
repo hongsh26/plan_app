@@ -107,7 +107,8 @@ final class EventKitEventSource: CalendarEventSource, @unchecked Sendable {
         add("시연: 주간 수업", at(2, 14), at(2, 15), weekly: true)
         add("시연: 하루 종일", at(3, 0), at(3, 0).addingTimeInterval(86_399), allDay: true)
         add("시연: 미정 약속", at(4, 19), at(4, 20), availability: .tentative)
-        add("시연: 한가함 표시(제외됨)", at(1, 15), at(1, 16), availability: .free)
+        // 로컬 캘린더는 availability를 지원하지 않아 free·tentative도 Busy로 읽힌다(iCloud·Exchange는 구별한다).
+        add("시연: 한가함 표시(지원 캘린더에서만 제외)", at(1, 15), at(1, 16), availability: .free)
         try store.commit()
     }
 

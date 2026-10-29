@@ -122,7 +122,8 @@ final class SessionStoreTests: XCTestCase {
         let syncStore = InMemorySyncStore()
         let queueStore = InMemoryMutationQueueStore()
         let api = APIClient(baseURL: URL(string: "http://localhost:8080")!, session: MockURLProtocol.makeSession(), tokenStore: tokens, sleep: { _ in })
-        let session = SessionStore(api: api, syncStore: syncStore, queueStore: queueStore)
+        let calendarStore = InMemoryCalendarStateStore(CalendarLocalState(userID: "11111111-1111-1111-1111-111111111111", secret: Data(count: 32), selectedCalendarIDs: ["c"]))
+        let session = SessionStore(api: api, syncStore: syncStore, queueStore: queueStore, calendarSource: FakeEventSource(), calendarStore: calendarStore)
 
         await session.devLogin(name: "alice", displayName: "앨리스")
         XCTAssertNil(session.lastError)
@@ -137,6 +138,7 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertNil(try tokens.load())
         XCTAssertNil(try syncStore.load())
         XCTAssertNil(try queueStore.load())
+        XCTAssertNil(try calendarStore.load(), "캘린더 선택·비밀 키도 지운다")
         XCTAssertTrue(MockURLProtocol.requests.contains { $0.request.url!.path == "/v1/auth/logout" })
     }
 
