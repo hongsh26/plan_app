@@ -23,7 +23,7 @@
 ### 구현 환경
 
 - 서버: Go(로컬 설치 완료) + PostgreSQL(Docker Compose). 저장소 구조는 `account_backend_design.md` §13.
-- iOS: `src/`에 XcodeGen + SwiftUI 앱 골격. Xcode 16.2에서 빌드 성공을 확인했다.
+- iOS: `src/`에 XcodeGen + SwiftUI. 서버 연동(API·sync·캘린더·화면)까지 됐다. `.xcodeproj`는 생성물이다.
 
 ### 병합 완료된 서버 기반 (요약, 상세는 `docs/rec/`)
 
@@ -58,7 +58,7 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 - **새 소비자는 `Require` 다음, 모든 입력 검증·조회·`mutation.Prepare` 앞에서 `ratelimit.Enforce`를 호출한다.** 트랜잭션 안에서 세면 롤백과 함께 카운트가 사라진다. 한도는 `internal/platform/ratelimit/limits.go` 한 곳
 - **배포 전:** `CLIENT_IP_SOURCE`(비로컬 필수)·`TRUSTED_PROXY_HOPS`·`RATE_LIMIT_KEY`를 설정하고 실제 헤더로 hops를 검증한다. `client_ip_fallback`·`limiter_error` 로그를 경보에 건다
 - **iOS 계약:** refresh 429는 세션 상실이 아니다. `Retry-After` 뒤 재시도하며 로그아웃하지 않는다
-- **남은 것:** AASA 호스팅과 웹 폴백(`invite.web` 제한 포함), `notify_member_joined`·`notify_owner_transferred`·`notify_member_left`·`notify_member_removed`·`notify_party_disbanded` worker kind(job은 pending으로 쌓인다), 공개 수준·검색·제안의 요청 제한 소비자, 초대·Party endpoint의 OpenAPI 등재
+- **남은 것:** AASA 호스팅과 웹 폴백(`invite.web` 제한 포함), `notify_*` worker kind 5종(job은 pending으로 쌓인다), 공개 수준·제안의 요청 제한 소비자
 
 ### P0에서 남은 것
 
@@ -70,30 +70,26 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 | L-3 | goose `StatementBegin/End`가 308줄 마이그레이션 전체를 한 문장으로 감싼다 | 진단 비용 |
 | L-5 | `Pinger` interface가 소비자(`httpapi`)가 아니라 제공자(`postgres`)에 있다 | 기능 영향 없음. P1 새 코드는 소비자 쪽에 뒀다 |
 
-- **`main`은 보호 브랜치다.** 저장소를 public으로 바꾼 뒤 required check `test`(GitHub Actions 고정), 관리자 포함 적용, force push 금지를 걸었다. `main`에 직접 커밋해 push할 수 없다. 문서 변경도 `feature/**` 브랜치에서 CI를 통과시킨 뒤 fast-forward한다(`docs/rec/2026-09-21_1558_ci_paths_filter_removal.md`)
-
-### 최근 결정
-
-- 설계 2 §7.1의 sync 변경 피드 순서 키를 `BIGSERIAL`에서 `(txid, ordinal)` + settled horizon 읽기로 개정했다. `BIGSERIAL`은 번호 순서와 커밋 순서를 일치시키지 않아 먼저 번호를 받고 나중에 커밋한 트랜잭션의 변경이 영구 유실됐다. 클라이언트 cursor도 opaque 문자열로 바꿨다. 상세와 탈락한 대안은 `docs/rec/2026-09-18_1719_sync_cursor_ordering_amendment.md`에 있다.
-- 같은 검토에서 설계 9가 요구한 개정 3건 중 2건(§7.2 `notification_ref_key`, §7.3 App Group 공유 컨테이너)이 §17 목록에만 있고 본문에 반영되지 않은 것을 발견해 함께 적용했다.
-- §10 7단계에 `auth_identities` row 물리 삭제를 명시했다. 삭제된 사용자가 identity를 보유하면 같은 Apple 계정의 재가입이 영구히 막혀 §10 7단계 자신과 충돌했다. 근거와 탈락한 대안(`detached_at` + partial unique)은 `docs/rec/2026-09-18_1756_apple_subject_resignup_fix.md`에 있다.
-
 ## 다음 작업
 
-**중간 이정표: 핵심 가치(공통 가능 시간 찾기) 시연. 최종 Goal은 Launch MVP다(`docs/project_goal.md`).** 시연에 필요 없는 P6~P8·제안·캘린더 쓰기·알림은 뒤로 미루되, P8(계정 삭제 연동)은 출시 전 필수다.
+**중간 이정표(시연) 달성:** 두 시뮬레이터로 개발용 로그인 → Party 생성·초대(코드 붙여넣기) → 캘린더 업로드 → 활동 시간 → 공통 가능 시간 검색까지 된다. 절차는 `server/scripts/demo_ios_two_sims.sh`와 rec `2026-10-29_1421_ios_screens.md`. iOS 연동 rec: `_1254_ios_foundation`·`_1332_ios_calendar_upload`·`_1421_ios_screens`.
 
-1. ✅ 개발용 로그인(`DEV_LOGIN_ENABLED=true`, 로컬 전용)과 `server/scripts/`(`run_api_dev.sh`, `demo_api.sh`)
-2. ✅ 캘린더 동기화 서버(설계 3): 연결·snapshot·Busy facts·busy projection·freshness(재검증 High 1·Med 4 반영, 후속 Low는 rec 참고). `docs/rec/2026-09-30_1749_calendar_sync_server.md`
-3. **공개 수준**(설계 5, `.omc/plans/party-visibility-implementation.md`): 서버 쪽 V1~V3 완료(탈퇴·강퇴·해산 cleanup 포함, `docs/rec/2026-10-14_2322_membership_end_cleanup.md`). 남은 것은 iOS(V3 캐시 삭제·scope 교체, V5 설정 화면)와 V6 privacy 스캔. **iOS 계약:** version 없는 tombstone은 version 하한을 남기지 않고, 탈퇴 큐는 200·410을 모두 완료로 처리한다. 서버 작업은 `main`에 병합됐다(`aed8b93`)
-4. **가능 시간 검색**(설계 6): 서버 A1~A4 완료(활동 시간 API, 계산 엔진, snapshot·freshness, 검색 API·캐시). rec `2026-10-28_1401`·`_1404`·`_1431`. 캘린더 `active_generation_usable` 플래그로 철회·source 변경 전 데이터가 검색·projection에 되살아나지 않는다. **남은 것:** A0 Swift 계약 테스트·A5 iOS(약식 시간대 표시 필수, tz가 Area/City가 아니면 도시 선택), A6 privacy 스캔·E2E, 설계 7에서 `VerifyCalculationVersionTx` 호출. **P8 차단:** 계정 삭제 시 활동 시간·캘린더 데이터도 지워야 한다
-5. **P6-lite 서버 완료:** `GET /v1/parties`, Party 범위 sync 전파 감사·보강, 표시 이름 전파, 증분 == bootstrap 인수 테스트. rec `2026-10-28_1613_party_sync_propagation.md`. **iOS sync 계약(§7 개정):** `scope_membership_id`로 (a) 끝난 본인 멤버십 scope의 upsert는 버리고 (b) version 없는 tombstone은 다른 scope의 본인 활성 멤버십이 있으면 무시한다. bootstrap의 하한 전용 tombstone도 적용한다. 테스트의 `client.apply`가 기준 구현이다. 새 Party 범위 type(proposal 등)은 `ScopedEntityTypes`와 인수 시나리오 발행에 함께 추가한다
-6. **다음: iOS 연동.** API 클라이언트·sync 적용기·로그인·Party·초대·캘린더·활동 시간·가능 시간 화면. 디자인은 `docs/design_references.md`
+체크리스트 현황(정직하게): 2~6번은 서버·iOS 기본 흐름이 있으나 미완. 1번은 개발용 로그인뿐이라 미체크.
+- **1 로그인:** Sign in with Apple(iOS·실제 자격). refresh 응답 유실 시 기기 폐기 위험 → 서버 30초 재사용 유예(a안, rec `_1254` 참고) 구현
+- **2 동기화:** 기본 완료. 남은 것은 큐 자동 flush·의존 version 재검증
+- **3 캘린더:** EKEventStoreChanged debounce·백그라운드 갱신, 연결 해제 화면, 반복 거부 backoff
+- **4 Party:** AASA·Universal Link(지금은 임시 코드 붙여넣기), P9 남은 화면, P10 인수 자동화, 초대 만료 job
+- **5 공개 수준:** V4, V5 details(제목·장소 업로드, 지금은 시간만·숨김만), V6 privacy 스캔
+- **6 검색:** A6 privacy 스캔·E2E. 요일 경계 클라이언트 검증
+- **7~10:** 설계 7 제안(`VerifyCalculationVersionTx` 연결, 새 Party type은 `ScopedEntityTypes`와 인수 시나리오에 추가), 8 캘린더 쓰기, 9 알림, 10 P8 계정 삭제(활동 시간·캘린더 데이터 삭제 포함, 출시 전 필수)
+- **11~15:** KMS, 스테이징 배포, OpenAPI 자동 대조, 실기기 E2E, TestFlight
+
+다음 순서 제안: 7(제안·확정) → 10(P8) → 1(Apple 로그인) → 8·9 → 출시 조건.
 
 ## 유의 사항
 
-- 원본 MVP의 Google 연동과 결제는 장기 백로그로 보존하되 첫 출시 범위에서 제외한다.
-- 화면 설계 때 참고할 외부 디자인 레퍼런스는 `docs/design_references.md`에 모은다(사용자가 추가로 제공할 예정).
-- 기존 Swift 코드는 각 단계에서 계속 빌드·실행 가능해야 한다.
-- **현재 Swift 코드는 설계 1~9와 상당히 어긋나 있다.** 알림은 iOS·서버 양쪽에 전혀 없고 Notification Service Extension target도 없다. `CalendarService`에 destination calendar 선택·writer device·외부 쓰기 명령이 없다. hidden이 계산 입력에서도 제거되고, 활동 시간·시간대·검색 조건 모델이 없으며, Party가 모든 멤버의 공개 설정을 보유하고 proposal이 단순 응답 map의 `isConfirmed` 계산만 쓴다. 전체 차이는 각 설계의 "현재 구현 차이" 절에 있다.
-- 현재 앱 데이터는 메모리에만 있어 재실행 시 초기화된다.
+- **sync 계약(§7 개정):** `scope_membership_id` 규칙 (a)(b)와 bootstrap 하한. 서버 `client.apply`와 iOS 적용기가 fixture(`src/PlanTogetherTests/Fixtures`)로 묶여 있다. 서버 sync를 바꾸면 `DUMP_SWIFT_FIXTURES`로 다시 기록한다
+- **iOS 빌드 게이트:** CI는 iOS를 빌드하지 않는다. `cd src && xcodegen generate && xcodebuild ... build test`가 유일한 게이트다(시뮬레이터 id는 rec `_1254`)
+- **테스트 DB:** sync cursor를 읽는 테스트는 `pgtest.HoldSyncReader`를 부른다. 잠금은 pool 밖 전용 연결이다(CI pool 4개)
+- 원본 MVP의 Google 연동과 결제는 장기 백로그(첫 출시 제외). 디자인 레퍼런스는 `docs/design_references.md`(Hangly 미분석, 화면은 기능 우선 표준 SwiftUI)
 - 구체 Go 라이브러리와 버전(pgx major, 마이그레이션 러너)은 설계 2 §3.2에 따라 착수 시점에 공식 지원 상태를 확인해 잠근다. 기억으로 고정하지 않는다.
