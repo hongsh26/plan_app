@@ -41,13 +41,9 @@
 - 로그인·refresh와 계정 상태 변경의 동시성 테스트(`FOR SHARE OF u` 회귀 감지)
 - Apple 서버 오류(`invalid_client` 등)가 HTTP 500과 `apple_error` 로그 필드로 나가는지 보는 HTTP 계층 테스트
 
-### 계정 삭제와 Party의 공백 (지금 살아 있는 결함)
+### 계정 삭제 연동(P8) 완료
 
-migration 00010으로 Party 테이블이 생겼지만 삭제 worker(`internal/account/deletion.go`)는 아직 sessions·devices·auth_identities·audit_events·users만 건드린다. 그래서 **활성 멤버십을 가진 사용자가 `status='deleted'`까지 가면서 Party의 활성 멤버로, 경우에 따라 활성 방장으로 남는다.**
-
-DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합성만 보고 `users.status`를 보지 않으며, 삭제 파이프라인은 `users` row를 물리 삭제하지 않아 FK RESTRICT도 걸리지 않는다. 현재 테스트가 통과하는 이유는 계정 삭제 테스트에 Party row가 없기 때문이지 이 경로가 안전해서가 아니다.
-
-설계 §5.8과 계획 P8(강제 위임·해산)이 이 공백의 주인이다. P5(탈퇴·강퇴·해산)는 구현됐고 P8은 그 코어 `endMembershipTx`·`disbandPartyTx`(`internal/party/membership_end.go`)를 `account_deleted`로 재사용하면 된다. 승계자 결정 규칙은 계획 P8에 있다.
+삭제 worker가 Party 멤버십을 정리한다(승계자 강제 위임 → 없으면 해산 → 그 밖에는 account_deleted 종료). 활동 시간·캘린더 데이터도 지운다. **삭제 뒤 쓰기 경합은 `mutation.Run`이 users row를 잠가 active가 아니면 423으로 막는다.** users를 NKU로 잡는 mutation은 `LockUserForUpdate`, `mutation.Run` 밖 쓰기는 `mutation.LockActiveUser`를 쓴다. rec `2026-10-29_1630_account_deletion_p8.md`. 남은 것: 제안·캘린더 쓰기 정리(7·8), by_deletion 알림 worker(9).
 
 ### Party P1~P5, 요청 제한 완료
 
@@ -81,10 +77,10 @@ DB는 이것을 막지 못한다. 지연 트리거 3종은 Party 안의 정합�
 - **4 Party:** AASA·Universal Link(지금은 임시 코드 붙여넣기), P9 남은 화면, P10 인수 자동화, 초대 만료 job
 - **5 공개 수준:** V4, V5 details(제목·장소 업로드, 지금은 시간만·숨김만), V6 privacy 스캔
 - **6 검색:** A6 privacy 스캔·E2E. 요일 경계 클라이언트 검증
-- **7~10:** 설계 7 제안(`VerifyCalculationVersionTx` 연결, 새 Party type은 `ScopedEntityTypes`와 인수 시나리오에 추가), 8 캘린더 쓰기, 9 알림, 10 P8 계정 삭제(활동 시간·캘린더 데이터 삭제 포함, 출시 전 필수)
+- **7~10:** 설계 7 제안(`VerifyCalculationVersionTx` 연결, 새 Party type은 `ScopedEntityTypes`와 인수 시나리오에 추가), 8 캘린더 쓰기, 9 알림, 10 P8 서버 완료(제안·캘린더 쓰기 정리는 7·8에서)
 - **11~15:** KMS, 스테이징 배포, OpenAPI 자동 대조, 실기기 E2E, TestFlight
 
-다음 순서 제안: 7(제안·확정) → 10(P8) → 1(Apple 로그인) → 8·9 → 출시 조건.
+진행 중: 7(제안·확정), 1(이메일+비밀번호+인증 로그인 — 사용자 결정으로 Apple 로그인 대체), 디자인 1단계(문서). 다음: 디자인 2단계(코드 반영) → 8·9 → 출시 조건.
 
 ## 유의 사항
 
