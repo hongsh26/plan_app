@@ -92,6 +92,8 @@ struct CalendarStatus: Equatable, Sendable {
         case needsSelection
         /// 최근에 올렸다(앱 활성화 연속 호출 억제).
         case throttled
+        /// 서버가 일정 시간대 이름을 받지 않아 모든 시간대를 UTC로 바꿔 올렸다.
+        case timeZoneFallback
     }
 
     var authorization: CalendarAuthorization
@@ -153,8 +155,13 @@ actor CalendarSync {
     var minForegroundInterval: TimeInterval = 60
     var uploaderSleep: CalendarUploader.Sleeper = { try await Task.sleep(nanoseconds: UInt64(max(0, $0) * 1_000_000_000)) }
 
+    /// 이 세션이 아직 살아 있는지(SessionGate). 로그아웃 뒤 같은 APIClient의 새 token으로 옛 세션의 요청이 나가지 않게
+    /// 모든 요청 전에 본다.
+    private let isActive: @Sendable () -> Bool
+
     init(api: APIClient, source: CalendarEventSource, store: CalendarStateStore, userID: String, deviceID: String,
-         now: @escaping @Sendable () -> Date = { Date() }, timeZone: @escaping @Sendable () -> TimeZone = { TimeZone.current }) {
+         now: @escaping @Sendable () -> Date = { Date() }, timeZone: @escaping @Sendable () -> TimeZone = { TimeZone.current },
+         isActive: @escaping @Sendable () -> Bool = { true }) {
         self.api = api
         self.source = source
         self.store = store
@@ -162,6 +169,7 @@ actor CalendarSync {
         self.deviceID = deviceID
         self.now = now
         self.timeZone = timeZone
+        self.isActive = isActive
         let saved = (try? store.load()).flatMap { $0 }
         local = saved?.userID == userID ? saved! : CalendarLocalState(userID: userID, secret: CalendarKeyer.newSecret())
     }
@@ -171,12 +179,14 @@ actor CalendarSync {
     func setForegroundInterval(_ v: TimeInterval) { minForegroundInterval = v }
     func setUploaderSleep(_ s: @escaping CalendarUploader.Sleeper) { uploaderSleep = s }
 
-    /// 사용자가 연결을 눌렀다. 권한을 아직 묻지 않았으면 먼저 permission_required를 기록하고 OS 권한을 요청한다.
+    /// 사용자가 이 기기에서 연결을 눌렀다. 권한을 아직 묻지 않았으면 permission_required를 기록하고 OS 권한을 요청한다.
+    /// 이 기기가 sync 기기를 맡는다(다른 기기가 맡고 있어도 가져온다).
     func connect() async throws -> CalendarStatus {
         if source.authorization() == .notDetermined {
-            var conn = try await fetchConnection()
-            if conn.storedStatus == "disconnected" || conn.version == 0 {
-                conn = try await put(conn, PutConnectionBody(status: "permission_required", timeZone: currentTZ()))
+            try checkActive()
+            let conn = try await fetchConnection()
+            if conn.storedStatus == "disconnected" {
+                _ = try? await put(conn, PutConnectionBody(status: "permission_required", timeZone: currentTZ()))
             }
             _ = try? await source.requestFullAccess()
         }
@@ -191,26 +201,73 @@ actor CalendarSync {
         return try await refresh(.selectionChanged)
     }
 
+    /// 한 번에 하나만 돈다. 앱 활성화는 진행 중인 실행 결과를 함께 쓴다. 연결·선택 변경·수동 새로고침은 진행 중인
+    /// 실행이 끝나기를 기다린 뒤 새로 돈다(그 실행은 이 의도를 모른다).
     func refresh(_ trigger: Trigger) async throws -> CalendarStatus {
-        if let running { return try await running.value }
-        let task = Task { try await self.run(trigger) }
+        if trigger == .foreground, let current = running { return try await current.value }
+        // 새 실행은 앞 실행이 끝난 뒤에 돈다(사슬). 앞 실행의 결과·오류는 이 실행과 무관하다.
+        let previous = running
+        let task = Task { () async throws -> CalendarStatus in
+            if let previous { _ = try? await previous.value }
+            return try await self.run(trigger)
+        }
         running = task
-        defer { running = nil }
+        defer { if running == task { running = nil } }
         return try await task.value
     }
 
     // MARK: 흐름
 
+    /// 연결 PUT이 409(version_conflict)면 그사이 다른 기기가 연결을 바꾼 것이다. 같은 본문을 새 version으로 다시 보내면
+    /// 낡은 판단으로 덮어쓰므로, 최신 연결을 다시 읽고 처음부터 한 번 더 판단한다.
     private func run(_ trigger: Trigger) async throws -> CalendarStatus {
+        do {
+            return try await decide(trigger)
+        } catch CalendarSyncError.connectionChanged {
+            return try await decide(trigger)
+        }
+    }
+
+    private func decide(_ trigger: Trigger) async throws -> CalendarStatus {
+        try checkActive()
         var conn = try await fetchConnection()
         let auth = source.authorization()
         var status = CalendarStatus(authorization: auth, connection: conn)
         let stored = conn.storedStatus
-        let exists = conn.version > 0
+        let explicit = trigger == .connect
+        // 연결이 없거나 사용자가 끊었으면(disconnected) 사용자가 이 기기에서 연결을 누를 때만 다시 시작한다. 앱 활성화·
+        // 선택 변경이 끊은 연결을 되살려 서버가 지운 일정을 다시 올리지 않게 한다.
+        let active = conn.version > 0 && stored != "disconnected"
+
+        var selected = Set(local.selectedCalendarIDs)
+        if auth == .fullAccess {
+            let calendars = source.calendars()
+            status.calendars = calendars
+            let available = Set(calendars.map(\.id))
+            if !selected.isSubset(of: available) {
+                // 선택한 캘린더가 삭제됐거나 접근할 수 없다. 남은 것만 쓴다(전부 사라지면 재선택 상태가 된다).
+                selected.formIntersection(available)
+                var next = local
+                next.selectedCalendarIDs = selected.sorted()
+                try store.save(next)
+                local = next
+            }
+            status.selectedIDs = selected
+        }
+        guard active || explicit else { return status }
+
+        // sync 기기 판정은 상태를 바꾸는 어떤 PUT보다 먼저다. 연결 상태는 사용자 하나에 하나라, sync 기기가 아닌 기기가
+        // 자기 권한·선택으로 PUT하면 sync 기기의 projection을 숨기고 두 기기가 번갈아 상태를 뒤집는다.
+        var claim = !active
+        if active, !conn.isSyncDevice {
+            if let other = conn.syncDeviceID, try await isLiveDevice(other), !explicit {
+                status.note = .otherSyncDevice
+                return status
+            }
+            claim = true
+        }
 
         guard auth == .fullAccess else {
-            // 연결한 적 없는 사용자의 앱 활성화는 아무것도 만들지 않는다.
-            guard exists || trigger == .connect else { return status }
             let desired: String
             switch auth {
             case .notDetermined: desired = "permission_required"
@@ -218,26 +275,11 @@ actor CalendarSync {
             default:
                 desired = CalendarTransition.wasAuthorized.contains(stored) && CalendarTransition.allowed(from: stored, to: "revoked") ? "revoked" : "denied"
             }
-            if stored != desired, CalendarTransition.allowed(from: stored, to: desired) {
-                status.connection = try await put(conn, PutConnectionBody(status: desired))
+            if stored != desired || claim, CalendarTransition.allowed(from: stored, to: desired) {
+                status.connection = try await put(conn, PutConnectionBody(status: desired, claimSyncDevice: claim))
             }
             return status
         }
-
-        let calendars = source.calendars()
-        status.calendars = calendars
-        let available = Set(calendars.map(\.id))
-        var selected = Set(local.selectedCalendarIDs)
-        if !selected.isSubset(of: available) {
-            // 선택한 캘린더가 삭제됐거나 접근할 수 없다. 남은 것만 쓴다(전부 사라지면 아래에서 재선택 상태가 된다).
-            selected.formIntersection(available)
-            var next = local
-            next.selectedCalendarIDs = selected.sorted()
-            try store.save(next)
-            local = next
-        }
-        status.selectedIDs = selected
-        guard exists || trigger != .foreground else { return status }
 
         let keyer = CalendarKeyer(secret: local.secret)
         let keys = Set(selected.map(keyer.sourceKey))
@@ -247,31 +289,23 @@ actor CalendarSync {
             status.note = .needsSelection
             if ["ready", "syncing", "error"].contains(stored) {
                 // 업로드하던 연결의 선택을 모두 해제했다. ready → selecting은 허용되지 않으므로 재선택 상태로 둔다.
-                status.connection = try await put(conn, PutConnectionBody(status: "needs_source_reselection", sources: []))
-            } else if stored != "selecting", CalendarTransition.allowed(from: stored, to: "selecting") || !exists {
-                status.connection = try await put(conn, PutConnectionBody(status: "selecting", timeZone: tz, sources: conn.enabledKeys.isEmpty ? nil : []))
+                status.connection = try await put(conn, PutConnectionBody(status: "needs_source_reselection", sources: [], claimSyncDevice: claim))
+            } else if stored == "needs_source_reselection" {
+                // 사용자가 다시 고를 때까지 그대로 둔다(설계 3 §12).
+                if claim { status.connection = try await put(conn, PutConnectionBody(claimSyncDevice: true)) }
+            } else if stored != "selecting" || claim, CalendarTransition.allowed(from: stored, to: "selecting") {
+                status.connection = try await put(conn, PutConnectionBody(status: "selecting", timeZone: tz,
+                                                                          sources: conn.enabledKeys.isEmpty ? nil : [], claimSyncDevice: claim))
             }
             return status
         }
 
-        // sync 기기 판정.
-        var claim = false
-        if !conn.isSyncDevice {
-            if let other = conn.syncDeviceID, try await isLiveDevice(other) {
-                guard trigger == .connect else {
-                    status.note = .otherSyncDevice
-                    return status
-                }
-            }
-            claim = true
-        }
-
         let sourcesChanged = keys != conn.enabledKeys
         let needsStatus = !CalendarTransition.uploadable.contains(stored)
-        if !exists || sourcesChanged || claim || needsStatus || conn.timeZone != tz {
+        if conn.version == 0 || sourcesChanged || claim || needsStatus || conn.timeZone != tz {
             var body = PutConnectionBody(timeZone: tz, claimSyncDevice: claim)
             if needsStatus { body.status = "selecting" }
-            if sourcesChanged || !exists { body.sources = keys.sorted().map { CalendarConnection.Source(key: $0, enabled: true) } }
+            if sourcesChanged || conn.version == 0 { body.sources = keys.sorted().map { CalendarConnection.Source(key: $0, enabled: true) } }
             conn = try await put(conn, body)
             status.connection = conn
         } else if trigger == .foreground, let last = local.lastUploadAt, now().timeIntervalSince(last) < minForegroundInterval {
@@ -281,11 +315,18 @@ actor CalendarSync {
 
         // 읽기와 업로드.
         let window = SnapshotWindow.make(now: now(), timeZone: timeZone())
-        let facts = FactBuilder.build(source.occurrences(in: window, calendarIDs: selected), window: window, userTimeZone: timeZone(), keyer: keyer)
-        let pages = try SnapshotPager.pages(facts)
-        var uploader = CalendarUploader(api: api, revisions: self)
-        uploader.sleep = uploaderSleep
-        let done = try await uploader.upload(pages: pages, factCount: facts.count, window: window)
+        var facts = FactBuilder.build(source.occurrences(in: window, calendarIDs: selected), window: window, userTimeZone: timeZone(), keyer: keyer)
+        let done: CalendarConnection
+        do {
+            done = try await upload(facts, window: window)
+        } catch APIError.server(let e) where e.status == 400 && e.code == "invalid_request" {
+            // 서버는 시간대를 자기 tzdata(time.LoadLocation)로 검사한다. 기기가 아는 IANA 이름을 서버가 모르면 page 전체가
+            // 400이 되어 업로드가 계속 실패한다. 한 번은 모든 fact의 시간대를 UTC로 바꿔 다시 올린다. 시작·끝은 이미 UTC라
+            // 바쁜 시간은 그대로이고 원래 시간대 표시만 잃는다.
+            facts = facts.map { BusyFact(sourceEventKey: $0.sourceEventKey, startAt: $0.startAt, endAt: $0.endAt, allDay: $0.allDay, timeZone: "UTC", availability: $0.availability) }
+            done = try await upload(facts, window: window)
+            status.note = .timeZoneFallback
+        }
         var next = local
         next.lastUploadAt = now()
         try store.save(next)
@@ -295,31 +336,47 @@ actor CalendarSync {
         return status
     }
 
+    private func upload(_ facts: [BusyFact], window: SnapshotWindow) async throws -> CalendarConnection {
+        let pages = try SnapshotPager.pages(facts)
+        var uploader = CalendarUploader(api: api, revisions: self)
+        uploader.sleep = uploaderSleep
+        uploader.isActive = isActive
+        return try await uploader.upload(pages: pages, factCount: facts.count, window: window)
+    }
+
+    private func checkActive() throws {
+        guard isActive() else { throw SessionGate.Closed() }
+    }
+
     private func currentTZ() -> String { FactBuilder.validIdentifier(timeZone().identifier) ?? "UTC" }
 
     private func fetchConnection() async throws -> CalendarConnection {
-        try await api.send(.get("/v1/calendar/connection"), as: CalendarConnectionEnvelope.self).connection
+        try checkActive()
+        return try await api.send(.get("/v1/calendar/connection"), as: CalendarConnectionEnvelope.self).connection
     }
 
     private func isLiveDevice(_ id: String) async throws -> Bool {
         if id == deviceID { return true }
+        try checkActive()
         let devices = try await api.send(.get("/v1/devices"), as: DevicesResponse.self).devices
         return devices.contains { $0.id == id }
     }
 
-    /// 연결이 없으면(version 0) If-Match 없는 create-only, 있으면 If-Match. create가 409면(그사이 생겼다) 다시 읽고
-    /// 한 번 더 보낸다.
+    /// 연결이 없으면(version 0) If-Match 없는 create-only, 있으면 If-Match. 409면 다시 판단하도록 알린다.
     private func put(_ conn: CalendarConnection, _ body: PutConnectionBody) async throws -> CalendarConnection {
-        var req = try APIRequest.json("PUT", "/v1/calendar/connection", body: body, ifMatch: conn.version > 0 ? conn.version : nil)
+        try checkActive()
+        let req = try APIRequest.json("PUT", "/v1/calendar/connection", body: body, ifMatch: conn.version > 0 ? conn.version : nil)
         do {
             return try await api.send(req, as: CalendarConnectionEnvelope.self).connection
         } catch APIError.server(let e) where e.code == "version_conflict" {
-            let fresh = try await fetchConnection()
-            req.ifMatchVersion = fresh.version > 0 ? fresh.version : nil
-            req.idempotencyKey = nil
-            return try await api.send(req, as: CalendarConnectionEnvelope.self).connection
+            throw CalendarSyncError.connectionChanged
         }
     }
+}
+
+enum CalendarSyncError: Error, Equatable {
+    /// 연결 PUT이 409였다. 다른 기기가 그사이 연결을 바꿨다.
+    case connectionChanged
 }
 
 extension CalendarSync: RevisionStore {

@@ -145,7 +145,7 @@ final class SessionStore: ObservableObject {
         syncEngine = SyncEngine(api: api, store: GatedSyncStore(base: syncStore, gate: gate), userID: tokens.userID)
         mutationQueue = MutationQueue(api: api, store: GatedMutationQueueStore(base: queueStore, gate: gate), userID: tokens.userID)
         calendarSync = CalendarSync(api: api, source: calendarSource, store: GatedCalendarStateStore(base: calendarStore, gate: gate),
-                                    userID: tokens.userID, deviceID: tokens.deviceID)
+                                    userID: tokens.userID, deviceID: tokens.deviceID, isActive: { gate.isOpen })
         state = .signedIn(SignedInUser(userID: tokens.userID, deviceID: tokens.deviceID))
     }
 
@@ -170,10 +170,17 @@ final class SessionStore: ObservableObject {
         state = .signedOut
     }
 
+    /// 겹쳐 돌 수 있다(앱 활성화와 버튼). 마지막 작업이 끝날 때 isBusy를 내린다.
+    private var busyCount = 0
+
     private func run(_ work: @escaping () async throws -> Void) async {
+        busyCount += 1
         isBusy = true
         lastError = nil
-        defer { isBusy = false }
+        defer {
+            busyCount -= 1
+            isBusy = busyCount > 0
+        }
         do {
             try await work()
         } catch {

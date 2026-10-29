@@ -36,8 +36,12 @@ final class FakeEventSource: CalendarEventSource, @unchecked Sendable {
     }
 }
 
-/// 서버 calendar 핸들러의 상태 전이를 흉내 내는 가짜(실제 규칙은 Go 테스트가 지킨다).
+/// 서버 calendar 핸들러(connection.go, snapshot.go)를 흉내 내는 가짜. 실제 규칙은 Go 테스트가 지키고, 여기서는 클라이언트
+/// 판단이 드러나는 부분을 옮긴다: create-only·If-Match, 전이 표, sync 기기(요청 기기는 bearer token으로 구별), claim 때
+/// ready → syncing, syncing 중 source 변경 → selecting, 같은 revision 200, complete의 syncing·fact 수 검사, 다른 기기 403.
 final class FakeCalendarServer: @unchecked Sendable {
+    static let ipadDevice = "33333333-3333-3333-3333-333333333333"
+
     private let lock = NSLock()
     var exists = false
     var status = "disconnected"
@@ -46,61 +50,123 @@ final class FakeCalendarServer: @unchecked Sendable {
     var timeZone: String?
     var sources: [[String: Any]] = []
     var lastRevision: Int64 = 0
-    var liveDevices: [String] = [TestTokens.deviceID]
+    var liveDevices: [String] = [TestTokens.deviceID, FakeCalendarServer.ipadDevice]
+    /// token → 기기
+    var tokenDevices: [String: String] = ["a-1": TestTokens.deviceID, "ipad": FakeCalendarServer.ipadDevice]
+    /// 서버 tzdata에 없는 것으로 칠 시간대.
+    var unknownZones: Set<String> = []
+    /// 다음 연결 PUT 직전에 한 번 실행한다(다른 기기의 동시 변경 흉내).
+    var beforeNextPut: ((FakeCalendarServer) -> Void)?
+    var getDelay: TimeInterval = 0
+    private struct Session { var id: String; var status: String; var expectedPages: Int; var facts: [Int: Int] }
+    private var sessions: [Int64: Session] = [:]
     private(set) var log: [String] = []
     private(set) var puts: [[String: Any]] = []
     private(set) var pageBodies: [Data] = []
 
-    func connectionJSON() -> [String: Any] {
-        ["status": status, "sync_device_id": syncDevice as Any? ?? NSNull(), "is_sync_device": syncDevice == TestTokens.deviceID,
+    func connectionJSON(for device: String?) -> [String: Any] {
+        ["status": status, "sync_device_id": syncDevice as Any? ?? NSNull(), "is_sync_device": syncDevice != nil && syncDevice == device,
          "active_generation": 1, "last_completed_sync_at": NSNull(), "time_zone": timeZone as Any? ?? NSNull(),
          "sources": sources, "version": version]
+    }
+
+    private var enabledKeys: Set<String> { Set(sources.filter { $0["enabled"] as? Bool == true }.compactMap { $0["key"] as? String }) }
+
+    private func abortOpen() {
+        for (r, var sess) in sessions where sess.status == "open" { sess.status = "aborted"; sessions[r] = sess }
     }
 
     func handle(_ req: URLRequest, _ body: Data?) -> MockURLProtocol.Reply {
         lock.lock(); defer { lock.unlock() }
         let path = req.url!.path
         let method = req.httpMethod!
-        log.append("\(method) \(path)")
+        let token = req.value(forHTTPHeaderField: "Authorization")?.replacingOccurrences(of: "Bearer ", with: "") ?? ""
+        let device = tokenDevices[token]
+        log.append("\(method) \(path) [\(token)]")
         let json = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
         switch (method, path) {
         case ("GET", "/v1/calendar/connection"):
-            return .json(200, ["connection": exists ? connectionJSON() : ["status": "disconnected", "sync_device_id": NSNull(), "is_sync_device": false, "active_generation": 0, "last_completed_sync_at": NSNull(), "time_zone": NSNull(), "sources": [], "version": 0]])
+            let conn: [String: Any] = exists ? connectionJSON(for: device) : ["status": "disconnected", "sync_device_id": NSNull(), "is_sync_device": false,
+                "active_generation": 0, "last_completed_sync_at": NSNull(), "time_zone": NSNull(), "sources": [], "version": 0]
+            return .json(200, ["connection": conn], delay: getDelay)
         case ("PUT", "/v1/calendar/connection"):
-            puts.append(json.merging(["_if_match": req.value(forHTTPHeaderField: "If-Match") ?? "none"]) { a, _ in a })
+            if let hook = beforeNextPut { beforeNextPut = nil; hook(self) }
             let ifMatch = req.value(forHTTPHeaderField: "If-Match")
+            puts.append(json.merging(["_if_match": ifMatch ?? "none", "_device": device ?? "?"]) { a, _ in a })
             if ifMatch == nil, exists { return .error(409, code: "version_conflict", currentVersion: version) }
             if let ifMatch, ifMatch != "\"\(version)\"" { return .error(409, code: "version_conflict", currentVersion: version) }
             if !exists { exists = true; status = "disconnected" }
+            var newStatus = status
             if let to = json["status"] as? String {
                 guard CalendarTransition.allowed(from: status, to: to) else { return .error(409, code: "calendar_state_invalid") }
-                status = to
+                newStatus = to
             }
+            if json["claim_sync_device"] as? Bool == true, syncDevice != device {
+                syncDevice = device
+                if newStatus == "ready" { newStatus = "syncing" }
+                abortOpen()
+            }
+            if let s = json["sources"] as? [[String: Any]] {
+                let newKeys = Set(s.filter { $0["enabled"] as? Bool == true }.compactMap { $0["key"] as? String })
+                if newKeys != enabledKeys {
+                    if newStatus == "syncing" { newStatus = "selecting" }
+                    abortOpen()
+                }
+                sources = s
+            }
+            if status == "syncing", newStatus != "syncing" { abortOpen() }
             if let tz = json["time_zone"] as? String { timeZone = tz }
-            if let s = json["sources"] as? [[String: Any]] { sources = s }
-            if json["claim_sync_device"] as? Bool == true { syncDevice = TestTokens.deviceID }
+            status = newStatus
             version += 1
-            return .json(200, ["connection": connectionJSON()])
+            return .json(200, ["connection": connectionJSON(for: device)])
         case ("POST", "/v1/calendar/snapshots"):
-            if syncDevice != nil, syncDevice != TestTokens.deviceID { return .error(403, code: "forbidden") }
+            guard exists else { return .error(409, code: "calendar_state_invalid") }
+            if syncDevice != nil, syncDevice != device { return .error(403, code: "forbidden") }
             guard CalendarTransition.uploadable.contains(status) else { return .error(409, code: "calendar_state_invalid") }
-            guard sources.contains(where: { $0["enabled"] as? Bool == true }) else { return .error(409, code: "calendar_source_required") }
+            guard !enabledKeys.isEmpty else { return .error(409, code: "calendar_source_required") }
             let rev = (json["revision"] as? Int).map(Int64.init) ?? 0
+            if let existing = sessions[rev] {
+                return .json(200, CalendarMock.snapshot(id: existing.id, revision: rev, status: existing.status, connection: connectionJSON(for: device)))
+            }
             guard rev > lastRevision else { return .error(409, code: "version_conflict", currentVersion: lastRevision) }
+            abortOpen()
             lastRevision = rev
-            syncDevice = TestTokens.deviceID
-            status = "syncing"
+            sessions[rev] = Session(id: "s-\(rev)", status: "open", expectedPages: json["expected_pages"] as? Int ?? 0, facts: [:])
+            syncDevice = device
+            if ["selecting", "error", "ready"].contains(status) { status = "syncing" }
             version += 1
-            return .json(201, CalendarMock.snapshot(id: "s-\(rev)", revision: rev, connection: connectionJSON()))
+            return .json(201, CalendarMock.snapshot(id: "s-\(rev)", revision: rev, connection: connectionJSON(for: device)))
         case ("PUT", let p) where p.contains("/pages/"):
+            guard syncDevice == device else { return .error(403, code: "forbidden") }
+            let parts = p.split(separator: "/")
+            let sid = String(parts[3]), n = Int(parts[5])!
+            guard let (rev, sess) = sessions.first(where: { $0.value.id == sid }) else { return .error(404, code: "not_found") }
+            guard sess.status == "open" else { return .error(409, code: "calendar_snapshot_state") }
+            let facts = (json["facts"] as? [[String: Any]]) ?? []
+            if facts.contains(where: { unknownZones.contains($0["time_zone"] as? String ?? "") }) { return .error(400, code: "invalid_request") }
             pageBodies.append(body ?? Data())
+            sessions[rev]!.facts[n] = facts.count
             return .json(200, [:])
         case ("POST", let p) where p.hasSuffix("/complete"):
+            guard syncDevice == device else { return .error(403, code: "forbidden") }
+            let sid = String(p.split(separator: "/")[3])
+            guard let (rev, sess) = sessions.first(where: { $0.value.id == sid }) else { return .error(404, code: "not_found") }
+            if sess.status == "completed" { return .json(200, CalendarMock.snapshot(id: sid, revision: rev, status: "completed", connection: connectionJSON(for: device))) }
+            guard sess.status == "open" else { return .error(409, code: "calendar_snapshot_state") }
+            guard status == "syncing" else { return .error(409, code: "calendar_state_invalid") }
+            let total = sess.facts.values.reduce(0, +)
+            guard sess.facts.count == sess.expectedPages, total == json["fact_count"] as? Int else { return .error(409, code: "calendar_snapshot_incomplete") }
+            sessions[rev]!.status = "completed"
             status = "ready"
             version += 1
-            return .json(200, CalendarMock.snapshot(revision: lastRevision, status: "completed", connection: connectionJSON()))
+            return .json(200, CalendarMock.snapshot(id: sid, revision: rev, status: "completed", connection: connectionJSON(for: device)))
         case ("POST", let p) where p.hasSuffix("/abort"):
-            return .json(200, CalendarMock.snapshot(revision: lastRevision, status: "aborted", connection: connectionJSON()))
+            let sid = String(p.split(separator: "/")[3])
+            if let (rev, sess) = sessions.first(where: { $0.value.id == sid }), sess.status == "open" {
+                sessions[rev]!.status = "aborted"
+                if status == "syncing" { status = "ready" }
+            }
+            return .json(200, CalendarMock.snapshot(revision: lastRevision, status: "aborted", connection: connectionJSON(for: device)))
         case ("GET", "/v1/devices"):
             return .json(200, ["devices": liveDevices.map { ["id": $0] }])
         default:
@@ -108,7 +174,8 @@ final class FakeCalendarServer: @unchecked Sendable {
         }
     }
 
-    var snapshotsCreated: Int { lock.lock(); defer { lock.unlock() }; return log.filter { $0 == "POST /v1/calendar/snapshots" }.count }
+    var snapshotsCreated: Int { lock.lock(); defer { lock.unlock() }; return log.filter { $0.hasPrefix("POST /v1/calendar/snapshots [") }.count }
+    var putCount: Int { lock.lock(); defer { lock.unlock() }; return puts.count }
 }
 
 final class CalendarSyncTests: XCTestCase {
@@ -123,14 +190,15 @@ final class CalendarSyncTests: XCTestCase {
                                        isAllDay: false, timeZoneID: "Asia/Seoul", availability: .busy, isCanceled: false)
     }
 
-    private func make(_ source: FakeEventSource, _ server: FakeCalendarServer, store: CalendarStateStore = InMemoryCalendarStateStore()) async -> CalendarSync {
+    private func make(_ source: FakeEventSource, _ server: FakeCalendarServer, store: CalendarStateStore = InMemoryCalendarStateStore(),
+                      token: String = "a-1", device: String = TestTokens.deviceID, isActive: @escaping @Sendable () -> Bool = { true }) async -> CalendarSync {
         MockURLProtocol.install { req, body in server.handle(req, body) }
         let api = APIClient(baseURL: URL(string: "http://localhost:8080")!, session: MockURLProtocol.makeSession(),
-                            tokenStore: InMemoryTokenStore(TestTokens.make("a-1")), sleep: { _ in })
+                            tokenStore: InMemoryTokenStore(TestTokens.make(token)), sleep: { _ in })
         let now = self.now
         let tz = seoul
-        let sync = CalendarSync(api: api, source: source, store: store, userID: TestTokens.userID, deviceID: TestTokens.deviceID,
-                                now: { now }, timeZone: { tz })
+        let sync = CalendarSync(api: api, source: source, store: store, userID: TestTokens.userID, deviceID: device,
+                                now: { now }, timeZone: { tz }, isActive: isActive)
         await sync.setUploaderSleep { _ in }
         return sync
     }
@@ -156,7 +224,7 @@ final class CalendarSyncTests: XCTestCase {
         let server = FakeCalendarServer()
         let sync = await make(source, server)
         _ = try await sync.refresh(.foreground)
-        XCTAssertEqual(server.log, ["GET /v1/calendar/connection"])
+        XCTAssertEqual(server.log, ["GET /v1/calendar/connection [a-1]"])
         XCTAssertEqual(source.accessRequests, 0)
         XCTAssertTrue(source.readCalendarIDs.isEmpty)
     }
@@ -306,5 +374,150 @@ final class CalendarSyncTests: XCTestCase {
         let sync = await make(FakeEventSource(cals: [work]), FakeCalendarServer(), store: store)
         let ids = await sync.selectedIDs
         XCTAssertTrue(ids.isEmpty)
+    }
+
+    // MARK: 리뷰 반영 회귀(I2)
+
+    /// High: sync 기기가 아닌 iPad가 권한 거부·빈 선택으로 앱을 열어도 iPhone의 연결 상태를 바꾸지 않는다. 사용자가 iPad에서
+    /// 연결을 누를 때만 iPad가 맡는다.
+    func testNonSyncDeviceDoesNotOverwriteSharedConnection() async throws {
+        let server = FakeCalendarServer()
+        let phoneSource = FakeEventSource(cals: [work], events: [work.id: [event("w1", day: 1)]])
+        let phone = await make(phoneSource, server)
+        server.exists = true; server.status = "selecting"; server.version = 1
+        _ = try await phone.setSelection([work.id])
+        XCTAssertEqual(server.status, "ready")
+        XCTAssertEqual(server.syncDevice, TestTokens.deviceID)
+        let putsAfterPhone = server.putCount
+
+        for ipadSource in [FakeEventSource(auth: .denied), FakeEventSource(auth: .restricted), FakeEventSource(cals: [home])] {
+            let ipad = await make(ipadSource, server, token: "ipad", device: FakeCalendarServer.ipadDevice)
+            var status = try await ipad.refresh(.foreground)
+            XCTAssertEqual(status.note, .otherSyncDevice)
+            status = try await ipad.setSelection([])
+            XCTAssertEqual(status.note, .otherSyncDevice)
+            XCTAssertEqual(server.status, "ready", "iPad가 공유 상태를 덮어쓰면 안 된다")
+            XCTAssertEqual(server.putCount, putsAfterPhone)
+            XCTAssertTrue(ipadSource.readCalendarIDs.isEmpty)
+        }
+
+        // 사용자가 iPad에서 연결을 누르면 iPad가 맡고 올린다.
+        let ipadSource = FakeEventSource(cals: [home], events: [home.id: [event("h1", day: 1)]])
+        let ipad = await make(ipadSource, server, token: "ipad", device: FakeCalendarServer.ipadDevice)
+        _ = try await ipad.setSelection([home.id])
+        XCTAssertEqual(server.syncDevice, TestTokens.deviceID, "선택 변경만으로는 가져오지 않는다")
+        let status = try await ipad.connect()
+        XCTAssertEqual(server.syncDevice, FakeCalendarServer.ipadDevice)
+        XCTAssertEqual(server.status, "ready")
+        XCTAssertEqual(status.uploadedFacts, 1)
+        // 이제 iPhone이 sync 기기가 아니다. iPhone의 앱 활성화는 아무것도 바꾸지 않는다.
+        let before = server.putCount
+        let phoneAgain = await make(phoneSource, server)
+        let phoneStatus = try await phoneAgain.refresh(.foreground)
+        XCTAssertEqual(phoneStatus.note, .otherSyncDevice)
+        XCTAssertEqual(server.putCount, before)
+    }
+
+    /// Medium: 사용자가 끊은(disconnected) 연결은 앱 활성화·선택 변경으로 되살아나지 않는다. 연결을 누르면 다시 시작한다.
+    func testDisconnectedConnectionIsNotRevivedWithoutConnect() async throws {
+        let source = FakeEventSource(cals: [work], events: [work.id: [event("w1", day: 1)]])
+        let server = FakeCalendarServer()
+        server.exists = true; server.status = "disconnected"; server.version = 7; server.syncDevice = TestTokens.deviceID
+        let store = InMemoryCalendarStateStore(CalendarLocalState(userID: TestTokens.userID, secret: Data(repeating: 3, count: 32), selectedCalendarIDs: [work.id]))
+        let sync = await make(source, server, store: store)
+        _ = try await sync.refresh(.foreground)
+        _ = try await sync.refresh(.manual)
+        _ = try await sync.setSelection([work.id])
+        XCTAssertEqual(server.putCount, 0)
+        XCTAssertEqual(server.snapshotsCreated, 0)
+        XCTAssertTrue(source.readCalendarIDs.isEmpty)
+        let denied = await make(FakeEventSource(auth: .denied), server, store: store)
+        _ = try await denied.refresh(.foreground)
+        XCTAssertEqual(server.status, "disconnected", "권한이 없어도 끊은 연결을 denied로 바꾸지 않는다")
+
+        _ = try await sync.connect()
+        XCTAssertEqual(server.status, "ready")
+        XCTAssertEqual(server.snapshotsCreated, 1)
+    }
+
+    /// Medium: 연결 PUT이 409면 같은 본문을 다시 보내지 않고 최신 연결로 다시 판단한다. 그사이 다른 살아 있는 기기가
+    /// sync 기기가 됐으면 앱 활성화는 아무것도 바꾸지 않는다.
+    func testVersionConflictRedecidesFromFreshState() async throws {
+        let source = FakeEventSource(cals: [work], events: [work.id: [event("w1", day: 1)]])
+        let server = FakeCalendarServer()
+        server.exists = true; server.status = "ready"; server.version = 3; server.syncDevice = TestTokens.deviceID
+        let store = InMemoryCalendarStateStore(CalendarLocalState(userID: TestTokens.userID, secret: Data(repeating: 3, count: 32), selectedCalendarIDs: [work.id]))
+        let sync = await make(source, server, store: store)
+        server.beforeNextPut = { s in
+            s.syncDevice = FakeCalendarServer.ipadDevice
+            s.version += 1
+        }
+        let status = try await sync.refresh(.foreground)
+        XCTAssertEqual(server.puts.count, 1, "409 뒤 같은 PUT을 다시 보내지 않는다")
+        XCTAssertEqual(status.note, .otherSyncDevice)
+        XCTAssertEqual(server.syncDevice, FakeCalendarServer.ipadDevice)
+        XCTAssertEqual(server.snapshotsCreated, 0)
+    }
+
+    /// Low: needs_source_reselection은 사용자가 다시 고를 때까지 그대로다.
+    func testReselectionStateIsKeptUntilUserSelects() async throws {
+        let source = FakeEventSource(cals: [work], events: [work.id: [event("w1", day: 1)]])
+        let server = FakeCalendarServer()
+        server.exists = true; server.status = "needs_source_reselection"; server.version = 2; server.syncDevice = TestTokens.deviceID
+        let sync = await make(source, server)
+        _ = try await sync.refresh(.foreground)
+        _ = try await sync.refresh(.manual)
+        XCTAssertEqual(server.status, "needs_source_reselection")
+        XCTAssertEqual(server.putCount, 0)
+        _ = try await sync.setSelection([work.id])
+        XCTAssertEqual(server.status, "ready")
+    }
+
+    /// Low: 서버 tzdata가 모르는 시간대로 page가 400이면 모든 fact를 UTC로 바꿔 한 번 다시 올린다.
+    func testUnknownServerTimeZoneFallsBackToUTC() async throws {
+        let source = FakeEventSource(cals: [work], events: [work.id: [event("w1", day: 1), event("w2", day: 2)]])
+        let server = FakeCalendarServer()
+        server.exists = true; server.status = "selecting"; server.version = 1
+        server.unknownZones = ["Asia/Seoul"]
+        let sync = await make(source, server)
+        let status = try await sync.setSelection([work.id])
+        XCTAssertEqual(server.status, "ready")
+        XCTAssertEqual(status.note, .timeZoneFallback)
+        XCTAssertEqual(status.uploadedFacts, 2)
+        XCTAssertEqual(server.snapshotsCreated, 2)
+        XCTAssertTrue(server.log.contains { $0.hasPrefix("POST /v1/calendar/snapshots/s-1/abort") }, "실패한 첫 session은 abort한다")
+        let page = String(data: server.pageBodies.last!, encoding: .utf8)!
+        XCTAssertFalse(page.contains("Asia/Seoul"))
+    }
+
+    /// Low: 세션이 끝난 뒤(로그아웃·재로그인) 옛 CalendarSync는 요청을 보내지 않는다.
+    func testClosedSessionSendsNothing() async throws {
+        let server = FakeCalendarServer()
+        server.exists = true; server.status = "ready"; server.version = 1; server.syncDevice = TestTokens.deviceID
+        let gate = SessionGate()
+        let sync = await make(FakeEventSource(cals: [work]), server, isActive: { gate.isOpen })
+        gate.close()
+        do {
+            _ = try await sync.refresh(.manual)
+            XCTFail("오류여야 한다")
+        } catch is SessionGate.Closed {}
+        XCTAssertTrue(server.log.isEmpty)
+    }
+
+    /// Low: 진행 중인 실행이 있어도 선택 변경은 그 결과를 재사용하지 않고 새로 돈다.
+    func testSelectionChangeRunsAfterInFlightForeground() async throws {
+        let source = FakeEventSource(cals: [work], events: [work.id: [event("w1", day: 1)]])
+        let server = FakeCalendarServer()
+        server.exists = true; server.status = "selecting"; server.version = 1
+        server.getDelay = 0.2
+        let sync = await make(source, server)
+        async let fg = sync.refresh(.foreground)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        async let sel = sync.setSelection([work.id])
+        let (_, b) = try await (fg, sel)
+        let gets = server.log.filter { $0.hasPrefix("GET /v1/calendar/connection") }.count
+        XCTAssertEqual(gets, 2, "선택 변경은 진행 중 결과를 재사용하지 않고 새로 돈다")
+        XCTAssertEqual(b.uploadedFacts, 1)
+        XCTAssertEqual(server.status, "ready")
     }
 }
