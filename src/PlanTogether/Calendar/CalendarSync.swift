@@ -337,8 +337,9 @@ actor CalendarSync {
         do {
             done = try await upload(facts, window: window)
         } catch CalendarUploadError.pageRejected {
-            // 서버는 시간대를 자기 tzdata(time.LoadLocation)로 검사한다. 기기 tz DB가 서버보다 새로우면 기기가 아는 IANA 이름을
-            // 서버가 몰라 page 전체가 400이 되고 업로드가 계속 실패한다. page가 거부되면 사용자 시간대와 다른(일정 고유)
+            // 서버 snapshot 검증(calendar.validTimeZone)은 time.LoadLocation이 여는 이름만 받는다(호스트 zoneinfo, 없으면 서버
+            // Go 버전에 내장된 time/tzdata). 기기 tz DB가 그보다 새로우면 기기가 아는 IANA 이름을 서버가 몰라 page 전체가 400이
+            // 되고 업로드가 계속 실패한다. page가 거부되면 사용자 시간대와 다른(일정 고유)
             // 시간대만 UTC로 바꿔 한 번, 그래도 거부되면 사용자 시간대까지 UTC로 바꿔 한 번 더 올린다. 시작·끝은 이미 UTC라
             // 바쁜 시간은 그대로이고 원래 시간대 표시만 잃는다. 시간대와 무관한 거부면 두 번 다 실패해 오류로 끝난다.
             let userTZ = currentTZ()

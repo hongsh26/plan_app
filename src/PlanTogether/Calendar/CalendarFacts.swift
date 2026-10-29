@@ -149,7 +149,8 @@ enum FactBuilder {
         }
     }
 
-    /// 서버(Go time.LoadLocation)가 받는 IANA 이름만 쓴다. "GMT+0900" 같은 이름은 page 전체를 400으로 만든다.
+    /// 기기 tz DB의 IANA 이름(과 UTC·GMT)만 쓴다. 서버 snapshot 검증은 time.LoadLocation이 여는 이름이면 받으므로(가능 시간
+    /// 설정의 Area/City 규칙보다 넓다) UTC·GMT도 된다. "GMT+0900" 같은 기기 표시용 이름은 page 전체를 400으로 만든다.
     static func validIdentifier(_ id: String) -> String? {
         guard id != "Local", id.count <= 64 else { return nil }
         if id == "UTC" || id == "GMT" { return id }
