@@ -162,4 +162,35 @@ final class CalendarUploaderTests: XCTestCase {
             XCTAssertEqual(aborted, code == "calendar_snapshot_incomplete", code)
         }
     }
+
+    /// Low: 매 시도의 409와 닫힌 session(200)을 처리한다. 409(서버 5) → 6이 중단된 기존 session(200) → 7 생성.
+    func testRepeatedConflictAndClosedSessionAreHandled() async throws {
+        let store = MemoryRevisionStore(0)
+        MockURLProtocol.install { req, body in
+            if req.url!.path == "/v1/calendar/snapshots" {
+                let rev = (try? JSONSerialization.jsonObject(with: body!) as? [String: Any])?["revision"] as? Int
+                switch rev {
+                case 1: return .error(409, code: "version_conflict", currentVersion: 5)
+                case 6: return .json(200, CalendarMock.snapshot(id: "old", revision: 6, status: "completed"))
+                default: return .json(201, CalendarMock.snapshot(id: "s-1", revision: 7))
+                }
+            }
+            if req.url!.path.hasSuffix("/complete") { return .json(200, CalendarMock.snapshot(revision: 7, status: "completed")) }
+            return .json(200, [:])
+        }
+        _ = try await uploader(store).upload(pages: pages(1), factCount: 1, window: window)
+        XCTAssertEqual(store.lastRevision(), 7)
+        XCTAssertFalse(MockURLProtocol.requests.contains { $0.request.url!.path.contains("/old/") })
+    }
+
+    /// 같은 revision의 열린 session(200)은 이어 쓴다.
+    func testReusedOpenSessionIsContinued() async throws {
+        MockURLProtocol.install { req, _ in
+            if req.url!.path == "/v1/calendar/snapshots" { return .json(200, CalendarMock.snapshot(id: "open-1", revision: 1, status: "open")) }
+            if req.url!.path.hasSuffix("/complete") { return .json(200, CalendarMock.snapshot(revision: 1, status: "completed")) }
+            return .json(200, [:])
+        }
+        _ = try await uploader(MemoryRevisionStore()).upload(pages: pages(1), factCount: 1, window: window)
+        XCTAssertTrue(MockURLProtocol.requests.contains { $0.request.url!.path == "/v1/calendar/snapshots/open-1/pages/0" })
+    }
 }

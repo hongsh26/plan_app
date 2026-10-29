@@ -88,6 +88,8 @@ struct CalendarUploader {
     let api: APIClient
     let revisions: RevisionStore
     var maxAttempts = 3
+    /// 세션이 끝났으면(SessionGate 닫힘) 요청을 보내지 않는다.
+    var isActive: @Sendable () -> Bool = { true }
     var sleep: Sleeper = { try await Task.sleep(nanoseconds: UInt64(max(0, $0) * 1_000_000_000)) }
 
     func upload(pages: [Data], factCount: Int, window: SnapshotWindow) async throws -> CalendarConnection {
@@ -96,10 +98,12 @@ struct CalendarUploader {
             for (n, body) in pages.enumerated() {
                 let req = APIRequest(method: "PUT", path: "/v1/calendar/snapshots/\(sessionID)/pages/\(n)", body: body,
                                      idempotencyKey: UUID().uuidString)
+                try checkActive()
                 _ = try await withRetry { try await api.send(req) }
             }
             var complete = try APIRequest.json("POST", "/v1/calendar/snapshots/\(sessionID)/complete", body: CompleteBody(factCount: factCount))
             complete.idempotencyKey = UUID().uuidString
+            try checkActive()
             let done = try await withRetry { try await api.send(complete, as: SnapshotEnvelope.self) }
             return done.connection
         } catch {
@@ -108,29 +112,35 @@ struct CalendarUploader {
         }
     }
 
+    /// 같은 revision의 기존 session(200)이 열려 있으면 이어 쓰고, 끝났거나 중단됐으면 revision을 올린다. 409면 서버의
+    /// 마지막 revision + 1. 최대 세 번.
     private func createSession(expectedPages: Int, window: SnapshotWindow) async throws -> String {
         var revision = await revisions.lastRevision() + 1
-        for attempt in 0..<2 {
+        for _ in 0..<3 {
             try await revisions.setLastRevision(revision)
             var req = try APIRequest.json("POST", "/v1/calendar/snapshots", body: CreateSnapshotBody(
                 revision: revision, windowStart: RFC3339.format(window.start), windowEnd: RFC3339.format(window.end),
                 expectedPages: expectedPages))
             req.idempotencyKey = UUID().uuidString
+            try checkActive()
             do {
                 let response = try await withRetry { try await api.send(req) }
-                if response.status == 201 { return try decodeID(response.data) }
-                // 200: 같은 revision의 기존 session. 열린 것인지 알 수 없으므로 새 revision으로 다시 만든다.
-                guard attempt == 0 else { return try decodeID(response.data) }
+                let snapshot = try decodeSnapshot(response.data)
+                if response.status == 201 || snapshot.status == "open" { return snapshot.id }
                 revision += 1
-            } catch APIError.server(let e) where e.code == "version_conflict" && attempt == 0 {
-                revision = max(revision, (e.currentVersion ?? revision)) + 1
+            } catch APIError.server(let e) where e.code == "version_conflict" {
+                revision = max(revision, e.currentVersion ?? revision) + 1
             }
         }
         throw APIError.decoding("snapshot session을 만들지 못했다")
     }
 
-    private func decodeID(_ data: Data) throws -> String {
-        do { return try JSONCoding.makeDecoder().decode(SnapshotEnvelope.self, from: data).snapshot.id }
+    private func checkActive() throws {
+        guard isActive() else { throw SessionGate.Closed() }
+    }
+
+    private func decodeSnapshot(_ data: Data) throws -> SnapshotEnvelope.Snapshot {
+        do { return try JSONCoding.makeDecoder().decode(SnapshotEnvelope.self, from: data).snapshot }
         catch { throw APIError.decoding(String(describing: error)) }
     }
 
@@ -144,6 +154,7 @@ struct CalendarUploader {
     private static func sessionGone(_ error: Error) -> Bool {
         switch error as? APIError {
         case .sessionEnded?, .notSignedIn?: return true
+        case nil: return error is SessionGate.Closed
         case .server(let e)?: return e.status == 403 || e.code == "calendar_snapshot_state"
         default: return false
         }
