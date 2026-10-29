@@ -71,6 +71,8 @@ func (c *testClock) shift(d time.Duration) {
 func newStack(t *testing.T, limited bool) *stack {
 	t.Helper()
 	pool := pgtest.Pool(t, pgtest.APIRoleURLEnv)
+	// 일부 테스트가 sync bootstrap·증분을 읽으므로 sync 정리 테스트와 겹치지 않게 한다(pgtest.SyncPruneLockKey).
+	pgtest.HoldSyncReader(t, pool)
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
 	tokens, err := auth.NewAccessTokens(bytes.Repeat([]byte{4}, 32), nil)
