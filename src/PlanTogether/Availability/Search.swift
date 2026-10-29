@@ -43,6 +43,12 @@ struct SearchForm: Equatable, Sendable {
          "duration_minutes": AnyEncodable(durationMinutes), "time_zone": AnyEncodable(timeZone.identifier), "max_results": AnyEncodable(20)]
     }
 
+    /// 검색 시간대 기본값: 저장된 활동 시간의 시간대, 없으면 기기 시간대. 둘 다 Area/City가 아니면 nil(도시를 고른다).
+    static func defaultTimeZone(preference: String?, device: TimeZone) -> TimeZone? {
+        if let p = preference, PreferencesRules.isRegionZone(p), let tz = TimeZone(identifier: p) { return tz }
+        return PreferencesRules.isRegionZone(device.identifier) ? device : nil
+    }
+
     static func day(_ d: Date, _ tz: TimeZone) -> String {
         let c = SnapshotWindow.calendar(tz).dateComponents([.year, .month, .day], from: d)
         return String(format: "%04d-%02d-%02d", c.year!, c.month!, c.day!)
@@ -86,6 +92,22 @@ enum SearchState: Equatable {
     case failed(String)
 }
 
+/// 준비 대기에서 본인 캘린더 상태별 안내(설계 6 §8: 본인 문제일 때만 CTA).
+enum CalendarCTA: Equatable {
+    case none, connect, syncing, refresh, allowInSettings, selectCalendars
+
+    static func of(_ selfCalendarState: String) -> CalendarCTA {
+        switch selfCalendarState {
+        case "ready": return .none
+        case "not_connected": return .connect
+        case "syncing": return .syncing
+        case "denied", "revoked": return .allowInSettings
+        case "source_required": return .selectCalendars
+        default: return .refresh   // stale, error
+        }
+    }
+}
+
 enum SearchResultFormatter {
     /// 슬롯을 검색 시간대 날짜로 묶는다. 서버가 이미 날짜당 3개, 시작 순으로 준다.
     static func sections(_ slots: [(Date, Date)], timeZone: TimeZone, locale: Locale = Locale(identifier: "ko_KR")) -> [DaySection] {
@@ -127,6 +149,8 @@ final class SearchViewModel: ObservableObject {
     @Published var form: SearchForm
     @Published private(set) var state: SearchState = .idle
     @Published private(set) var validationMessage: String?
+    /// 기기·저장된 활동 시간 모두 Area/City 시간대가 아니다. 도시를 골라야 검색할 수 있다.
+    @Published private(set) var needsTimeZonePick = false
 
     private let api: APIClient
     let partyID: String
@@ -136,7 +160,29 @@ final class SearchViewModel: ObservableObject {
         self.api = api
         self.partyID = partyID
         self.now = now
-        form = SearchForm.defaults(now: now(), timeZone: timeZone)
+        let resolved = SearchForm.defaultTimeZone(preference: nil, device: timeZone)
+        form = SearchForm.defaults(now: now(), timeZone: resolved ?? timeZone)
+        needsTimeZonePick = resolved == nil
+    }
+
+    /// 저장된 활동 시간의 시간대를 검색 기본값으로 쓴다. 실패해도 기기 시간대로 검색할 수 있다.
+    func prepare() async {
+        struct Envelope: Decodable { let preferences: AvailabilityPreferences }
+        let pref = try? await api.send(.get("/v1/availability/preferences/me"), as: Envelope.self).preferences
+        let device = TimeZone.current
+        if let tz = SearchForm.defaultTimeZone(preference: pref?.status == "configured" ? pref?.timeZone : nil,
+                                                device: needsTimeZonePick ? device : form.timeZone) {
+            setTimeZone(tz)
+        }
+    }
+
+    func setTimeZone(_ tz: TimeZone) {
+        let days = SnapshotWindow.calendar(form.timeZone).dateComponents([.day], from: form.startDate, to: form.endDate).day ?? 13
+        var next = SearchForm.defaults(now: now(), timeZone: tz)
+        next.durationMinutes = form.durationMinutes
+        next.endDate = SnapshotWindow.calendar(tz).date(byAdding: .day, value: max(0, days), to: next.startDate) ?? next.endDate
+        form = next
+        needsTimeZonePick = !PreferencesRules.isRegionZone(tz.identifier)
     }
 
     /// 결과가 만료됐다(valid_until 지남). 결과는 다시 검색해야 쓸 수 있다.
@@ -145,7 +191,7 @@ final class SearchViewModel: ObservableObject {
         return false
     }
 
-    func search() async {
+    func search(retryOnChange: Bool = true) async {
         if let error = form.validate(now: now()) {
             validationMessage = error
             return
@@ -171,6 +217,10 @@ final class SearchViewModel: ObservableObject {
             }
         } catch APIError.server(let e) where e.status == 409 && (e.code == "availability_setup_pending" || e.code == "calendar_sync_pending") {
             state = Self.pendingState(e)
+        } catch APIError.server(let e) where e.status == 409 && e.code == "availability_changed_retry" {
+            // 검색 중 그룹이 바뀌었다(서버가 반복 재시도 뒤 준다). 한 번 다시 찾고, 또 그러면 안내한다.
+            if retryOnChange { return await search(retryOnChange: false) }
+            state = .failed(UserMessage.of(APIError.server(e)))
         } catch {
             state = .failed(UserMessage.of(error))
         }

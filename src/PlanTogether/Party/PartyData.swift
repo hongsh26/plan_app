@@ -147,7 +147,7 @@ struct PartyAPI {
         try await api.send(.get("/v1/invites/\(token)/preview"), as: PreviewEnvelope.self).preview
     }
 
-    /// 수락하면 Party ID를 돌려준다. 이미 멤버(409 already_member)면 호출자가 Party로 이동한다.
+    /// 수락하면 Party ID를 돌려준다. 이미 멤버(409 already_member)면 호출자가 성공처럼 다룬다(시트를 닫는다).
     func accept(token: String) async throws -> String {
         try await api.send(APIRequest(method: "POST", path: "/v1/invites/\(token)/accept"), as: AcceptEnvelope.self).party.id
     }
@@ -193,6 +193,7 @@ enum UserMessage {
             case "time_zone_invalid": return "이 시간대는 쓸 수 없습니다. 도시를 선택하세요."
             case "search_range_invalid": return "검색 기간이 너무 길거나 캘린더 동기화 범위를 벗어났습니다. 기간을 줄여 보세요."
             case "availability_temporarily_unavailable": return "잠시 후 다시 시도하세요."
+            case "availability_changed_retry": return "검색하는 동안 그룹 정보가 바뀌었습니다. 다시 찾아 주세요."
             case "invalid_request": return "입력 값이 올바르지 않습니다."
             default: return "요청을 처리하지 못했습니다. (\(e.code))"
             }
@@ -200,5 +201,63 @@ enum UserMessage {
         case .sessionEnded, .notSignedIn: return "다시 로그인해 주세요."
         case .decoding: return "응답을 해석하지 못했습니다."
         }
+    }
+}
+
+/// 초대 참여 흐름. 미리본 초대의 token으로만 수락한다. 미리본 뒤 입력을 바꾸면 미리보기를 비워, 화면에 남은 Party
+/// 이름과 다른 초대로 가입하지 않게 한다.
+@MainActor
+final class JoinInviteModel: ObservableObject {
+    @Published var input = "" {
+        didSet { if InviteToken.parse(input) != previewToken { preview = nil; previewToken = nil } }
+    }
+    @Published private(set) var preview: InvitePreview?
+    @Published private(set) var error: String?
+    @Published private(set) var busy = false
+    private(set) var previewToken: String?
+
+    private let api: PartyAPI
+    private let afterJoin: () async -> Void
+
+    init(api: PartyAPI, afterJoin: @escaping () async -> Void) {
+        self.api = api
+        self.afterJoin = afterJoin
+    }
+
+    func loadPreview() async {
+        guard let token = InviteToken.parse(input) else {
+            error = "초대 코드 형식이 아닙니다."
+            return
+        }
+        busy = true
+        defer { busy = false }
+        do {
+            let p = try await api.preview(token: token)
+            // 기다리는 사이 입력이 바뀌었으면 버린다.
+            guard InviteToken.parse(input) == token else { return }
+            preview = p
+            previewToken = token
+            error = nil
+        } catch {
+            preview = nil
+            previewToken = nil
+            self.error = UserMessage.of(error)
+        }
+    }
+
+    /// 성공(이미 멤버 포함)이면 true.
+    func accept() async -> Bool {
+        guard let token = previewToken else { return false }
+        busy = true
+        defer { busy = false }
+        do {
+            _ = try await api.accept(token: token)
+        } catch let e as APIError where e.serverCode == "already_member" {
+        } catch {
+            self.error = UserMessage.of(error)
+            return false
+        }
+        await afterJoin()
+        return true
     }
 }

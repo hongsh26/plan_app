@@ -6,7 +6,6 @@ struct PartyListView: View {
     @EnvironmentObject private var session: SessionStore
     @State private var showCreate = false
     @State private var showJoin = false
-    @State private var path: [String] = []
 
     var body: some View {
         let parties = session.syncState?.parties() ?? []
@@ -80,71 +79,59 @@ private struct CreatePartySheet: View {
     }
 }
 
-/// 초대 수락(설계 4 §3.2). Universal Link(AASA) 전이라 코드나 링크를 붙여 넣는다.
+/// 초대 수락(설계 4 §3.2). Universal Link(AASA) 전이라 코드나 링크를 붙여 넣는다. 참여하면 시트를 닫고 목록으로
+/// 돌아간다(sync 뒤 목록에 새 Party가 보인다). 이미 멤버여도 같다.
 struct JoinPartySheet: View {
     @EnvironmentObject private var session: SessionStore
     @Environment(\.dismiss) private var dismiss
-    @State private var input = ""
-    @State private var preview: InvitePreview?
-    @State private var error: String?
-    @State private var busy = false
+    @StateObject private var box = JoinInviteBox()
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    TextField("초대 코드 또는 링크", text: $input, axis: .vertical)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    Button("확인") { Task { await loadPreview() } }.disabled(input.isEmpty || busy)
-                } footer: {
-                    Text("임시 방식: 앱 링크가 준비되기 전까지 받은 코드를 붙여 넣어 참여합니다.")
-                }
-                if let preview {
-                    // 수락 전에는 Party 이름·인원·초대자 이름만 보인다(멤버 명단·일정 없음).
-                    Section("초대") {
-                        LabeledContent("Party", value: preview.partyName)
-                        LabeledContent("멤버", value: "\(preview.memberCount)명")
-                        LabeledContent("초대한 사람", value: preview.inviterDisplayName)
-                        Button("참여하기") { Task { await accept() } }.disabled(busy)
-                    }
-                }
-                if let error { Section { Text(error).font(.footnote).foregroundStyle(.red) } }
+            Group {
+                if let model = box.model { JoinForm(model: model, onDone: dismiss.callAsFunction) } else { ProgressView() }
             }
             .navigationTitle("초대로 참여")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("닫기") { dismiss() } } }
         }
-    }
-
-    private func loadPreview() async {
-        guard let token = InviteToken.parse(input) else {
-            error = "초대 코드 형식이 아닙니다."
-            return
-        }
-        busy = true
-        defer { busy = false }
-        do {
-            preview = try await session.partyAPI.preview(token: token)
-            error = nil
-        } catch {
-            preview = nil
-            self.error = UserMessage.of(error)
+        .task {
+            if box.model == nil {
+                let session = self.session
+                box.model = JoinInviteModel(api: session.partyAPI, afterJoin: { await session.syncNow() })
+            }
         }
     }
+}
 
-    private func accept() async {
-        guard let token = InviteToken.parse(input) else { return }
-        busy = true
-        defer { busy = false }
-        do {
-            _ = try await session.partyAPI.accept(token: token)
-            await session.syncNow()
-            dismiss()
-        } catch let e as APIError where e.serverCode == "already_member" {
-            await session.syncNow()
-            dismiss()
-        } catch {
-            self.error = UserMessage.of(error)
+@MainActor
+final class JoinInviteBox: ObservableObject {
+    @Published var model: JoinInviteModel?
+}
+
+private struct JoinForm: View {
+    @ObservedObject var model: JoinInviteModel
+    let onDone: () -> Void
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("초대 코드 또는 링크", text: $model.input, axis: .vertical)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("확인") { Task { await model.loadPreview() } }.disabled(model.input.isEmpty || model.busy)
+            } footer: {
+                Text("임시 방식: 앱 링크가 준비되기 전까지 받은 코드를 붙여 넣어 참여합니다.")
+            }
+            if let preview = model.preview {
+                // 수락 전에는 Party 이름·인원·초대자 이름만 보인다(멤버 명단·일정 없음).
+                Section("초대") {
+                    LabeledContent("Party", value: preview.partyName)
+                    LabeledContent("멤버", value: "\(preview.memberCount)명")
+                    LabeledContent("초대한 사람", value: preview.inviterDisplayName)
+                    Button("참여하기") { Task { if await model.accept() { onDone() } } }.disabled(model.busy)
+                }
+            }
+            if let error = model.error { Section { Text(error).font(.footnote).foregroundStyle(.red) } }
         }
     }
 }
@@ -175,7 +162,7 @@ struct PartyDetailView: View {
                 }
                 if party.isOwner {
                     Section {
-                        Button(party.members.count == 1 ? "초대 링크 만들기 (먼저 멤버를 초대하세요)" : "초대 링크 만들기") {
+                        Button("초대 링크 만들기") {
                             Task { await createInvite() }
                         }
                         .disabled(busy)
@@ -188,7 +175,7 @@ struct PartyDetailView: View {
                             ShareLink(item: invite.token) { Label("코드 공유", systemImage: "square.and.arrow.up") }
                             Button("코드 복사") { UIPasteboard.general.string = invite.token }
                         }
-                    } header: { Text("초대") } footer: {
+                    } header: { Text(party.members.count == 1 ? "초대 — 아직 혼자입니다" : "초대") } footer: {
                         Text("임시 방식: 앱 링크가 준비되기 전까지 이 코드를 상대에게 전하고, 상대는 Party 탭의 + → 초대 코드로 참여에 붙여 넣습니다. 코드는 지금 한 번만 보입니다.")
                     }
                 }

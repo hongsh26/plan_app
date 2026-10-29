@@ -283,3 +283,146 @@ final class PartyDataTests: XCTestCase {
         XCTAssertEqual(UserMessage.of(APIError.transport("x")), "연결할 수 없습니다. 네트워크를 확인하세요.")
     }
 }
+
+/// I3 리뷰 반영 회귀.
+final class ScreenReviewFixTests: XCTestCase {
+    private func api() -> APIClient {
+        APIClient(baseURL: URL(string: "http://localhost:8080")!, session: MockURLProtocol.makeSession(),
+                  tokenStore: InMemoryTokenStore(TestTokens.make("a-1")), sleep: { _ in })
+    }
+    private let tokenA = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    private let tokenB = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+
+    /// Medium: 미리본 초대의 token으로만 수락한다. 미리본 뒤 입력을 바꾸면 미리보기가 사라지고 수락하지 않는다.
+    @MainActor
+    func testAcceptUsesPreviewedTokenOnly() async {
+        MockURLProtocol.install { req, _ in
+            if req.url!.path.hasSuffix("/preview") {
+                let name = req.url!.path.contains(self.tokenA) ? "A Party" : "B Party"
+                return .json(200, ["request_id": "r", "preview": ["party_name": name, "member_count": 1, "inviter_display_name": "x"]])
+            }
+            return .json(201, ["request_id": "r", "party": ["id": "p"], "membership": [:]])
+        }
+        let joined = Counter()
+        let model = JoinInviteModel(api: PartyAPI(api: api()), afterJoin: { joined.increment() })
+        model.input = tokenA
+        await model.loadPreview()
+        XCTAssertEqual(model.preview?.partyName, "A Party")
+        model.input = tokenB
+        XCTAssertNil(model.preview, "입력이 바뀌면 미리보기를 비운다")
+        let refused = await model.accept()
+        XCTAssertFalse(refused)
+        XCTAssertFalse(MockURLProtocol.requests.contains { $0.request.url!.path.hasSuffix("/accept") })
+
+        await model.loadPreview()
+        XCTAssertEqual(model.preview?.partyName, "B Party")
+        model.input = "  \(tokenB)\n"   // 같은 token(공백만 다름)은 미리보기를 유지한다
+        XCTAssertNotNil(model.preview)
+        let ok = await model.accept()
+        XCTAssertTrue(ok)
+        XCTAssertEqual(joined.value, 1)
+        let accepted = MockURLProtocol.requests.filter { $0.request.url!.path.hasSuffix("/accept") }.map { $0.request.url!.path }
+        XCTAssertEqual(accepted, ["/v1/invites/\(tokenB)/accept"])
+    }
+
+    @MainActor
+    func testAlreadyMemberCountsAsJoined() async {
+        MockURLProtocol.install { req, _ in
+            req.url!.path.hasSuffix("/preview")
+                ? .json(200, ["request_id": "r", "preview": ["party_name": "P", "member_count": 2, "inviter_display_name": "x"]])
+                : .error(409, code: "already_member")
+        }
+        let model = JoinInviteModel(api: PartyAPI(api: api()), afterJoin: {})
+        model.input = tokenA
+        await model.loadPreview()
+        let ok = await model.accept()
+        XCTAssertTrue(ok)
+        XCTAssertNil(model.error)
+    }
+
+    /// Medium: 검색 시간대는 저장된 활동 시간의 시간대 → 기기 시간대 → 없으면 도시 선택.
+    func testSearchTimeZoneDefault() {
+        let seoul = TimeZone(identifier: "Asia/Seoul")!, gmt = TimeZone(identifier: "GMT")!
+        XCTAssertEqual(SearchForm.defaultTimeZone(preference: "America/New_York", device: seoul)?.identifier, "America/New_York")
+        XCTAssertEqual(SearchForm.defaultTimeZone(preference: nil, device: seoul)?.identifier, "Asia/Seoul")
+        XCTAssertEqual(SearchForm.defaultTimeZone(preference: "Asia/Seoul", device: gmt)?.identifier, "Asia/Seoul")
+        XCTAssertNil(SearchForm.defaultTimeZone(preference: nil, device: gmt))
+        XCTAssertNil(SearchForm.defaultTimeZone(preference: "UTC", device: gmt))
+    }
+
+    @MainActor
+    func testGMTDeviceUsesSavedPreferenceTimeZone() async {
+        MockURLProtocol.install { _, _ in
+            .json(200, ["request_id": "r", "preferences": ["status": "configured", "time_zone": "Asia/Seoul", "version": 2,
+                                                           "weekly_intervals": [["weekday": 1, "start_minute": 540, "end_minute": 1320]], "updated_at": "2026-10-29T03:00:00Z"]])
+        }
+        let vm = SearchViewModel(api: api(), partyID: "p", timeZone: TimeZone(identifier: "GMT")!)
+        XCTAssertTrue(vm.needsTimeZonePick)
+        await vm.prepare()
+        XCTAssertFalse(vm.needsTimeZonePick)
+        XCTAssertEqual(vm.form.timeZone.identifier, "Asia/Seoul")
+        XCTAssertNil(vm.form.validate(now: Date()))
+    }
+
+    func testCalendarCTAByState() {
+        XCTAssertEqual(CalendarCTA.of("ready"), .none)
+        XCTAssertEqual(CalendarCTA.of("not_connected"), .connect)
+        XCTAssertEqual(CalendarCTA.of("syncing"), .syncing)
+        XCTAssertEqual(CalendarCTA.of("stale"), .refresh)
+        XCTAssertEqual(CalendarCTA.of("error"), .refresh)
+        XCTAssertEqual(CalendarCTA.of("denied"), .allowInSettings)
+        XCTAssertEqual(CalendarCTA.of("revoked"), .allowInSettings)
+        XCTAssertEqual(CalendarCTA.of("source_required"), .selectCalendars)
+    }
+
+    /// availability_changed_retry는 한 번 다시 찾고, 또 그러면 안내 문구다.
+    @MainActor
+    func testChangedRetryIsRetriedOnce() async {
+        let calls = Counter()
+        let ok: [String: Any] = ["request_id": "r", "slots": [], "calculation_version": "v", "generated_at": "2026-10-29T03:00:00Z", "valid_until": "2099-10-29T03:05:00Z"]
+        MockURLProtocol.install { _, _ in
+            calls.increment()
+            return calls.value == 1 ? .error(409, code: "availability_changed_retry") : .json(200, ok)
+        }
+        let vm = SearchViewModel(api: api(), partyID: "p", timeZone: TimeZone(identifier: "Asia/Seoul")!)
+        await vm.search()
+        XCTAssertEqual(vm.state, .empty)
+        XCTAssertEqual(calls.value, 2)
+
+        MockURLProtocol.install { _, _ in .error(409, code: "availability_changed_retry") }
+        await vm.search()
+        XCTAssertEqual(vm.state, .failed("검색하는 동안 그룹 정보가 바뀌었습니다. 다시 찾아 주세요."))
+        XCTAssertEqual(MockURLProtocol.requests.count, 2)
+    }
+
+    /// 첫 저장이 반영됐는데 응답을 잃고 내용을 고쳐 같은 키로 보내면 idempotency_mismatch다. 키를 비우고 다시 읽어 이후
+    /// 저장은 If-Match로 간다.
+    @MainActor
+    func testIdempotencyMismatchReloadsAndDropsKey() async {
+        let configured: [String: Any] = ["request_id": "r", "preferences": ["status": "configured", "time_zone": "Asia/Seoul", "version": 1,
+                                                                            "weekly_intervals": [["weekday": 1, "start_minute": 540, "end_minute": 1320]], "updated_at": "2026-10-29T03:00:00Z"]]
+        let unconfigured: [String: Any] = ["request_id": "r", "preferences": ["status": "unconfigured", "time_zone": NSNull(), "version": 0, "weekly_intervals": [], "updated_at": NSNull()]]
+        let puts = Counter()
+        MockURLProtocol.install { req, _ in
+            if req.httpMethod == "GET" { return .json(200, puts.value == 0 ? unconfigured : configured) }
+            puts.increment()
+            switch puts.value {
+            case 1: throw URLError(.networkConnectionLost)   // 서버는 반영했지만 응답을 잃었다
+            case 2: return .error(409, code: "idempotency_mismatch")
+            default: return .json(200, configured)
+            }
+        }
+        let vm = PreferencesViewModel(api: api(), deviceTimeZone: "Asia/Seoul")
+        await vm.load()
+        _ = await vm.save()
+        vm.days[2] = []   // 내용을 고친다(화요일 활동 안 함)
+        let second = await vm.save()
+        XCTAssertFalse(second)
+        XCTAssertEqual(vm.version, 1, "서버 값을 다시 읽었다")
+        _ = await vm.save()
+        let sent = MockURLProtocol.requests.filter { $0.request.httpMethod == "PUT" }
+        XCTAssertEqual(sent.count, 3)
+        XCTAssertEqual(sent[0].request.value(forHTTPHeaderField: "Idempotency-Key"), sent[1].request.value(forHTTPHeaderField: "Idempotency-Key"))
+        XCTAssertEqual(sent[2].request.value(forHTTPHeaderField: "If-Match"), "\"1\"")
+    }
+}

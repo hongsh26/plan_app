@@ -128,7 +128,9 @@ final class PreferencesViewModel: ObservableObject {
         needsCityPicker = !PreferencesRules.isRegionZone(deviceTimeZone)
     }
 
-    func load() async {
+    /// 읽기에 성공하면 true.
+    @discardableResult
+    func load() async -> Bool {
         isBusy = true
         defer { isBusy = false }
         do {
@@ -136,8 +138,10 @@ final class PreferencesViewModel: ObservableObject {
             let p = try await api.send(.get("/v1/availability/preferences/me"), as: Envelope.self).preferences
             apply(p)
             message = nil
+            return true
         } catch {
             message = UserMessage.of(error)
+            return false
         }
     }
 
@@ -202,10 +206,12 @@ final class PreferencesViewModel: ObservableObject {
             apply(p)
             message = "저장했습니다."
             return true
-        } catch let e as APIError where e.serverCode == "version_conflict" {
+        } catch let e as APIError where e.serverCode == "version_conflict" || e.serverCode == "idempotency_mismatch" {
+            // idempotency_mismatch: 첫 저장이 반영됐는데 응답을 잃은 뒤 내용을 고쳐 같은 키로 보냈다. 키를 비우고 서버 값을
+            // 다시 읽는다(그 뒤 저장은 If-Match로 간다).
             pendingCreateKey = nil
             await load()
-            message = UserMessage.of(e)
+            message = "서버에 저장된 값을 다시 불러왔습니다. 확인 후 다시 저장하세요."
             return false
         } catch let e as APIError where e.serverCode == "time_zone_invalid" {
             needsCityPicker = true

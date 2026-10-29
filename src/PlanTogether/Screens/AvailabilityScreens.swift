@@ -12,17 +12,16 @@ struct PreferencesView: View {
         }
         .navigationTitle("활동 시간")
         .task {
-            if model.vm == nil { model.vm = PreferencesViewModel(api: session.api) }
-            await model.vm?.load()
-            await session.preferencesRefreshed()
+            // 처음 들어올 때만 읽는다. 탭을 오가도 저장하지 않은 편집을 지우지 않는다.
+            guard model.vm == nil else { return }
+            let vm = PreferencesViewModel(api: session.api)
+            model.vm = vm
+            if await vm.load() { await session.preferencesRefreshed() }
         }
-        // 다른 기기에서 바꾸면 sync가 무효화 신호만 준다. 다시 읽는다.
+        // 다른 기기에서 바꾸면 sync가 무효화 신호만 준다. 다시 읽고, 읽기에 성공했을 때만 표시를 지운다.
         .onChange(of: session.syncState?.needsPreferenceRefresh ?? false) { _, needs in
-            guard needs else { return }
-            Task {
-                await model.vm?.load()
-                await session.preferencesRefreshed()
-            }
+            guard needs, let vm = model.vm else { return }
+            Task { if await vm.load() { await session.preferencesRefreshed() } }
         }
     }
 }
@@ -109,7 +108,12 @@ struct SearchView: View {
             if let vm = box.vm { SearchContent(vm: vm) } else { ProgressView() }
         }
         .navigationTitle("모두 가능한 시간")
-        .task { if box.vm == nil { box.vm = SearchViewModel(api: session.api, partyID: partyID) } }
+        .task {
+            guard box.vm == nil else { return }
+            let vm = SearchViewModel(api: session.api, partyID: partyID)
+            box.vm = vm
+            await vm.prepare()
+        }
     }
 }
 
@@ -130,8 +134,12 @@ private struct SearchContent: View {
                 Picker("약속 길이", selection: $vm.form.durationMinutes) {
                     ForEach(SearchForm.durations, id: \.self) { m in Text(m % 60 == 0 ? "\(m / 60)시간" : "\(m / 60)시간 \(m % 60)분").tag(m) }
                 }
-                LabeledContent("시간대", value: vm.form.timeZone.identifier)
-                Button("찾기") { Task { await vm.search() } }
+                Picker("시간대", selection: Binding(get: { vm.form.timeZone.identifier },
+                                                   set: { if let tz = TimeZone(identifier: $0) { vm.setTimeZone(tz) } })) {
+                    if vm.needsTimeZonePick { Text("도시를 고르세요").tag(vm.form.timeZone.identifier) }
+                    ForEach(PreferencesRules.regionZones, id: \.self) { Text($0).tag($0) }
+                }
+                Button("찾기") { Task { await vm.search() } }.disabled(vm.needsTimeZonePick)
                 if let m = vm.validationMessage { Text(m).font(.footnote).foregroundStyle(.red) }
             }
             switch vm.state {
@@ -140,8 +148,11 @@ private struct SearchContent: View {
             case .loading:
                 Section { ProgressView() }
             case .results(let sections, let until):
-                if vm.isExpired {
-                    Section { Text("결과가 만료됐습니다. 다시 찾아 주세요.").font(.footnote) }
+                // valid_until이 지나면 화면을 열어 둔 채로도 만료 표시가 나오게 주기적으로 다시 그린다.
+                TimelineView(.periodic(from: .now, by: 10)) { _ in
+                    if vm.isExpired {
+                        Section { Text("결과가 만료됐습니다. 다시 찾아 주세요.").font(.footnote) }
+                    }
                 }
                 ForEach(sections) { day in
                     Section(day.title) {
@@ -159,9 +170,20 @@ private struct SearchContent: View {
                     Text("그룹 준비를 기다리는 중")
                     // 본인 문제일 때만 CTA. 다른 멤버의 수·원인은 보여 주지 않는다.
                     if activityUnconfigured { Text("내 활동 시간을 먼저 설정하세요. (활동 시간 탭)").font(.footnote) }
-                    if calendarState != "ready" {
-                        Text("내 캘린더 연결이 필요합니다. (캘린더 탭)").font(.footnote)
+                    switch CalendarCTA.of(calendarState) {
+                    case .none: EmptyView()
+                    case .connect:
+                        Text("내 캘린더가 연결되지 않았습니다.").font(.footnote)
+                        Button("캘린더 연결") { Task { await session.calendarConnect() } }
+                    case .syncing:
+                        HStack { ProgressView(); Text("내 캘린더를 올리는 중입니다.").font(.footnote) }
+                    case .refresh:
+                        Text("내 캘린더 정보가 오래됐습니다.").font(.footnote)
                         Button("내 캘린더 새로고침") { Task { await session.calendarRefresh(.manual) } }
+                    case .allowInSettings:
+                        Text("캘린더 접근이 꺼져 있습니다. 설정 앱에서 전체 접근을 허용하세요.").font(.footnote)
+                    case .selectCalendars:
+                        Text("읽을 캘린더를 골라 주세요. (캘린더 탭)").font(.footnote)
                     }
                 }
             case .failed(let message):
