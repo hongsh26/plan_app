@@ -72,8 +72,8 @@ private struct CompleteBody: Encodable {
 
 /// revision은 연결 안에서 단조 증가해야 한다(서버 last_snapshot_revision). 보내기 전에 저장한다.
 protocol RevisionStore: Sendable {
-    func lastRevision() -> Int64
-    func setLastRevision(_ revision: Int64) throws
+    func lastRevision() async -> Int64
+    func setLastRevision(_ revision: Int64) async throws
 }
 
 /// snapshot 하나를 올린다(설계 3 §7.2): create → page 전부 → complete.
@@ -109,9 +109,9 @@ struct CalendarUploader {
     }
 
     private func createSession(expectedPages: Int, window: SnapshotWindow) async throws -> String {
-        var revision = revisions.lastRevision() + 1
+        var revision = await revisions.lastRevision() + 1
         for attempt in 0..<2 {
-            try revisions.setLastRevision(revision)
+            try await revisions.setLastRevision(revision)
             var req = try APIRequest.json("POST", "/v1/calendar/snapshots", body: CreateSnapshotBody(
                 revision: revision, windowStart: RFC3339.format(window.start), windowEnd: RFC3339.format(window.end),
                 expectedPages: expectedPages))
