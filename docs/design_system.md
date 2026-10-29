@@ -54,7 +54,7 @@ PlanTogether iOS 앱의 시각 언어, 컴포넌트, 접근성, SwiftUI 적용 �
 | `primaryInk` | `#2D47D1` | `#93A6FF` | 링크, 보조 버튼 글자, 정보 배너 글자 |
 | `onPrimary` | `#FFFFFF` | `#FFFFFF` | 주 버튼 글자 |
 | `primaryTint` | `#E8EDFF` | `#1A2147` | 정보·대기 배너 바탕, 선택된 칩 바탕 |
-| `brandGradient` | `#2DA0FD → #3A5BF0 → #6B4BF6` | 같음 | 첫 실행 히어로, 앱 이름 영역. 위 글자는 흰색 큰 글자만 |
+| `brandGradient` | `#2DA0FD → #3A5BF0 → #6B4BF6` | 같음 | 첫 실행 히어로, 앱 이름 영역. 위 글자는 흰색 큰 글자만, 그리고 `primary` 이후 영역(가운데~아래)에만 올린다 |
 | `accentCoral` | `#FF6F66` | `#FF7A72` | Party 색, 일러스트 |
 | `accentSunny` | `#FFC23D` | `#FFC94F` | Party 색, 반짝임 장식 |
 | `accentMint` | `#3DDC97` | `#45E0A0` | Party 색, 일러스트 |
@@ -81,6 +81,10 @@ PlanTogether iOS 앱의 시각 언어, 컴포넌트, 접근성, SwiftUI 적용 �
 | `textTertiary` on `bg` | 캡션 | 4.84 | 통과 | 6.47 | 통과 |
 | `onPrimary` on `primary` | 주 버튼 글자 | 5.34 | 통과 | 4.87 | 통과 |
 | 흰 글자 on 그라데이션 끝 `#6B4BF6` | 히어로 글자 | 5.30 | 통과 | 5.30 | 통과 |
+| 흰 글자 on 그라데이션 가운데 `#3A5BF0` | 히어로 글자 | 5.34 | 통과 | 5.34 | 통과 |
+| 흰 글자 on 그라데이션 시작 `#2DA0FD` | 히어로 위쪽 | 2.78 | **금지** | 2.78 | **금지** |
+| 흰 글자 on `error` | 탭 개수 배지 | 5.63 | 통과 | — | — |
+| `onAccent` on `error` | 탭 개수 배지(Dark) | — | — | 6.42 | 통과 |
 | `primaryInk` on `surface` | 링크·보조 버튼 | 7.16 | 통과 | 7.47 | 통과 |
 | `primaryInk` on `primaryTint` | 정보 배너 | 6.13 | 통과 | 6.76 | 통과 |
 | `mintInk` on `successTint` | 성공 배너 | 4.84 | 통과 | 9.86 | 통과 |
@@ -98,12 +102,13 @@ PlanTogether iOS 앱의 시각 언어, 컴포넌트, 접근성, SwiftUI 적용 �
 | `accentCoral` on `surface` | 코랄을 글자로 | 2.72 | **금지** | 6.77 | 통과 |
 | `accentSunny` on `surface` | 노랑을 글자로 | 1.61 | **금지** | 11.21 | 통과 |
 
+- **히어로 규칙:** 그라데이션 시작색 `#2DA0FD` 위 흰 글자는 큰 글자 기준(3:1)에도 못 미친다(2.78). 앱 이름과 문구는 그라데이션의 `primary`(가운데)부터 끝색까지 영역에 놓고, 위쪽 밝은 하늘색 영역에는 일러스트만 둔다. 글자를 위로 올려야 하면 글자 뒤에 `primary` 40% 덧칠을 깔아 3:1 이상을 만든 뒤 이 표에 값을 더한다.
 - **규칙:** accent 네 색(`accentCoral`·`accentSunny`·`accentMint`·`accentSky`)은 Light에서 글자색으로 쓰지 않는다. 글자에는 같은 계열 `*Ink`를 쓴다. accent 면 위 글자는 두 모드 모두 `onAccent`(짙은 남색)다. 흰 글자를 올리지 않는다(코랄 위 흰 글자 2.72).
 - 시스템 "대비 증가"가 켜지면 `textTertiary`를 `textSecondary`로, `separator`를 `fieldBorder`로 올린다(asset catalog의 High Contrast 변형).
 
 ### 2.4 Party 색
 
-- Party마다 accent 네 색 중 하나를 붙여 목록에서 구별한다. 서버에 필드를 만들지 않는다. **기기가 Party ID(UUID)의 바이트 합을 4로 나눈 나머지로 고른다.** 기기·사용자가 달라도 같은 Party는 같은 색이다.
+- Party마다 accent 네 색 중 하나를 붙여 목록에서 구별한다. 서버에 필드를 만들지 않는다. **기기가 Party ID(UUID)의 원시 16바이트(`UUID.uuid` 튜플, 문자열 표기가 아님)를 부호 없는 정수로 더한 합을 4로 나눈 나머지로 고른다.** 순서는 `0 coral, 1 sunny, 2 mint, 3 sky`. 기기·사용자가 달라도 같은 Party는 같은 색이다.
 - Party 색은 Party 카드의 머리글자 배지, Party 상세 상단 띠에만 쓴다.
 - **사람에게 색을 붙이지 않는다.** 멤버 아바타는 모두 같은 중립색이다. 손 색이 사람을 뜻하는 것처럼 보이면, 결과 화면이나 일러스트에서 "누가 되는지"를 그린 것으로 읽힐 수 있다.
 
@@ -207,13 +212,14 @@ Dark에서는 그림자를 쓰지 않는다. `surface`와 `bg`의 밝기 차와 
 ```
 
 - 왼쪽 배지는 Party 색 면 위 Party 이름 첫 글자(`onAccent`). 크기 44pt, `radius.md`.
-- 아래 "다음 할 일" 줄은 하나만 보인다. 우선순위: ① 내 응답이 필요한 제안 ② 다음 확정 약속(`11월 2일 (일) 오전 10:00 GMT+9`) ③ 없으면 줄 생략.
+- 아래 "다음 할 일" 줄은 하나만 보인다. 우선순위: ① 본인 조치가 필요한 것(이 Party 확정 약속의 내 반영 `조치 필요`, 확인 대기 제안에서 `내 캘린더 새로고침`이 필요한 경우) ② 내 응답이 필요한 제안 ③ 다음 확정 약속(`11월 2일 (월) 오전 10:00 GMT+9`) ④ 없으면 줄 생략.
+- **"내 응답이 필요한 제안"의 정의**(카드 줄과 약속 탭 배지가 같이 쓴다): 내가 고정 참여자이고, 제안이 `open`이고, 내 응답이 `pending`인 제안. `tentative`(미정)는 이미 답한 것으로 보고 세지 않는다. 가입 전에 생성된 제안과 `awaiting_calendar_refresh`(이미 전원 수락)는 세지 않는다.
 - **다음 할 일 줄에 다른 멤버의 응답 상태·캘린더 상태를 쓰지 않는다.** "2명이 아직 응답 안 함" 같은 문구는 금지다. 본인 행동 또는 Party가 공유하는 확정 사실만 쓴다.
 
 **슬롯 행** (공통 가능 시간 결과)
 
 ```
-  10월 30일 (목)                         ← 날짜 섹션 제목 (.title2)
+  10월 30일 (금)                         ← 날짜 섹션 제목 (.title2)
 ┌──────────────────────────────────────┐
 │ 오전 10:00 – 11:00          GMT+9  › │
 │──────────────────────────────────────│
@@ -251,7 +257,7 @@ Dark에서는 그림자를 쓰지 않는다. `surface`와 `bg`의 밝기 차와 
 | 오프라인 | `surfaceSunken` / `textSecondary` | `wifi.slash` | `오프라인 · 마지막으로 받은 내용을 보여 줍니다` |
 
 - 구조: 아이콘 + 제목(`.headline`) + 설명(`.subheadline`, 선택) + 본인 CTA(선택, Secondary 작게).
-- **배너 규칙:** 다른 멤버를 이름으로 부르거나 수로 세지 않는다. CTA는 본인이 고칠 수 있는 원인일 때만 붙인다(설계 6 §8, 설계 7 §8). 예: 준비 대기에서 내 활동 시간이 없으면 `내 활동 시간 설정`, 내 캘린더가 오래됐으면 `내 캘린더 새로고침`. 다른 사람이 원인이면 CTA 없이 "다른 멤버의 준비가 끝나면 다시 찾을 수 있습니다"만.
+- **배너 규칙:** 다른 멤버를 이름으로 부르거나 수로 세지 않는다. CTA는 본인이 고칠 수 있는 원인일 때만 붙인다(설계 6 §8, 설계 7 §8). 예: 준비 대기에서 내 활동 시간이 없으면 `내 활동 시간 설정`, 내 캘린더가 오래됐으면 `내 캘린더 새로고침`. 다른 사람이 원인이면 CTA 없이 "준비가 끝나면 다시 찾을 수 있습니다"만.
 - 배너는 색만으로 뜻을 전하지 않는다. 아이콘과 문구가 항상 함께 있다.
 
 ### 5.5 빈 상태
@@ -266,7 +272,7 @@ Dark에서는 그림자를 쓰지 않는다. `surface`와 `bg`의 밝기 차와 
 - 라벨은 필드 위에 늘 보인다(placeholder만으로 라벨을 대신하지 않는다).
 - 이메일: `.textContentType(.username)`, `.keyboardType(.emailAddress)`, 자동 대문자·자동 수정 끔.
 - 비밀번호: `SecureField` + 보기/숨기기 버튼(`eye`/`eye.slash`, 44pt). 가입·재설정은 `.newPassword`, 로그인은 `.password`. 도움말은 `10자 이상`만 쓴다. 조합 규칙이 없으므로 강도 막대를 두지 않는다(설계 2 §5.1 이메일 로그인 개정, `feature/email-login` 병합 대기).
-- 인증·재설정 코드: 6칸 숫자. `.textContentType(.oneTimeCode)`, `.keyboardType(.numberPad)`. 붙여넣기로 한 번에 채워진다. VoiceOver에는 칸 6개가 아니라 필드 하나 "인증 코드, 6자리 숫자"로 읽힌다.
+- 인증·재설정 코드: 8자리 Crockford base32(`ABCD-EFGH`) 한 칸 필드. `.textContentType(.oneTimeCode)`, `.keyboardType(.asciiCapable)`, 자동 대문자·자동 수정 끔, 고정폭 숫자(`.monospaced()`). 공백·하이픈·소문자를 받고 정규화는 `EmailAuth.normalizedCode`가 한다. 숫자 패드는 글자를 칠 수 없으므로 쓰지 않는다. VoiceOver 라벨 "인증 코드, 영문과 숫자 8자리"(`feature/email-login` 계약).
 
 ### 5.7 세그먼트·칩 (공개 수준)
 
@@ -290,10 +296,10 @@ Dark에서는 그림자를 쓰지 않는다. `surface`와 `bg`의 밝기 차와 
 ### 5.8 시간 표시
 
 - 형식: 기기 로캘의 날짜·시각 형식 + 약식 시간대. 약어는 `TimeZone.abbreviation(for:)` 값을 그대로 쓴다(서울 `GMT+9`, 뉴욕 `EDT`/`EST`).
-- 날짜 섹션 제목: `10월 30일 (목)`. 연도가 올해가 아니면 연도를 붙인다.
+- 날짜 섹션 제목: `10월 30일 (금)`. 연도가 올해가 아니면 연도를 붙인다.
 - 같은 날 끝나면 끝 날짜를 생략하고, 자정을 넘으면 끝에 `(다음 날)`을 붙인다.
 - 검색 시간대가 기기 시간대와 다르면 결과 화면 위에 `뉴욕 시간 기준`처럼 도시 이름을 한 번 보인다.
-- 하나의 `TimeRangeText` 컴포넌트가 화면 글자와 VoiceOver 라벨(§7.2)을 함께 만든다. 결과·제안·확정 약속이 모두 이것을 쓴다.
+- 하나의 `TimeRangeText` 컴포넌트(범위)와 그 단일 시각 변형 `TimeText`가 화면 글자와 VoiceOver 라벨(§7.2)을 함께 만든다. 결과·제안·확정 약속·유효 시각(`오후 3:40 GMT+9까지 유효한 결과입니다`)·응답 마감 등 **화면에 시각이 나오는 모든 곳**이 이 둘만 쓴다. 그래야 약어가 빠지는 곳이 없다.
 
 ### 5.9 멤버 아바타
 
@@ -339,7 +345,7 @@ Dark에서는 그림자를 쓰지 않는다. `surface`와 `bg`의 밝기 차와 
 ### 7.2 VoiceOver
 
 - 슬롯 행은 요소 하나로 묶고(`accessibilityElement(children: .combine)`) 라벨을 직접 만든다.
-  - 기본: `10월 30일 목요일 오전 10시부터 11시, 한국 표준시`
+  - 기본: `10월 30일 금요일 오전 10시부터 11시, 한국 표준시`
   - 시간대 이름은 `TimeZone.localizedName(for:locale:)`의 전체 이름이다(약어를 읽게 하지 않는다). 그 날짜가 일광 절약 시간이면 그 이름을 쓴다(`미국 동부 하계 표준시`).
   - DST를 걸치면 양쪽 이름을 모두 읽는다: `11월 1일 일요일 오전 1시 30분 미국 동부 하계 표준시부터 오전 1시 미국 동부 표준시까지`
   - 힌트: `두 번 탭하면 이 시간으로 제안을 만듭니다`
@@ -400,28 +406,30 @@ Dark에서는 그림자를 쓰지 않는다. `surface`와 `bg`의 밝기 차와 
 
 ### 9.3 2단계 계획 (SwiftUI 적용)
 
-**시작 조건:** 이메일 로그인(`feature/email-login`, `RootView.swift`·`Auth/EmailAuth.swift`를 바꾼다)과 제안 생명주기(`feature/proposal-lifecycle`, 체크리스트 7)가 둘 다 `main`에 병합된 뒤 시작한다. 두 브랜치가 `RootView.swift`와 새 화면을 소유하므로 그 전에 시작하면 충돌한다. 2단계는 `main`에서 새 기능 브랜치(예: `feature/design-apply`)를 따서 아래 단위 순서로 한다. 단위 하나가 끝날 때마다 빌드·전체 테스트를 돌리고 커밋한다.
+**범위:** 2단계는 **이미 있는 화면의 모양을 바꾸는 일**과 **공용 토큰·컴포넌트를 만드는 일**만 한다. 새 기능 화면(멤버 관리 P9, 프로필 수정·계정 삭제 UI, 제안·응답, 확정 약속 S18, 알림 배지 N7, 알림 화면)은 그 기능을 맡은 브랜치가 만들고, U2 컴포넌트를 가져다 쓴다. 화면 모델·서버 호출은 바꾸지 않는다(§9.2).
+
+**단위별 시작 조건:** 단위마다 다르다. U1·U2·U4는 어느 브랜치에도 막히지 않으므로 **지금 시작할 수 있고** 끝나는 대로 `main`에 병합한다. 그래야 제안 브랜치(`feature/proposal-lifecycle`)와 이메일 로그인 브랜치(`feature/email-login`)가 처음부터 이 시스템으로 화면을 만들 수 있다(§9.2). 두 브랜치가 소유하는 파일(`RootView.swift`, 로그인 화면, 제안 화면)은 병합 전에는 건드리지 않는다. 각 단위는 `main`에서 딴 기능 브랜치(예: `feature/design-apply`)에서 하고, 단위가 끝날 때마다 빌드·전체 테스트 후 커밋한다.
 
 **모든 단위에 공통인 수락 기준** (단위별 표의 "확인"에 더한다)
 
-- **빌드·회귀:** 앱이 빌드되고 기존 테스트(`ScreenModelTests.swift` 등 전체)가 그대로 통과한다. 화면 모델은 바꾸지 않는다(§9.2)
+- **빌드·회귀:** 앱이 빌드되고 기존 테스트(`ScreenModelTests.swift` 등 전체)가 그대로 통과한다
 - **Dynamic Type:** xSmall·기본·AX3·AX5에서 글자가 잘리거나 겹치지 않는다. 시간대 약어는 AX 크기에서 다음 줄로 내려가되 사라지지 않는다(§7.1)
 - **Dark mode·대비 증가:** Light·Dark·High Contrast에서 §2.3 표에 있는 쌍만 글자에 쓴다. Light에서 accent 네 색을 글자에 쓰지 않는다
-- **VoiceOver:** 바꾼 화면을 VoiceOver로 처음부터 끝까지 넘겨 본다. 슬롯·응답·Party 카드는 §7.2 라벨대로 한 요소로 읽힌다. 장식(Party 배지, 일러스트, 반짝임)은 읽히지 않는다
+- **VoiceOver:** 라벨 문자열은 뷰 밖의 순수 함수(라벨 빌더)가 만들고 단위 테스트로 고정한다. 바꾼 화면은 VoiceOver로 순회하고, 가능하면 UI 테스트에서 `XCUIApplication().performAccessibilityAudit()`를 돌린다. 장식(Party 배지, 일러스트, 반짝임)은 읽히지 않는다
 - **누름 영역·동작:** 44×44pt 이상(§7.4). 동작 줄이기에서 반짝임·스프링이 없다(§7.5)
 - **개인정보:** §5.10 표를 어기지 않는다. 결과·준비 대기 화면에 사람 수·아바타·이름·원인이 없다
-- **스크린숏:** `ScreenSnapshotTests`(선택 실행)로 Light·Dark·AX3를 찍어 시안과 비교한다
+- **스크린숏 기록:** `ScreenSnapshotTests`(선택 실행, 지금은 `SearchContent` 한 장)를 바꾼 화면마다 늘리고 Light·Dark × 기본·AX5 네 장을 찍는다. 단위마다 rec에 스크린숏 경로와 VoiceOver 순회 결과를 남긴다
 
-| 단위 | 하는 일 | 주로 바뀌는 파일 | 확인 |
-|---|---|---|---|
-| U1 토큰 | §2 색을 Color Set(Any·Dark·High Contrast)으로, `Theme`(Colors·Fonts·Space·Radius·Shadow·Motion), `PartyTint`, 루트 `.tint` | `src/PlanTogether/Assets.xcassets/Colors/*.colorset`(새), `src/PlanTogether/DesignSystem/Theme.swift`·`PartyTint.swift`(새), `Screens/RootView.swift`(tint 한 줄) | 화면 변화는 색뿐. `PartyTintTests`(같은 ID는 항상 같은 색, 네 색 모두 나옴). §2.3 쌍의 대비를 hex에서 다시 계산해 기준 이상인지 보는 `ThemeContrastTests` |
-| U2 공용 컴포넌트 | 버튼 스타일 4종, `CardBackground`, `StatusBanner`, `EmptyStateView`, `TimeRangeText`, `MonogramAvatar`, `ResponseBadge`, `SlotRow`, `PartyCard`, `MemberRow` | `src/PlanTogether/DesignSystem/Components/*.swift`(새) | `TimeRangeTextTests`: 약어가 항상 붙음, `(다음 날)`, DST 경계에서 VoiceOver 라벨이 양쪽 전체 이름을 읽음(§5.8·§7.2). `SlotRow`에 사람 수·아바타를 넣을 인자가 없다. Preview로 Light·Dark·AX5 확인 |
-| U3 Party | Party 목록(카드·준비 카드·빈 상태·배너), 상세(카드형·주 버튼), 멤버(S9), 초대 시트(S10), 공개 수준(S12), 새 Party·참여 시트 | `Screens/PartyScreens.swift`(`PartyListView`·`PartyDetailView`·`VisibilityView`·`CreatePartySheet`·`JoinPartySheet`), 필요하면 `Screens/Party/*.swift`로 나눈다 | Party 카드 VoiceOver 라벨 `주말 등산 모임, 멤버 4명, 방장, …`. "다음 할 일" 줄과 준비 카드에 다른 멤버 상태가 없다. 공개 수준 옆에 다른 멤버 정보가 없다 |
-| U4 검색·결과 | 조건 칩·조건 시트, 날짜 카드 + `SlotRow`, 준비 대기 배너(본인 CTA만), 결과 0개 빈 상태, 활동 시간 화면 테마 | `Screens/AvailabilityScreens.swift`(`SearchView`·`SearchContent`·`PreferencesView`) | 슬롯 VoiceOver 라벨이 날짜·시각·시간대 전체 이름을 읽는다. 모든 슬롯에 시간대 약어가 보인다(AX5 포함). 결과·대기 화면에 사람 수·아바타·원인이 없다(`ScreenModelTests`의 결과 계약 테스트 통과) |
-| U5 탭 구조 | 탭 3개 `Party · 약속 · 나`(§1 확정). 나 탭에 캘린더·활동 시간·설정을 모은다. 약속 목록(S19)은 sync 캐시만 읽는다 | `Screens/RootView.swift`, `Screens/MeView.swift`(새), `Screens/AppointmentsView.swift`(새), `Screens/CalendarSection.swift`(위치만) | 기존 기능이 모두 새 탭에서 열린다. 약속 탭 배지는 본인 미해결 항목 + 내 응답이 필요한 제안 수만 센다. 새 서버 API가 없다 |
-| U6 로그인 화면 디자인 | 이메일 로그인 브랜치가 만든 로그인·가입·인증 코드·재설정 화면에 토큰·컴포넌트를 입힌다. 흐름·문구 계약(`screen_flows.md` §3)은 바꾸지 않는다 | `Screens/RootView.swift`의 로그인 부분 또는 병합 뒤 분리된 로그인 화면 파일 | `EmailAuthTests` 통과. 오류 문구가 이메일 존재 여부를 드러내지 않는다. 입력 필드 테두리 3:1, 오류는 아이콘+글자 |
-| U7 제안·확정 | 제안 브랜치가 만든 작성·상세·응답 화면에 컴포넌트를 입히고, 확정 약속 상세(S18)·확정 약속 카드를 만든다 | 제안 브랜치가 만든 `Screens/` 아래 제안 화면 파일, `Screens/ConfirmedEventView.swift`(새, 설계 8 구현과 함께) | 응답 행 VoiceOver `민지, 수락`. 응답 배지가 색+아이콘+글자. 충돌 원인·다른 멤버 캘린더 상태가 없다(`새로운 일정 충돌이 확인됨`·`캘린더 확인 중`만). 확정은 서버 성공 전에 보이지 않는다 |
-| U8 알림 | 알림 사전 설명 시트(S20)·알림 설정(S21) | 설계 9 구현 브랜치의 화면 파일 | 설계 9 구현이 `main`에 들어온 뒤에만 한다. 그 전이면 2단계에서 뺀다 |
+| 단위 | 시작 조건 | 하는 일 | 주로 바뀌는 파일 | 확인 |
+|---|---|---|---|---|
+| U1 토큰 | 지금 | §2 색을 Color Set(Any·Dark·High Contrast)으로, `Theme`(Colors·Fonts·Space·Radius·Shadow·Motion), `PartyTint`, 앱 루트 `.tint` | `src/PlanTogether/Assets.xcassets/Colors/*.colorset`(새), `src/PlanTogether/DesignSystem/Theme.swift`·`PartyTint.swift`(새), `src/PlanTogether/PlanTogetherApp.swift`(tint 한 줄, `RootView.swift`는 건드리지 않는다) | 화면 변화는 색뿐. `PartyTintTests`(같은 UUID는 항상 같은 색, 네 색 모두 나옴). `ThemeContrastTests`: asset catalog 색을 `UIColor(named:)`로 Light·Dark·High Contrast trait마다 풀어 §2.3 쌍의 대비가 기준 이상인지 본다(복사한 hex 표가 아니라 실제 asset을 검사) |
+| U2 공용 컴포넌트 | U1 뒤 | 버튼 스타일 4종, `CardBackground`, `StatusBanner`, `EmptyStateView`, `TimeRangeText`·`TimeText`, `MonogramAvatar`, `ResponseBadge`, `SlotRow`, `PartyCard`, `MemberRow`, `CodeField` | `src/PlanTogether/DesignSystem/Components/*.swift`(새) | `TimeRangeTextTests`: 약어가 항상 붙음, `(다음 날)`, DST 경계에서 VoiceOver 라벨이 양쪽 전체 이름을 읽음(§5.8·§7.2). 시간대 전체 이름은 테스트에서 `TimeZone.localizedName(for:locale: ko_KR)`의 실제 값을 확인해 §7.2 예시를 고친다. `SlotRow`에 사람 수·아바타를 넣을 인자가 없다. Preview로 Light·Dark·AX5 |
+| U3 Party | U2 뒤. 멤버 관리(P9)가 진행 중이면 그 브랜치와 `PartyScreens.swift` 충돌을 조율한다 | 이미 있는 Party 목록·상세·공개 수준·새 Party·참여 시트의 모양: 카드, 준비 카드, 빈 상태, 배너, 상세 카드형 레이아웃 | `Screens/PartyScreens.swift`(`PartyListView`·`PartyDetailView`·`VisibilityView`·`CreatePartySheet`·`JoinPartySheet`) | Party 카드 VoiceOver 라벨. "다음 할 일" 줄과 준비 카드에 다른 멤버 상태가 없다. 위임·강퇴·해산·초대 목록 같은 새 동작은 넣지 않는다 |
+| U4 검색·결과·활동 시간 | U2 뒤(독립) | 조건 칩·조건 시트, 날짜 카드 + `SlotRow`, 준비 대기 배너(본인 CTA만), 결과 0개 빈 상태, 유효 시각 `TimeText`, 활동 시간 화면 테마 | `Screens/AvailabilityScreens.swift`(`SearchView`·`SearchContent`·`PreferencesView`) | 슬롯 VoiceOver 라벨이 날짜·시각·시간대 전체 이름을 읽는다. 모든 시각에 약어가 보인다(AX5 포함). 결과·대기 화면에 사람 수·아바타·원인이 없다(`ScreenModelTests` 결과 계약 테스트 통과) |
+| U5 탭 구조 | `feature/email-login` 병합 뒤(`RootView.swift` 소유). 약속 탭 목록(S19)은 `feature/proposal-lifecycle` 병합 뒤, 확정 약속 줄은 설계 8 구현 뒤에 채운다. 그 전에는 빈 상태만 | 탭 3개 `Party · 약속 · 나`(`screen_flows.md` §1.1). 나 탭에 기존 캘린더·활동 시간·설정을 옮긴다. 약속 탭은 sync 캐시만 읽는 목록(S19). 배지는 N7·설계 8 구현이 들어온 뒤에만 붙인다 | `Screens/RootView.swift`, `Screens/MeView.swift`(새), `Screens/AppointmentsView.swift`(새), `Screens/CalendarSection.swift`(위치만) | 기존 기능이 모두 새 탭에서 열린다. 새 서버 API가 없다. 프로필 수정·계정 삭제 UI는 그 기능 브랜치 몫이라 여기서 만들지 않는다 |
+| U6 로그인 화면 모양 | `feature/email-login` 병합 뒤 | 그 브랜치의 로그인·가입·인증 코드·재설정 화면에 토큰·`CodeField`·버튼 스타일을 입힌다. 흐름과 문구는 브랜치 것을 그대로 둔다(`screen_flows.md` §3) | 병합된 로그인 화면 파일 | `EmailAuthTests` 통과. 8자리 영숫자 코드 필드(`.asciiCapable`). S2에 `인증 메일 다시 받기`가 항상 보인다. 오류가 이메일 존재 여부를 드러내지 않는다 |
+| U7 제안 화면 모양 | `feature/proposal-lifecycle` 병합 뒤 | 그 브랜치가 U2 컴포넌트로 만들지 못한 부분만 맞춘다. 확정 약속 상세(S18)는 설계 8 구현(W7)이 만든다 | 병합된 제안 화면 파일 | 응답 행 VoiceOver `민지, 수락`. 응답 배지가 색+아이콘+글자. 충돌 원인·다른 멤버 캘린더 상태가 없다. 확정은 서버 성공 전에 보이지 않는다 |
+| U8 알림 화면 모양 | 설계 9 구현이 `main`에 들어온 뒤 | S20·S21에 토큰을 입힌다 | 설계 9 구현 브랜치의 화면 파일 | 그 전이면 2단계에서 뺀다 |
 
-- U1·U2는 화면을 거의 바꾸지 않으므로 끝나는 대로 `main`에 병합해도 된다. U3~U5는 화면마다 하나씩 커밋한다.
-- 파일 이름 중 "(새)"는 제안이다. 병합된 두 브랜치의 구조를 보고 맞춘다.
+- 아직 아무 단위에도 들지 않는 것: S1 환영(새 화면, 이메일 로그인 병합 뒤 U6과 함께 정한다), S13 캘린더 연결 단계형 흐름(`CalendarSection`을 ①~⑤로 나누는 일은 화면 흐름 변경이라 2단계 범위 밖. U5에서는 위치만 옮긴다).
+- 파일 이름 중 "(새)"는 제안이다. 병합된 브랜치의 구조를 보고 맞춘다.
