@@ -84,13 +84,14 @@ func LoadLiveDevices(ctx context.Context, q Querier, userID uuid.UUID) ([]Device
 
 // emitDevice는 방금 만들거나 폐기한 기기의 전체 투영을 본인에게 sync 변경으로 남긴다. 같은 사용자의 다른 세션이
 // 새 기기·폐기를 증분으로 받는다(증분 == bootstrap). 폐기는 tombstone이 아니라 revoked=true upsert다.
-// tx에서 sync_changes를 쓰는 곳이 이 호출 하나여야 한다(mutation.NewTx는 ordinal을 0부터 발급한다).
-func emitDevice(ctx context.Context, tx pgx.Tx, userID, deviceID uuid.UUID) error {
-	d, err := LoadDevice(ctx, tx, deviceID)
+// mtx는 트랜잭션마다 mutation.NewTx로 하나만 만들어 그 트랜잭션의 모든 sync 변경이 같은 ordinal counter를 쓰게 한다
+// (PK가 (txid, ordinal)이다).
+func emitDevice(ctx context.Context, mtx *mutation.Tx, userID, deviceID uuid.UUID) error {
+	d, err := LoadDevice(ctx, mtx, deviceID)
 	if err != nil {
 		return err
 	}
-	return mutation.NewTx(tx).EmitChange(ctx, mutation.Change{
+	return mtx.EmitChange(ctx, mutation.Change{
 		Recipient: userID, EntityType: EntityDevice, EntityID: d.ID, Version: &d.Version, Payload: d.Payload,
 	})
 }

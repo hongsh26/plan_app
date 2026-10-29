@@ -24,6 +24,7 @@ import (
 
 	"plantogether/server/internal/platform/appleid"
 	"plantogether/server/internal/platform/audit"
+	"plantogether/server/internal/platform/mutation"
 	"plantogether/server/internal/platform/ratelimit"
 )
 
@@ -269,7 +270,7 @@ func (s *Service) signInTx(ctx context.Context, subject, displayName string, sea
 		}
 		// 같은 사용자의 다른 세션이 새 기기를 증분으로 받는다. users는 위에서 FOR SHARE로 잡았고 devices는 방금
 		// 만든 row라 잠금 순서(users → devices → sessions)를 바꾸지 않는다.
-		if err := emitDevice(ctx, tx, userID, deviceID); err != nil {
+		if err := emitDevice(ctx, mutation.NewTx(tx), userID, deviceID); err != nil {
 			return err
 		}
 		sess.NewUser = newUser
@@ -393,7 +394,7 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, requestID uu
 				return err
 			} else if revoked {
 				// 다른 세션의 기기 목록에서도 빠지게 revoked=true 투영을 보낸다.
-				if err := emitDevice(ctx, tx, userID, deviceID); err != nil {
+				if err := emitDevice(ctx, mutation.NewTx(tx), userID, deviceID); err != nil {
 					return err
 				}
 			}
@@ -494,7 +495,7 @@ func (s *Service) Logout(ctx context.Context, p Principal, requestID uuid.UUID) 
 			return err
 		} else if revoked {
 			// 다른 세션의 기기 목록에서도 빠지게 revoked=true 투영을 보낸다(기기 폐기 API와 같다).
-			if err := emitDevice(ctx, tx, p.UserID, p.DeviceID); err != nil {
+			if err := emitDevice(ctx, mutation.NewTx(tx), p.UserID, p.DeviceID); err != nil {
 				return err
 			}
 		}
