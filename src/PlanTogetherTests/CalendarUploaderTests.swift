@@ -138,8 +138,8 @@ final class CalendarUploaderTests: XCTestCase {
         do {
             _ = try await uploader(MemoryRevisionStore()).upload(pages: pages(2), factCount: 2, window: window)
             XCTFail("오류여야 한다")
-        } catch let e as APIError {
-            XCTAssertEqual(e.serverCode, "invalid_request")
+        } catch CalendarUploadError.pageRejected(let e) {
+            XCTAssertEqual(e.code, "invalid_request")
         }
         let paths = MockURLProtocol.requests.map { $0.request.url!.path }
         XCTAssertEqual(paths, ["/v1/calendar/snapshots", "/v1/calendar/snapshots/s-1/pages/0", "/v1/calendar/snapshots/s-1/abort"])
@@ -183,14 +183,20 @@ final class CalendarUploaderTests: XCTestCase {
         XCTAssertFalse(MockURLProtocol.requests.contains { $0.request.url!.path.contains("/old/") })
     }
 
-    /// 같은 revision의 열린 session(200)은 이어 쓴다.
-    func testReusedOpenSessionIsContinued() async throws {
-        MockURLProtocol.install { req, _ in
-            if req.url!.path == "/v1/calendar/snapshots" { return .json(200, CalendarMock.snapshot(id: "open-1", revision: 1, status: "open")) }
-            if req.url!.path.hasSuffix("/complete") { return .json(200, CalendarMock.snapshot(revision: 1, status: "completed")) }
+    /// 같은 revision의 열린 session(200)도 이어 쓰지 않고 새 revision으로 만든다(옛 staging과 key가 겹치지 않게).
+    func testReusedOpenSessionStartsNewRevision() async throws {
+        let store = MemoryRevisionStore(0)
+        MockURLProtocol.install { req, body in
+            if req.url!.path == "/v1/calendar/snapshots" {
+                let rev = (try? JSONSerialization.jsonObject(with: body!) as? [String: Any])?["revision"] as? Int
+                return rev == 1 ? .json(200, CalendarMock.snapshot(id: "open-1", revision: 1, status: "open")) : .json(201, CalendarMock.snapshot(id: "s-2", revision: 2))
+            }
+            if req.url!.path.hasSuffix("/complete") { return .json(200, CalendarMock.snapshot(revision: 2, status: "completed")) }
             return .json(200, [:])
         }
-        _ = try await uploader(MemoryRevisionStore()).upload(pages: pages(1), factCount: 1, window: window)
-        XCTAssertTrue(MockURLProtocol.requests.contains { $0.request.url!.path == "/v1/calendar/snapshots/open-1/pages/0" })
+        _ = try await uploader(store).upload(pages: pages(1), factCount: 1, window: window)
+        XCTAssertEqual(store.lastRevision(), 2)
+        XCTAssertFalse(MockURLProtocol.requests.contains { $0.request.url!.path.contains("/open-1/") })
+        XCTAssertTrue(MockURLProtocol.requests.contains { $0.request.url!.path == "/v1/calendar/snapshots/s-2/pages/0" })
     }
 }

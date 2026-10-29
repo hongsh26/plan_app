@@ -484,10 +484,11 @@ final class CalendarSyncTests: XCTestCase {
         XCTAssertEqual(server.status, "ready")
         XCTAssertEqual(status.note, .timeZoneFallback)
         XCTAssertEqual(status.uploadedFacts, 2)
-        XCTAssertEqual(server.snapshotsCreated, 2)
+        XCTAssertEqual(server.snapshotsCreated, 3, "사용자 시간대가 거부되면 두 번째 단계까지 간다")
         XCTAssertTrue(server.log.contains { $0.hasPrefix("POST /v1/calendar/snapshots/s-1/abort") }, "실패한 첫 session은 abort한다")
-        let page = String(data: server.pageBodies.last!, encoding: .utf8)!
-        XCTAssertFalse(page.contains("Asia/Seoul"))
+        let zones = Set(((try JSONSerialization.jsonObject(with: server.pageBodies.last!) as? [String: Any])?["facts"] as? [[String: Any]] ?? [])
+            .compactMap { $0["time_zone"] as? String })
+        XCTAssertEqual(zones, ["UTC"])
     }
 
     /// Low: 세션이 끝난 뒤(로그아웃·재로그인) 옛 CalendarSync는 요청을 보내지 않는다.
@@ -519,5 +520,59 @@ final class CalendarSyncTests: XCTestCase {
         XCTAssertEqual(gets, 2, "선택 변경은 진행 중 결과를 재사용하지 않고 새로 돈다")
         XCTAssertEqual(b.uploadedFacts, 1)
         XCTAssertEqual(server.status, "ready")
+    }
+
+    /// 재검증 Medium: 옛 sync 기기가 폐기된 상태(iPhone 재로그인)에서 업로드할 수 없는 iPad의 앱 활성화는 자동으로 맡지
+    /// 않고 PUT하지 않는다. 그 뒤 iPhone의 앱 활성화가 맡아서 올린다.
+    func testRevokedSyncDeviceIsClaimedOnlyByDeviceThatCanUpload() async throws {
+        let server = FakeCalendarServer()
+        server.exists = true; server.status = "ready"; server.version = 5; server.syncDevice = "old-phone"
+        server.sources = [["key": "k", "enabled": true]]
+        server.liveDevices = [TestTokens.deviceID, FakeCalendarServer.ipadDevice]  // old-phone은 폐기됐다
+
+        for ipadSource in [FakeEventSource(auth: .denied), FakeEventSource(auth: .restricted), FakeEventSource(cals: [home])] {
+            let ipad = await make(ipadSource, server, token: "ipad", device: FakeCalendarServer.ipadDevice)
+            _ = try await ipad.refresh(.foreground)
+            XCTAssertEqual(server.putCount, 0)
+            XCTAssertEqual(server.syncDevice, "old-phone")
+            XCTAssertEqual(server.status, "ready")
+        }
+
+        let phoneSource = FakeEventSource(cals: [work], events: [work.id: [event("w1", day: 1)]])
+        let store = InMemoryCalendarStateStore(CalendarLocalState(userID: TestTokens.userID, secret: Data(repeating: 3, count: 32), selectedCalendarIDs: [work.id]))
+        let phone = await make(phoneSource, server, store: store)
+        let status = try await phone.refresh(.foreground)
+        XCTAssertEqual(server.syncDevice, TestTokens.deviceID)
+        XCTAssertEqual(server.status, "ready")
+        XCTAssertEqual(status.uploadedFacts, 1)
+        XCTAssertEqual(server.snapshotsCreated, 1)
+    }
+
+    /// 재검증 Low: page 거부가 시간대 때문이 아니면(두 단계 대체 모두 거부) 오류로 끝나고 대체 표시를 남기지 않는다.
+    /// 일정 고유 시간대만 서버가 모르면 그 fact만 UTC로 바꾼다.
+    func testTimeZoneFallbackIsStagedAndOnlyForPageRejection() async throws {
+        let ny = CalendarEventOccurrence(eventIdentifier: "ny", occurrenceDate: now, start: now.addingTimeInterval(86_400), end: now.addingTimeInterval(90_000),
+                                         isAllDay: false, timeZoneID: "America/New_York", availability: .busy, isCanceled: false)
+        let source = FakeEventSource(cals: [work], events: [work.id: [event("w1", day: 2), ny]])
+        let server = FakeCalendarServer()
+        server.exists = true; server.status = "selecting"; server.version = 1
+        server.unknownZones = ["America/New_York"]
+        let sync = await make(source, server)
+        let status = try await sync.setSelection([work.id])
+        XCTAssertEqual(status.note, .timeZoneFallback)
+        let zones = Set(((try JSONSerialization.jsonObject(with: server.pageBodies.last!) as? [String: Any])?["facts"] as? [[String: Any]] ?? [])
+            .compactMap { $0["time_zone"] as? String })
+        XCTAssertEqual(zones, ["Asia/Seoul", "UTC"], "일정 고유 시간대만 UTC로, 사용자 시간대 fact는 그대로")
+
+        // 시간대와 무관한 거부: 모든 시간대를 막아 두 단계 모두 실패하게 한다.
+        let server2 = FakeCalendarServer()
+        server2.exists = true; server2.status = "selecting"; server2.version = 1
+        server2.unknownZones = ["Asia/Seoul", "America/New_York", "UTC"]
+        let sync2 = await make(source, server2)
+        do {
+            _ = try await sync2.setSelection([work.id])
+            XCTFail("오류여야 한다")
+        } catch CalendarUploadError.pageRejected {}
+        XCTAssertEqual(server2.snapshotsCreated, 3)
     }
 }

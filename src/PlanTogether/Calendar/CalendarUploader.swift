@@ -70,6 +70,11 @@ private struct CompleteBody: Encodable {
     enum CodingKeys: String, CodingKey { case factCount = "fact_count" }
 }
 
+enum CalendarUploadError: Error, Equatable {
+    /// page를 서버가 400으로 거부했다(fact 검증 실패). session은 abort했다.
+    case pageRejected(ServerError)
+}
+
 /// revision은 연결 안에서 단조 증가해야 한다(서버 last_snapshot_revision). 보내기 전에 저장한다.
 protocol RevisionStore: Sendable {
     func lastRevision() async -> Int64
@@ -99,7 +104,12 @@ struct CalendarUploader {
                 let req = APIRequest(method: "PUT", path: "/v1/calendar/snapshots/\(sessionID)/pages/\(n)", body: body,
                                      idempotencyKey: UUID().uuidString)
                 try checkActive()
-                _ = try await withRetry { try await api.send(req) }
+                do {
+                    _ = try await withRetry { try await api.send(req) }
+                } catch APIError.server(let e) where e.status == 400 {
+                    // page 내용(fact 검증)을 서버가 거부했다. 호출자가 원인별로 다시 시도할 수 있게 구별한다.
+                    throw CalendarUploadError.pageRejected(e)
+                }
             }
             var complete = try APIRequest.json("POST", "/v1/calendar/snapshots/\(sessionID)/complete", body: CompleteBody(factCount: factCount))
             complete.idempotencyKey = UUID().uuidString
@@ -112,8 +122,9 @@ struct CalendarUploader {
         }
     }
 
-    /// 같은 revision의 기존 session(200)이 열려 있으면 이어 쓰고, 끝났거나 중단됐으면 revision을 올린다. 409면 서버의
-    /// 마지막 revision + 1. 최대 세 번.
+    /// 같은 revision의 기존 session(200)을 돌려받으면 열려 있어도 이어 쓰지 않고 revision을 올린다. 옛 session의 다른
+    /// page에 남은 staging과 새 page의 key가 겹칠 수 있고, 새 revision의 create가 서버에서 옛 열린 session을 abort한다.
+    /// 409면 서버의 마지막 revision + 1. 최대 세 번.
     private func createSession(expectedPages: Int, window: SnapshotWindow) async throws -> String {
         var revision = await revisions.lastRevision() + 1
         for _ in 0..<3 {
@@ -126,7 +137,7 @@ struct CalendarUploader {
             do {
                 let response = try await withRetry { try await api.send(req) }
                 let snapshot = try decodeSnapshot(response.data)
-                if response.status == 201 || snapshot.status == "open" { return snapshot.id }
+                if response.status == 201 { return snapshot.id }
                 revision += 1
             } catch APIError.server(let e) where e.code == "version_conflict" {
                 revision = max(revision, e.currentVersion ?? revision) + 1
@@ -154,7 +165,9 @@ struct CalendarUploader {
     private static func sessionGone(_ error: Error) -> Bool {
         switch error as? APIError {
         case .sessionEnded?, .notSignedIn?: return true
-        case nil: return error is SessionGate.Closed
+        case nil:
+            if case CalendarUploadError.pageRejected? = error as? CalendarUploadError { return false }
+            return error is SessionGate.Closed
         case .server(let e)?: return e.status == 403 || e.code == "calendar_snapshot_state"
         default: return false
         }

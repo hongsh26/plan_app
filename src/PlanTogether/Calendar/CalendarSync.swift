@@ -260,11 +260,28 @@ actor CalendarSync {
         // 자기 권한·선택으로 PUT하면 sync 기기의 projection을 숨기고 두 기기가 번갈아 상태를 뒤집는다.
         var claim = !active
         if active, !conn.isSyncDevice {
-            if let other = conn.syncDeviceID, try await isLiveDevice(other), !explicit {
-                status.note = .otherSyncDevice
-                return status
+            if !explicit {
+                if let other = conn.syncDeviceID, try await isLiveDevice(other) {
+                    status.note = .otherSyncDevice
+                    return status
+                }
+                // 이 기기가 실제로 올릴 수 없으면(권한 없음·선택 없음) 자동으로 맡지 않는다. 맡으면서 거부·재선택 상태를 PUT하면,
+                // 올릴 수 있는 다른 기기(재로그인한 iPhone)가 그 뒤 이 기기를 살아 있는 sync 기기로 보고 물러나 projection이
+                // 숨겨진 채 남는다.
+                //   - 폐기된 sync 기기가 있었으면(올린 적 있는 연결) 아무것도 바꾸지 않는다. 올릴 수 있는 기기가 맡을 때까지 둔다.
+                //   - sync 기기가 없으면(한 번도 올리지 않은 연결, 노출할 generation이 없다) 맡지 않고 상태만 맞춘다.
+                if auth != .fullAccess || selected.isEmpty {
+                    guard conn.syncDeviceID == nil else {
+                        if auth == .fullAccess { status.note = .needsSelection }
+                        return status
+                    }
+                    claim = false
+                } else {
+                    claim = true
+                }
+            } else {
+                claim = true
             }
-            claim = true
         }
 
         guard auth == .fullAccess else {
@@ -319,12 +336,19 @@ actor CalendarSync {
         let done: CalendarConnection
         do {
             done = try await upload(facts, window: window)
-        } catch APIError.server(let e) where e.status == 400 && e.code == "invalid_request" {
-            // 서버는 시간대를 자기 tzdata(time.LoadLocation)로 검사한다. 기기가 아는 IANA 이름을 서버가 모르면 page 전체가
-            // 400이 되어 업로드가 계속 실패한다. 한 번은 모든 fact의 시간대를 UTC로 바꿔 다시 올린다. 시작·끝은 이미 UTC라
-            // 바쁜 시간은 그대로이고 원래 시간대 표시만 잃는다.
-            facts = facts.map { BusyFact(sourceEventKey: $0.sourceEventKey, startAt: $0.startAt, endAt: $0.endAt, allDay: $0.allDay, timeZone: "UTC", availability: $0.availability) }
-            done = try await upload(facts, window: window)
+        } catch CalendarUploadError.pageRejected {
+            // 서버는 시간대를 자기 tzdata(time.LoadLocation)로 검사한다. 기기 tz DB가 서버보다 새로우면 기기가 아는 IANA 이름을
+            // 서버가 몰라 page 전체가 400이 되고 업로드가 계속 실패한다. page가 거부되면 사용자 시간대와 다른(일정 고유)
+            // 시간대만 UTC로 바꿔 한 번, 그래도 거부되면 사용자 시간대까지 UTC로 바꿔 한 번 더 올린다. 시작·끝은 이미 UTC라
+            // 바쁜 시간은 그대로이고 원래 시간대 표시만 잃는다. 시간대와 무관한 거부면 두 번 다 실패해 오류로 끝난다.
+            let userTZ = currentTZ()
+            do {
+                facts = facts.map { $0.timeZone == userTZ ? $0 : $0.withTimeZone("UTC") }
+                done = try await upload(facts, window: window)
+            } catch CalendarUploadError.pageRejected {
+                facts = facts.map { $0.withTimeZone("UTC") }
+                done = try await upload(facts, window: window)
+            }
             status.note = .timeZoneFallback
         }
         var next = local

@@ -29,6 +29,10 @@ struct BusyFact: Encodable, Equatable, Sendable {
     let timeZone: String
     let availability: String
 
+    func withTimeZone(_ tz: String) -> BusyFact {
+        BusyFact(sourceEventKey: sourceEventKey, startAt: startAt, endAt: endAt, allDay: allDay, timeZone: tz, availability: availability)
+    }
+
     enum CodingKeys: String, CodingKey {
         case sourceEventKey = "source_event_key"
         case startAt = "start_at"
