@@ -47,6 +47,15 @@
 
 - **로그인이 새 기기의 sync 변경을 발행하지 않는다**(`auth.signInTx`의 `INSERT INTO devices`). 같은 사용자의 기존 세션은 새 기기를 bootstrap이나 `GET /v1/devices`로만 안다. 순차 fixture의 B1이 B2 기기를 증분으로 받지 못해 드러났다. Swift fixture 비교는 그 세션이 bootstrap·페이지로 **한 번도 받지 못한** 기기의 누락만 허용한다. 받은 기기가 빠지거나, 남거나(폐기 기기 부활), version이 다르면 실패다. **해소:** lead 결정으로 서버가 고쳤다. `signInTx`가 같은 트랜잭션에서 새 기기 투영을 발행하고, 로그아웃과 refresh 재사용 탐지의 기기 폐기도 revoked=true 투영을 보낸다(기기 투영 정의는 `auth/device_projection.go`로 옮겼다). 회귀 테스트 `TestDeviceLoginAndLogoutReachOtherSessions`. fixture를 다시 만들고 Swift의 기기 누락 허용을 지웠다(`aff3585`)
 
+## refresh 응답 유실 위험: 서버 유예 검토 (결정 대기, 구현은 체크리스트 1번 작업 때)
+
+서버가 refresh 회전을 커밋했는데 응답을 잃으면, 다음 refresh가 같은 token을 보내 재사용 탐지로 기기가 폐기된다(§5.2). 클라이언트만으로는 피할 수 없다. lead가 (a)를 채택했고 구현은 체크리스트 1번(로그인·세션) 작업 때 한다.
+
+- **추천 (a) 짧은 재사용 유예:** 쓰인 token이 `used_at`으로부터 30초 안에 다시 오고, 그 회전으로 만든 후속 세션이 아직 한 번도 쓰이지 않았고(`used_at IS NULL`, 폐기 안 됨), 같은 기기·token family면, 기기를 폐기하지 않는다. 대신 후속 세션을 폐기하고 새 쌍을 발급하며 audit `auth.refresh_grace_reissue`를 남긴다. 창 밖이나 후속 세션이 이미 쓰였으면 지금처럼 기기 폐기다. 창 안에서는 탈취 token으로 한 번 회전할 수 있어 탐지가 약해진다. 대신 정상 기기의 후속 token이 무효가 돼 401과 재로그인으로 드러난다
+- 탈락: (b) 멱등 refresh(후속 token 평문을 암호화해 짧게 보관하고 같은 요청에 같은 응답). 탐지는 약해지지 않지만 KMS(출시 조건 11)가 없고 저장·정리 경로가 는다. (c) 현상 유지
+- **확인할 점:** "그 회전으로 만든 후속 세션"을 찾는 링크가 지금 스키마에 있는가. `openSession`은 같은 `token_family_id`로 새 세션을 만들지만, 이전 세션 → 다음 세션 링크 열은 없어 보인다. family 안에서 `created_at`이 이전 세션 `used_at` 이후인 최신 세션으로 고를 수 있는지, 아니면 `sessions.rotated_from_session_id` 같은 열(마이그레이션)이 필요한지 정한다. 동시 refresh(single-flight가 막지만 다른 기기 복제 등)와 잠금 순서(users → devices → sessions)도 같이 본다
+- 그 전까지 iOS는 refresh 네트워크 오류 뒤 그 자리에서 다시 보내지 않는다(`APIClient.performRefresh`)
+
 ## 테스트
 
 - iOS: `xcodebuild … build test` 53개 실행 — 52개 통과(기존 4개 포함), 1개(실서버 스모크) 건너뜀. iPhone 16(iOS 18.3.1)과 iPhone 15(iOS 17.4)에서 같다. 시뮬레이터 런타임이 18.3.1이라 `OS=18.3` destination은 맞지 않아 기기 id로 지정했다
