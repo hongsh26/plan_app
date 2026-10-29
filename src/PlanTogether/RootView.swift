@@ -9,6 +9,8 @@ struct RootView: View {
                 .tabItem { Label("캘린더", systemImage: "calendar") }
             NavigationStack { SettingsView() }
                 .tabItem { Label("설정", systemImage: "gearshape") }
+            NavigationStack { ServerDebugView() }
+                .tabItem { Label("서버", systemImage: "network") }
         }
     }
 }
