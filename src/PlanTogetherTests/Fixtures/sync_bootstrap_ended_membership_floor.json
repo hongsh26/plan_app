@@ -1,0 +1,155 @@
+{
+ "scenario": "bootstrap_ended_membership_floor",
+ "description": "재현 5: snapshot의 끝난 본인 멤버십 하한이 다시 오는 Party upsert를 막는다",
+ "diverges_without": [
+  "floors",
+  "rules"
+ ],
+ "sessions": [
+  {
+   "name": "U",
+   "self_user_id": "9f37f6cb-c82c-486d-999e-852a97040c80",
+   "bootstrap": {
+    "cursor_watermark": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzM1Li0x",
+    "schema_version": 1,
+    "snapshot": [
+     {
+      "entity_id": "9f37f6cb-c82c-486d-999e-852a97040c80",
+      "entity_type": "user",
+      "operation": "upsert",
+      "payload": {
+       "display_name": "P6",
+       "status": "active"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     },
+     {
+      "entity_id": "1fa94190-a8df-4e07-9db1-b490233a25d9",
+      "entity_type": "device",
+      "operation": "upsert",
+      "payload": {
+       "has_push_token": false,
+       "last_seen_at": "2026-10-29T03:46:47Z",
+       "platform": "ios",
+       "push_authorization": "unknown",
+       "revoked": false,
+       "time_sensitive_setting": "not_supported"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     },
+     {
+      "entity_id": "92d2953d-98d4-4b6c-a1a0-15f84dd409b6",
+      "entity_type": "device",
+      "operation": "upsert",
+      "payload": {
+       "has_push_token": false,
+       "last_seen_at": "2026-10-29T03:46:47Z",
+       "platform": "ios",
+       "push_authorization": "unknown",
+       "revoked": false,
+       "time_sensitive_setting": "not_supported"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     },
+     {
+      "entity_id": "3116fa87-3f5c-4ca7-8583-130e9d85db4e",
+      "entity_type": "party_membership",
+      "operation": "tombstone",
+      "payload": null,
+      "scope_membership_id": "3116fa87-3f5c-4ca7-8583-130e9d85db4e",
+      "version": 2
+     }
+    ]
+   },
+   "pages": [
+    {
+     "changes": [
+      {
+       "entity_id": "08b69619-f629-41f2-b1d3-44d0a02ac478",
+       "entity_type": "party",
+       "operation": "upsert",
+       "payload": {
+        "created_at": "2026-10-29T03:46:47Z",
+        "created_by_user_id": "c0f57588-280a-47ca-afae-1f6e5e2687a3",
+        "member_limit": 10,
+        "name": "R5b",
+        "owner_membership_id": "d0c9bef8-e770-4e49-ac30-26e402acbee1",
+        "status": "active",
+        "updated_at": "2026-10-29T03:46:47Z"
+       },
+       "scope_membership_id": "3116fa87-3f5c-4ca7-8583-130e9d85db4e",
+       "version": 3
+      }
+     ],
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzM4Li0x",
+     "has_more": false
+    },
+    {
+     "changes": [],
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzM4Li0x",
+     "has_more": false
+    },
+    {
+     "changes": [],
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzM4Li0x",
+     "has_more": false
+    },
+    {
+     "changes": [],
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzM4Li0x",
+     "has_more": false
+    }
+   ],
+   "checkpoints": [
+    {
+     "after_pages": 2,
+     "entities": []
+    },
+    {
+     "after_pages": 4,
+     "entities": []
+    }
+   ],
+   "expected": [
+    {
+     "entity_type": "device",
+     "entity_id": "1fa94190-a8df-4e07-9db1-b490233a25d9",
+     "version": 1,
+     "payload": {
+      "has_push_token": false,
+      "last_seen_at": "2026-10-29T03:46:47Z",
+      "platform": "ios",
+      "push_authorization": "unknown",
+      "revoked": false,
+      "time_sensitive_setting": "not_supported"
+     }
+    },
+    {
+     "entity_type": "device",
+     "entity_id": "92d2953d-98d4-4b6c-a1a0-15f84dd409b6",
+     "version": 1,
+     "payload": {
+      "has_push_token": false,
+      "last_seen_at": "2026-10-29T03:46:47Z",
+      "platform": "ios",
+      "push_authorization": "unknown",
+      "revoked": false,
+      "time_sensitive_setting": "not_supported"
+     }
+    },
+    {
+     "entity_type": "user",
+     "entity_id": "9f37f6cb-c82c-486d-999e-852a97040c80",
+     "version": 1,
+     "payload": {
+      "display_name": "P6",
+      "status": "active"
+     }
+    }
+   ]
+  }
+ ]
+}

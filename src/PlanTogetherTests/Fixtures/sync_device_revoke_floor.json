@@ -1,0 +1,134 @@
+{
+ "scenario": "device_revoke_floor",
+ "description": "재현 7: snapshot의 폐기 기기 하한이 다시 오는 push 갱신 upsert를 막는다",
+ "diverges_without": [
+  "floors"
+ ],
+ "sessions": [
+  {
+   "name": "device",
+   "self_user_id": "2a9b7f84-b407-45ce-a46f-d9c6b3509900",
+   "bootstrap": {
+    "cursor_watermark": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzYzLi0x",
+    "schema_version": 1,
+    "snapshot": [
+     {
+      "entity_id": "2a9b7f84-b407-45ce-a46f-d9c6b3509900",
+      "entity_type": "user",
+      "operation": "upsert",
+      "payload": {
+       "display_name": "P6",
+       "status": "active"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     },
+     {
+      "entity_id": "6f12e326-1e86-494a-898c-26722374ac1c",
+      "entity_type": "device",
+      "operation": "upsert",
+      "payload": {
+       "has_push_token": false,
+       "last_seen_at": "2026-10-29T03:46:47Z",
+       "platform": "ios",
+       "push_authorization": "unknown",
+       "revoked": false,
+       "time_sensitive_setting": "not_supported"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     },
+     {
+      "entity_id": "3054b2b7-5034-4184-a345-e9afd6a50156",
+      "entity_type": "device",
+      "operation": "upsert",
+      "payload": {
+       "has_push_token": false,
+       "last_seen_at": "2026-10-29T03:46:47Z",
+       "platform": "ios",
+       "push_authorization": "unknown",
+       "revoked": false,
+       "time_sensitive_setting": "not_supported"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     },
+     {
+      "entity_id": "4188a94b-39bc-4cc6-b3fe-f559c7abdd8b",
+      "entity_type": "device",
+      "operation": "tombstone",
+      "payload": null,
+      "scope_membership_id": null,
+      "version": 3
+     }
+    ]
+   },
+   "pages": [
+    {
+     "changes": [
+      {
+       "entity_id": "4188a94b-39bc-4cc6-b3fe-f559c7abdd8b",
+       "entity_type": "device",
+       "operation": "upsert",
+       "payload": {
+        "has_push_token": true,
+        "last_seen_at": "2026-10-29T03:46:47Z",
+        "platform": "ios",
+        "push_authorization": "authorized",
+        "revoked": false,
+        "time_sensitive_setting": "enabled"
+       },
+       "scope_membership_id": null,
+       "version": 2
+      }
+     ],
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzY2Li0x",
+     "has_more": false
+    },
+    {
+     "changes": [],
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzY2Li0x",
+     "has_more": false
+    }
+   ],
+   "checkpoints": [],
+   "expected": [
+    {
+     "entity_type": "device",
+     "entity_id": "3054b2b7-5034-4184-a345-e9afd6a50156",
+     "version": 1,
+     "payload": {
+      "has_push_token": false,
+      "last_seen_at": "2026-10-29T03:46:47Z",
+      "platform": "ios",
+      "push_authorization": "unknown",
+      "revoked": false,
+      "time_sensitive_setting": "not_supported"
+     }
+    },
+    {
+     "entity_type": "device",
+     "entity_id": "6f12e326-1e86-494a-898c-26722374ac1c",
+     "version": 1,
+     "payload": {
+      "has_push_token": false,
+      "last_seen_at": "2026-10-29T03:46:47Z",
+      "platform": "ios",
+      "push_authorization": "unknown",
+      "revoked": false,
+      "time_sensitive_setting": "not_supported"
+     }
+    },
+    {
+     "entity_type": "user",
+     "entity_id": "2a9b7f84-b407-45ce-a46f-d9c6b3509900",
+     "version": 1,
+     "payload": {
+      "display_name": "P6",
+      "status": "active"
+     }
+    }
+   ]
+  }
+ ]
+}

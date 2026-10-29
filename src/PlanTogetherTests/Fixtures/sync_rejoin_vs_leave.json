@@ -1,0 +1,545 @@
+{
+ "scenario": "rejoin_vs_leave",
+ "description": "재현 3: 재가입 부트스트랩 뒤에 다른 기기 탈퇴의 version 없는 scope tombstone이 온다",
+ "diverges_without": [
+  "rules"
+ ],
+ "sessions": [
+  {
+   "name": "U",
+   "self_user_id": "3d9a2897-cf34-4267-8349-af15414b215b",
+   "bootstrap": {
+    "cursor_watermark": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzA4Li0x",
+    "schema_version": 1,
+    "snapshot": [
+     {
+      "entity_id": "3d9a2897-cf34-4267-8349-af15414b215b",
+      "entity_type": "user",
+      "operation": "upsert",
+      "payload": {
+       "display_name": "P6",
+       "status": "active"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     },
+     {
+      "entity_id": "5a68a449-99a6-407a-a597-47f5a2979993",
+      "entity_type": "device",
+      "operation": "upsert",
+      "payload": {
+       "has_push_token": false,
+       "last_seen_at": "2026-10-29T03:46:47Z",
+       "platform": "ios",
+       "push_authorization": "unknown",
+       "revoked": false,
+       "time_sensitive_setting": "not_supported"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     },
+     {
+      "entity_id": "6795d32f-61e3-4904-9f2d-8f1e34cc8abe",
+      "entity_type": "device",
+      "operation": "upsert",
+      "payload": {
+       "has_push_token": false,
+       "last_seen_at": "2026-10-29T03:46:47Z",
+       "platform": "ios",
+       "push_authorization": "unknown",
+       "revoked": false,
+       "time_sensitive_setting": "not_supported"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     },
+     {
+      "entity_id": "517b6ea4-4ac7-4fac-9dae-5f76a76f7e6f",
+      "entity_type": "device",
+      "operation": "upsert",
+      "payload": {
+       "has_push_token": false,
+       "last_seen_at": "2026-10-29T03:46:47Z",
+       "platform": "ios",
+       "push_authorization": "unknown",
+       "revoked": false,
+       "time_sensitive_setting": "not_supported"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     },
+     {
+      "entity_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+      "entity_type": "party",
+      "operation": "upsert",
+      "payload": {
+       "created_at": "2026-10-29T03:46:47Z",
+       "created_by_user_id": "fbf715ee-9de0-47fe-8afc-56a2f46318d9",
+       "member_limit": 10,
+       "name": "R3",
+       "owner_membership_id": "052aa22d-36bd-4fc6-9316-c1a11d73de01",
+       "status": "active",
+       "updated_at": "2026-10-29T03:46:47Z"
+      },
+      "scope_membership_id": "2053b04d-c663-4d36-890d-06180a58da53",
+      "version": 2
+     },
+     {
+      "entity_id": "052aa22d-36bd-4fc6-9316-c1a11d73de01",
+      "entity_type": "party_membership",
+      "operation": "upsert",
+      "payload": {
+       "display_name": "P6",
+       "joined_at": "2026-10-29T03:46:47Z",
+       "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+       "role": "owner",
+       "status": "active",
+       "user_id": "fbf715ee-9de0-47fe-8afc-56a2f46318d9"
+      },
+      "scope_membership_id": "2053b04d-c663-4d36-890d-06180a58da53",
+      "version": 1
+     },
+     {
+      "entity_id": "2053b04d-c663-4d36-890d-06180a58da53",
+      "entity_type": "party_membership",
+      "operation": "upsert",
+      "payload": {
+       "display_name": "P6",
+       "joined_at": "2026-10-29T03:46:47Z",
+       "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+       "role": "member",
+       "status": "active",
+       "user_id": "3d9a2897-cf34-4267-8349-af15414b215b"
+      },
+      "scope_membership_id": "2053b04d-c663-4d36-890d-06180a58da53",
+      "version": 1
+     },
+     {
+      "entity_id": "2329860d-ab3a-4ab8-af0e-510da38649ff",
+      "entity_type": "party_visibility_setting",
+      "operation": "upsert",
+      "payload": {
+       "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+       "share_location": false,
+       "user_id": "3d9a2897-cf34-4267-8349-af15414b215b",
+       "visibility_level": "busyOnly"
+      },
+      "scope_membership_id": "2053b04d-c663-4d36-890d-06180a58da53",
+      "version": 1
+     },
+     {
+      "entity_id": "54eb4f11-5c6f-44e3-840d-0e64b3e42ac1",
+      "entity_type": "party_schedule_projection",
+      "operation": "upsert",
+      "payload": {
+       "all_day": false,
+       "end_at": "2026-10-30T04:00:00Z",
+       "owner_user_id": "fbf715ee-9de0-47fe-8afc-56a2f46318d9",
+       "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+       "start_at": "2026-10-30T03:00:00Z",
+       "time_zone": "Asia/Seoul",
+       "visibility_level": "busyOnly"
+      },
+      "scope_membership_id": "2053b04d-c663-4d36-890d-06180a58da53",
+      "version": 1
+     }
+    ]
+   },
+   "pages": [
+    {
+     "changes": [
+      {
+       "entity_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+       "entity_type": "party",
+       "operation": "upsert",
+       "payload": {
+        "created_at": "2026-10-29T03:46:47Z",
+        "created_by_user_id": "fbf715ee-9de0-47fe-8afc-56a2f46318d9",
+        "member_limit": 10,
+        "name": "R3",
+        "owner_membership_id": "052aa22d-36bd-4fc6-9316-c1a11d73de01",
+        "status": "active",
+        "updated_at": "2026-10-29T03:46:47Z"
+       },
+       "scope_membership_id": "f5b303ef-819c-4d7a-9e42-181e8cb635e1",
+       "version": 4
+      },
+      {
+       "entity_id": "052aa22d-36bd-4fc6-9316-c1a11d73de01",
+       "entity_type": "party_membership",
+       "operation": "upsert",
+       "payload": {
+        "display_name": "P6",
+        "joined_at": "2026-10-29T03:46:47Z",
+        "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+        "role": "owner",
+        "status": "active",
+        "user_id": "fbf715ee-9de0-47fe-8afc-56a2f46318d9"
+       },
+       "scope_membership_id": "f5b303ef-819c-4d7a-9e42-181e8cb635e1",
+       "version": 1
+      },
+      {
+       "entity_id": "f5b303ef-819c-4d7a-9e42-181e8cb635e1",
+       "entity_type": "party_membership",
+       "operation": "upsert",
+       "payload": {
+        "display_name": "P6",
+        "joined_at": "2026-10-29T03:46:47Z",
+        "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+        "role": "member",
+        "status": "active",
+        "user_id": "3d9a2897-cf34-4267-8349-af15414b215b"
+       },
+       "scope_membership_id": "f5b303ef-819c-4d7a-9e42-181e8cb635e1",
+       "version": 1
+      },
+      {
+       "entity_id": "6f97e2b3-ea3c-4f22-8d4e-0224aa016c5c",
+       "entity_type": "party_visibility_setting",
+       "operation": "upsert",
+       "payload": {
+        "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+        "share_location": false,
+        "user_id": "3d9a2897-cf34-4267-8349-af15414b215b",
+        "visibility_level": "busyOnly"
+       },
+       "scope_membership_id": "f5b303ef-819c-4d7a-9e42-181e8cb635e1",
+       "version": 1
+      },
+      {
+       "entity_id": "54eb4f11-5c6f-44e3-840d-0e64b3e42ac1",
+       "entity_type": "party_schedule_projection",
+       "operation": "upsert",
+       "payload": {
+        "all_day": false,
+        "end_at": "2026-10-30T04:00:00Z",
+        "owner_user_id": "fbf715ee-9de0-47fe-8afc-56a2f46318d9",
+        "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+        "start_at": "2026-10-30T03:00:00Z",
+        "time_zone": "Asia/Seoul",
+        "visibility_level": "busyOnly"
+       },
+       "scope_membership_id": "f5b303ef-819c-4d7a-9e42-181e8cb635e1",
+       "version": 1
+      },
+      {
+       "entity_id": "2329860d-ab3a-4ab8-af0e-510da38649ff",
+       "entity_type": "party_visibility_setting",
+       "operation": "tombstone",
+       "payload": null,
+       "scope_membership_id": "2053b04d-c663-4d36-890d-06180a58da53",
+       "version": 2
+      },
+      {
+       "entity_id": "2053b04d-c663-4d36-890d-06180a58da53",
+       "entity_type": "party_membership",
+       "operation": "tombstone",
+       "payload": null,
+       "scope_membership_id": "2053b04d-c663-4d36-890d-06180a58da53",
+       "version": 2
+      },
+      {
+       "entity_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+       "entity_type": "party",
+       "operation": "tombstone",
+       "payload": null,
+       "scope_membership_id": "2053b04d-c663-4d36-890d-06180a58da53",
+       "version": null
+      },
+      {
+       "entity_id": "052aa22d-36bd-4fc6-9316-c1a11d73de01",
+       "entity_type": "party_membership",
+       "operation": "tombstone",
+       "payload": null,
+       "scope_membership_id": "2053b04d-c663-4d36-890d-06180a58da53",
+       "version": null
+      },
+      {
+       "entity_id": "54eb4f11-5c6f-44e3-840d-0e64b3e42ac1",
+       "entity_type": "party_schedule_projection",
+       "operation": "tombstone",
+       "payload": null,
+       "scope_membership_id": "2053b04d-c663-4d36-890d-06180a58da53",
+       "version": null
+      }
+     ],
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzExLi0x",
+     "has_more": false
+    },
+    {
+     "changes": [],
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzExLi0x",
+     "has_more": false
+    },
+    {
+     "changes": [],
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzExLi0x",
+     "has_more": false
+    },
+    {
+     "changes": [],
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzExLi0x",
+     "has_more": false
+    }
+   ],
+   "checkpoints": [
+    {
+     "after_pages": 2,
+     "entities": [
+      {
+       "entity_type": "party",
+       "entity_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+       "version": 4,
+       "payload": {
+        "created_at": "2026-10-29T03:46:47Z",
+        "created_by_user_id": "fbf715ee-9de0-47fe-8afc-56a2f46318d9",
+        "member_limit": 10,
+        "name": "R3",
+        "owner_membership_id": "052aa22d-36bd-4fc6-9316-c1a11d73de01",
+        "status": "active",
+        "updated_at": "2026-10-29T03:46:47Z"
+       }
+      },
+      {
+       "entity_type": "party_membership",
+       "entity_id": "052aa22d-36bd-4fc6-9316-c1a11d73de01",
+       "version": 1,
+       "payload": {
+        "display_name": "P6",
+        "joined_at": "2026-10-29T03:46:47Z",
+        "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+        "role": "owner",
+        "status": "active",
+        "user_id": "fbf715ee-9de0-47fe-8afc-56a2f46318d9"
+       }
+      },
+      {
+       "entity_type": "party_membership",
+       "entity_id": "f5b303ef-819c-4d7a-9e42-181e8cb635e1",
+       "version": 1,
+       "payload": {
+        "display_name": "P6",
+        "joined_at": "2026-10-29T03:46:47Z",
+        "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+        "role": "member",
+        "status": "active",
+        "user_id": "3d9a2897-cf34-4267-8349-af15414b215b"
+       }
+      },
+      {
+       "entity_type": "party_schedule_projection",
+       "entity_id": "54eb4f11-5c6f-44e3-840d-0e64b3e42ac1",
+       "version": 1,
+       "payload": {
+        "all_day": false,
+        "end_at": "2026-10-30T04:00:00Z",
+        "owner_user_id": "fbf715ee-9de0-47fe-8afc-56a2f46318d9",
+        "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+        "start_at": "2026-10-30T03:00:00Z",
+        "time_zone": "Asia/Seoul",
+        "visibility_level": "busyOnly"
+       }
+      },
+      {
+       "entity_type": "party_visibility_setting",
+       "entity_id": "6f97e2b3-ea3c-4f22-8d4e-0224aa016c5c",
+       "version": 1,
+       "payload": {
+        "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+        "share_location": false,
+        "user_id": "3d9a2897-cf34-4267-8349-af15414b215b",
+        "visibility_level": "busyOnly"
+       }
+      }
+     ]
+    },
+    {
+     "after_pages": 4,
+     "entities": [
+      {
+       "entity_type": "party",
+       "entity_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+       "version": 4,
+       "payload": {
+        "created_at": "2026-10-29T03:46:47Z",
+        "created_by_user_id": "fbf715ee-9de0-47fe-8afc-56a2f46318d9",
+        "member_limit": 10,
+        "name": "R3",
+        "owner_membership_id": "052aa22d-36bd-4fc6-9316-c1a11d73de01",
+        "status": "active",
+        "updated_at": "2026-10-29T03:46:47Z"
+       }
+      },
+      {
+       "entity_type": "party_membership",
+       "entity_id": "052aa22d-36bd-4fc6-9316-c1a11d73de01",
+       "version": 1,
+       "payload": {
+        "display_name": "P6",
+        "joined_at": "2026-10-29T03:46:47Z",
+        "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+        "role": "owner",
+        "status": "active",
+        "user_id": "fbf715ee-9de0-47fe-8afc-56a2f46318d9"
+       }
+      },
+      {
+       "entity_type": "party_membership",
+       "entity_id": "f5b303ef-819c-4d7a-9e42-181e8cb635e1",
+       "version": 1,
+       "payload": {
+        "display_name": "P6",
+        "joined_at": "2026-10-29T03:46:47Z",
+        "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+        "role": "member",
+        "status": "active",
+        "user_id": "3d9a2897-cf34-4267-8349-af15414b215b"
+       }
+      },
+      {
+       "entity_type": "party_schedule_projection",
+       "entity_id": "54eb4f11-5c6f-44e3-840d-0e64b3e42ac1",
+       "version": 1,
+       "payload": {
+        "all_day": false,
+        "end_at": "2026-10-30T04:00:00Z",
+        "owner_user_id": "fbf715ee-9de0-47fe-8afc-56a2f46318d9",
+        "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+        "start_at": "2026-10-30T03:00:00Z",
+        "time_zone": "Asia/Seoul",
+        "visibility_level": "busyOnly"
+       }
+      },
+      {
+       "entity_type": "party_visibility_setting",
+       "entity_id": "6f97e2b3-ea3c-4f22-8d4e-0224aa016c5c",
+       "version": 1,
+       "payload": {
+        "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+        "share_location": false,
+        "user_id": "3d9a2897-cf34-4267-8349-af15414b215b",
+        "visibility_level": "busyOnly"
+       }
+      }
+     ]
+    }
+   ],
+   "expected": [
+    {
+     "entity_type": "device",
+     "entity_id": "517b6ea4-4ac7-4fac-9dae-5f76a76f7e6f",
+     "version": 1,
+     "payload": {
+      "has_push_token": false,
+      "last_seen_at": "2026-10-29T03:46:47Z",
+      "platform": "ios",
+      "push_authorization": "unknown",
+      "revoked": false,
+      "time_sensitive_setting": "not_supported"
+     }
+    },
+    {
+     "entity_type": "device",
+     "entity_id": "5a68a449-99a6-407a-a597-47f5a2979993",
+     "version": 1,
+     "payload": {
+      "has_push_token": false,
+      "last_seen_at": "2026-10-29T03:46:47Z",
+      "platform": "ios",
+      "push_authorization": "unknown",
+      "revoked": false,
+      "time_sensitive_setting": "not_supported"
+     }
+    },
+    {
+     "entity_type": "device",
+     "entity_id": "6795d32f-61e3-4904-9f2d-8f1e34cc8abe",
+     "version": 1,
+     "payload": {
+      "has_push_token": false,
+      "last_seen_at": "2026-10-29T03:46:47Z",
+      "platform": "ios",
+      "push_authorization": "unknown",
+      "revoked": false,
+      "time_sensitive_setting": "not_supported"
+     }
+    },
+    {
+     "entity_type": "party",
+     "entity_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+     "version": 4,
+     "payload": {
+      "created_at": "2026-10-29T03:46:47Z",
+      "created_by_user_id": "fbf715ee-9de0-47fe-8afc-56a2f46318d9",
+      "member_limit": 10,
+      "name": "R3",
+      "owner_membership_id": "052aa22d-36bd-4fc6-9316-c1a11d73de01",
+      "status": "active",
+      "updated_at": "2026-10-29T03:46:47Z"
+     }
+    },
+    {
+     "entity_type": "party_membership",
+     "entity_id": "052aa22d-36bd-4fc6-9316-c1a11d73de01",
+     "version": 1,
+     "payload": {
+      "display_name": "P6",
+      "joined_at": "2026-10-29T03:46:47Z",
+      "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+      "role": "owner",
+      "status": "active",
+      "user_id": "fbf715ee-9de0-47fe-8afc-56a2f46318d9"
+     }
+    },
+    {
+     "entity_type": "party_membership",
+     "entity_id": "f5b303ef-819c-4d7a-9e42-181e8cb635e1",
+     "version": 1,
+     "payload": {
+      "display_name": "P6",
+      "joined_at": "2026-10-29T03:46:47Z",
+      "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+      "role": "member",
+      "status": "active",
+      "user_id": "3d9a2897-cf34-4267-8349-af15414b215b"
+     }
+    },
+    {
+     "entity_type": "party_schedule_projection",
+     "entity_id": "54eb4f11-5c6f-44e3-840d-0e64b3e42ac1",
+     "version": 1,
+     "payload": {
+      "all_day": false,
+      "end_at": "2026-10-30T04:00:00Z",
+      "owner_user_id": "fbf715ee-9de0-47fe-8afc-56a2f46318d9",
+      "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+      "start_at": "2026-10-30T03:00:00Z",
+      "time_zone": "Asia/Seoul",
+      "visibility_level": "busyOnly"
+     }
+    },
+    {
+     "entity_type": "party_visibility_setting",
+     "entity_id": "6f97e2b3-ea3c-4f22-8d4e-0224aa016c5c",
+     "version": 1,
+     "payload": {
+      "party_id": "81735e59-d32b-4e2b-ad12-3de016abd72f",
+      "share_location": false,
+      "user_id": "3d9a2897-cf34-4267-8349-af15414b215b",
+      "visibility_level": "busyOnly"
+     }
+    },
+    {
+     "entity_type": "user",
+     "entity_id": "3d9a2897-cf34-4267-8349-af15414b215b",
+     "version": 1,
+     "payload": {
+      "display_name": "P6",
+      "status": "active"
+     }
+    }
+   ]
+  }
+ ]
+}

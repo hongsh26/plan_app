@@ -1,0 +1,354 @@
+{
+ "scenario": "rename_vs_join",
+ "description": "재현 4: 가입 부트스트랩보다 먼저 부모 없는 멤버십 upsert(새 이름)가 온다",
+ "diverges_without": [
+  "orphans"
+ ],
+ "sessions": [
+  {
+   "name": "J",
+   "self_user_id": "1dd32498-b665-4748-8b06-04544dc9efb4",
+   "bootstrap": {
+    "cursor_watermark": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzIwLi0x",
+    "schema_version": 1,
+    "snapshot": [
+     {
+      "entity_id": "1dd32498-b665-4748-8b06-04544dc9efb4",
+      "entity_type": "user",
+      "operation": "upsert",
+      "payload": {
+       "display_name": "P6",
+       "status": "active"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     },
+     {
+      "entity_id": "e3412f52-c692-4b63-8a79-144b12376c56",
+      "entity_type": "device",
+      "operation": "upsert",
+      "payload": {
+       "has_push_token": false,
+       "last_seen_at": "2026-10-29T03:46:47Z",
+       "platform": "ios",
+       "push_authorization": "unknown",
+       "revoked": false,
+       "time_sensitive_setting": "not_supported"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     },
+     {
+      "entity_id": "575eaef1-37d7-42a7-a3b0-3c01a15bc5eb",
+      "entity_type": "device",
+      "operation": "upsert",
+      "payload": {
+       "has_push_token": false,
+       "last_seen_at": "2026-10-29T03:46:47Z",
+       "platform": "ios",
+       "push_authorization": "unknown",
+       "revoked": false,
+       "time_sensitive_setting": "not_supported"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     }
+    ]
+   },
+   "pages": [
+    {
+     "changes": [
+      {
+       "entity_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+       "entity_type": "party_membership",
+       "operation": "upsert",
+       "payload": {
+        "display_name": "A 늦은 이름",
+        "joined_at": "2026-10-29T03:46:47Z",
+        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "role": "owner",
+        "status": "active",
+        "user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275"
+       },
+       "scope_membership_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "version": 2
+      },
+      {
+       "entity_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+       "entity_type": "party",
+       "operation": "upsert",
+       "payload": {
+        "created_at": "2026-10-29T03:46:47Z",
+        "created_by_user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275",
+        "member_limit": 10,
+        "name": "R4",
+        "owner_membership_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+        "status": "active",
+        "updated_at": "2026-10-29T03:46:47Z"
+       },
+       "scope_membership_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "version": 2
+      },
+      {
+       "entity_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+       "entity_type": "party_membership",
+       "operation": "upsert",
+       "payload": {
+        "display_name": "P6",
+        "joined_at": "2026-10-29T03:46:47Z",
+        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "role": "owner",
+        "status": "active",
+        "user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275"
+       },
+       "scope_membership_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "version": 1
+      },
+      {
+       "entity_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "entity_type": "party_membership",
+       "operation": "upsert",
+       "payload": {
+        "display_name": "P6",
+        "joined_at": "2026-10-29T03:46:47Z",
+        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "role": "member",
+        "status": "active",
+        "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4"
+       },
+       "scope_membership_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "version": 1
+      },
+      {
+       "entity_id": "1b11b73c-5907-407e-87a7-d0732fb188ab",
+       "entity_type": "party_visibility_setting",
+       "operation": "upsert",
+       "payload": {
+        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "share_location": false,
+        "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4",
+        "visibility_level": "busyOnly"
+       },
+       "scope_membership_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "version": 1
+      }
+     ],
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzI0Li0x",
+     "has_more": false
+    },
+    {
+     "changes": [],
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzI0Li0x",
+     "has_more": false
+    },
+    {
+     "changes": [],
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzI0Li0x",
+     "has_more": false
+    }
+   ],
+   "checkpoints": [
+    {
+     "after_pages": 1,
+     "entities": [
+      {
+       "entity_type": "party",
+       "entity_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+       "version": 2,
+       "payload": {
+        "created_at": "2026-10-29T03:46:47Z",
+        "created_by_user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275",
+        "member_limit": 10,
+        "name": "R4",
+        "owner_membership_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+        "status": "active",
+        "updated_at": "2026-10-29T03:46:47Z"
+       }
+      },
+      {
+       "entity_type": "party_membership",
+       "entity_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "version": 1,
+       "payload": {
+        "display_name": "P6",
+        "joined_at": "2026-10-29T03:46:47Z",
+        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "role": "member",
+        "status": "active",
+        "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4"
+       }
+      },
+      {
+       "entity_type": "party_membership",
+       "entity_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+       "version": 2,
+       "payload": {
+        "display_name": "A 늦은 이름",
+        "joined_at": "2026-10-29T03:46:47Z",
+        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "role": "owner",
+        "status": "active",
+        "user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275"
+       }
+      },
+      {
+       "entity_type": "party_visibility_setting",
+       "entity_id": "1b11b73c-5907-407e-87a7-d0732fb188ab",
+       "version": 1,
+       "payload": {
+        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "share_location": false,
+        "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4",
+        "visibility_level": "busyOnly"
+       }
+      }
+     ]
+    },
+    {
+     "after_pages": 3,
+     "entities": [
+      {
+       "entity_type": "party",
+       "entity_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+       "version": 2,
+       "payload": {
+        "created_at": "2026-10-29T03:46:47Z",
+        "created_by_user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275",
+        "member_limit": 10,
+        "name": "R4",
+        "owner_membership_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+        "status": "active",
+        "updated_at": "2026-10-29T03:46:47Z"
+       }
+      },
+      {
+       "entity_type": "party_membership",
+       "entity_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+       "version": 1,
+       "payload": {
+        "display_name": "P6",
+        "joined_at": "2026-10-29T03:46:47Z",
+        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "role": "member",
+        "status": "active",
+        "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4"
+       }
+      },
+      {
+       "entity_type": "party_membership",
+       "entity_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+       "version": 2,
+       "payload": {
+        "display_name": "A 늦은 이름",
+        "joined_at": "2026-10-29T03:46:47Z",
+        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "role": "owner",
+        "status": "active",
+        "user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275"
+       }
+      },
+      {
+       "entity_type": "party_visibility_setting",
+       "entity_id": "1b11b73c-5907-407e-87a7-d0732fb188ab",
+       "version": 1,
+       "payload": {
+        "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+        "share_location": false,
+        "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4",
+        "visibility_level": "busyOnly"
+       }
+      }
+     ]
+    }
+   ],
+   "expected": [
+    {
+     "entity_type": "device",
+     "entity_id": "575eaef1-37d7-42a7-a3b0-3c01a15bc5eb",
+     "version": 1,
+     "payload": {
+      "has_push_token": false,
+      "last_seen_at": "2026-10-29T03:46:47Z",
+      "platform": "ios",
+      "push_authorization": "unknown",
+      "revoked": false,
+      "time_sensitive_setting": "not_supported"
+     }
+    },
+    {
+     "entity_type": "device",
+     "entity_id": "e3412f52-c692-4b63-8a79-144b12376c56",
+     "version": 1,
+     "payload": {
+      "has_push_token": false,
+      "last_seen_at": "2026-10-29T03:46:47Z",
+      "platform": "ios",
+      "push_authorization": "unknown",
+      "revoked": false,
+      "time_sensitive_setting": "not_supported"
+     }
+    },
+    {
+     "entity_type": "party",
+     "entity_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+     "version": 2,
+     "payload": {
+      "created_at": "2026-10-29T03:46:47Z",
+      "created_by_user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275",
+      "member_limit": 10,
+      "name": "R4",
+      "owner_membership_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+      "status": "active",
+      "updated_at": "2026-10-29T03:46:47Z"
+     }
+    },
+    {
+     "entity_type": "party_membership",
+     "entity_id": "4908f1ba-2c75-4120-a21f-5a903e96b575",
+     "version": 1,
+     "payload": {
+      "display_name": "P6",
+      "joined_at": "2026-10-29T03:46:47Z",
+      "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+      "role": "member",
+      "status": "active",
+      "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4"
+     }
+    },
+    {
+     "entity_type": "party_membership",
+     "entity_id": "bb576235-6e16-4e38-8317-42e6502a0ace",
+     "version": 2,
+     "payload": {
+      "display_name": "A 늦은 이름",
+      "joined_at": "2026-10-29T03:46:47Z",
+      "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+      "role": "owner",
+      "status": "active",
+      "user_id": "4afbae3e-284c-4e00-9fa3-5c91705b1275"
+     }
+    },
+    {
+     "entity_type": "party_visibility_setting",
+     "entity_id": "1b11b73c-5907-407e-87a7-d0732fb188ab",
+     "version": 1,
+     "payload": {
+      "party_id": "80af5665-5154-4f89-be1a-cb76ec047594",
+      "share_location": false,
+      "user_id": "1dd32498-b665-4748-8b06-04544dc9efb4",
+      "visibility_level": "busyOnly"
+     }
+    },
+    {
+     "entity_type": "user",
+     "entity_id": "1dd32498-b665-4748-8b06-04544dc9efb4",
+     "version": 1,
+     "payload": {
+      "display_name": "P6",
+      "status": "active"
+     }
+    }
+   ]
+  }
+ ]
+}

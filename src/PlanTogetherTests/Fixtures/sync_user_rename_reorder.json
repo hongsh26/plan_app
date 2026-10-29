@@ -1,0 +1,148 @@
+{
+ "scenario": "user_rename_reorder",
+ "description": "재현 8: 같은 사용자의 이름 변경 두 건이 역전되고 옛 upsert가 snapshot 뒤에 다시 온다",
+ "diverges_without": [],
+ "sessions": [
+  {
+   "name": "user",
+   "self_user_id": "4f8eeaab-bdb2-44ee-9413-5f203f078a7d",
+   "bootstrap": {
+    "cursor_watermark": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzcyLi0x",
+    "schema_version": 1,
+    "snapshot": [
+     {
+      "entity_id": "4f8eeaab-bdb2-44ee-9413-5f203f078a7d",
+      "entity_type": "user",
+      "operation": "upsert",
+      "payload": {
+       "display_name": "나중",
+       "status": "active"
+      },
+      "scope_membership_id": null,
+      "version": 3
+     },
+     {
+      "entity_id": "4bbee5a0-d736-41e0-8393-efca596a798b",
+      "entity_type": "device",
+      "operation": "upsert",
+      "payload": {
+       "has_push_token": false,
+       "last_seen_at": "2026-10-29T03:46:47Z",
+       "platform": "ios",
+       "push_authorization": "unknown",
+       "revoked": false,
+       "time_sensitive_setting": "not_supported"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     },
+     {
+      "entity_id": "c4c4b45c-2a78-4fef-a6f3-b223aa6253a2",
+      "entity_type": "device",
+      "operation": "upsert",
+      "payload": {
+       "has_push_token": false,
+       "last_seen_at": "2026-10-29T03:46:47Z",
+       "platform": "ios",
+       "push_authorization": "unknown",
+       "revoked": false,
+       "time_sensitive_setting": "not_supported"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     },
+     {
+      "entity_id": "00e5a293-f2cb-4c2d-89a9-18f929f92b2b",
+      "entity_type": "device",
+      "operation": "upsert",
+      "payload": {
+       "has_push_token": false,
+       "last_seen_at": "2026-10-29T03:46:47Z",
+       "platform": "ios",
+       "push_authorization": "unknown",
+       "revoked": false,
+       "time_sensitive_setting": "not_supported"
+      },
+      "scope_membership_id": null,
+      "version": 1
+     }
+    ]
+   },
+   "pages": [
+    {
+     "changes": [
+      {
+       "entity_id": "4f8eeaab-bdb2-44ee-9413-5f203f078a7d",
+       "entity_type": "user",
+       "operation": "upsert",
+       "payload": {
+        "display_name": "먼저",
+        "status": "active"
+       },
+       "scope_membership_id": null,
+       "version": 2
+      }
+     ],
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzc1Li0x",
+     "has_more": false
+    },
+    {
+     "changes": [],
+     "cursor": "MS43Njg4NjA4NTgyMzM0NDU5OTQwLjEuNTczMzc1Li0x",
+     "has_more": false
+    }
+   ],
+   "checkpoints": [],
+   "expected": [
+    {
+     "entity_type": "device",
+     "entity_id": "00e5a293-f2cb-4c2d-89a9-18f929f92b2b",
+     "version": 1,
+     "payload": {
+      "has_push_token": false,
+      "last_seen_at": "2026-10-29T03:46:47Z",
+      "platform": "ios",
+      "push_authorization": "unknown",
+      "revoked": false,
+      "time_sensitive_setting": "not_supported"
+     }
+    },
+    {
+     "entity_type": "device",
+     "entity_id": "4bbee5a0-d736-41e0-8393-efca596a798b",
+     "version": 1,
+     "payload": {
+      "has_push_token": false,
+      "last_seen_at": "2026-10-29T03:46:47Z",
+      "platform": "ios",
+      "push_authorization": "unknown",
+      "revoked": false,
+      "time_sensitive_setting": "not_supported"
+     }
+    },
+    {
+     "entity_type": "device",
+     "entity_id": "c4c4b45c-2a78-4fef-a6f3-b223aa6253a2",
+     "version": 1,
+     "payload": {
+      "has_push_token": false,
+      "last_seen_at": "2026-10-29T03:46:47Z",
+      "platform": "ios",
+      "push_authorization": "unknown",
+      "revoked": false,
+      "time_sensitive_setting": "not_supported"
+     }
+    },
+    {
+     "entity_type": "user",
+     "entity_id": "4f8eeaab-bdb2-44ee-9413-5f203f078a7d",
+     "version": 3,
+     "payload": {
+      "display_name": "나중",
+      "status": "active"
+     }
+    }
+   ]
+  }
+ ]
+}
