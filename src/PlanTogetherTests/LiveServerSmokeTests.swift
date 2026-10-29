@@ -135,3 +135,99 @@ final class LiveEventKitTests: XCTestCase {
         #endif
     }
 }
+
+/// 실서버 두 사용자 시연 흐름(선택 실행): 로그인 → Party 생성 → 초대 → 미리보기·수락 → 캘린더 업로드(가짜 source) →
+/// 활동 시간 → 검색. 화면이 쓰는 모델(PartyAPI, CalendarSync, PreferencesViewModel, SearchViewModel)을 그대로 지난다.
+final class LiveTwoUserDemoTests: XCTestCase {
+    @MainActor
+    func testTwoUsersFindCommonSlots() async throws {
+        guard let raw = ProcessInfo.processInfo.environment["PLAN_LIVE_SERVER_URL"], let base = URL(string: raw) else {
+            throw XCTSkip("PLAN_LIVE_SERVER_URL이 없다(선택 실행)")
+        }
+        let seoul = TimeZone(identifier: "Asia/Seoul")!
+        let stamp = Int(Date().timeIntervalSince1970)
+        func login(_ name: String) async throws -> (APIClient, AuthTokens) {
+            let api = APIClient(baseURL: base, tokenStore: InMemoryTokenStore())
+            let t = try await api.signIn(SignInRequest(identityToken: "dev:\(name).\(stamp)", authorizationCode: "dev", rawNonce: "dev", displayName: name))
+            return (api, t)
+        }
+        let (aAPI, aTok) = try await login("alice")
+        let (bAPI, bTok) = try await login("bob")
+
+        // Party·초대·수락
+        let partyID = try await PartyAPI(api: aAPI).createParty(name: "시연 Party \(stamp)")
+        let invite = try await PartyAPI(api: aAPI).createInvite(partyID: partyID)
+        XCTAssertEqual(InviteToken.parse(invite.token), invite.token)
+        let preview = try await PartyAPI(api: bAPI).preview(token: invite.token)
+        XCTAssertEqual(preview.memberCount, 1)
+        XCTAssertEqual(preview.inviterDisplayName, "alice")
+        let joined = try await PartyAPI(api: bAPI).accept(token: invite.token)
+        XCTAssertEqual(joined, partyID)
+
+        // 양쪽 캐시에 Party와 멤버 2명이 보인다.
+        for (api, tok) in [(aAPI, aTok), (bAPI, bTok)] {
+            let engine = SyncEngine(api: api, store: InMemorySyncStore(), userID: tok.userID)
+            var parties: [PartySummary] = []
+            for _ in 0..<20 {
+                parties = try await engine.sync().parties()
+                if parties.first?.members.count == 2 { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            XCTAssertEqual(parties.map(\.id), [partyID])
+            XCTAssertEqual(parties.first?.members.count, 2)
+            let vis = try await engine.sync().myVisibility(party: partyID)
+            XCTAssertEqual(vis, "busyOnly")
+        }
+
+        // 아직 활동 시간 미설정: 준비 대기(본인 미설정 CTA)
+        let early = SearchViewModel(api: aAPI, partyID: partyID, timeZone: seoul)
+        await early.search()
+        guard case .pending(_, true, _) = early.state else { return XCTFail("준비 대기여야 한다: \(early.state)") }
+
+        // 캘린더: 내일 서울 10:00~11:00(A), 14:00~15:00(B) busy
+        let cal = SnapshotWindow.calendar(seoul)
+        let tomorrow = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: Date()))!
+        func busy(_ id: String, _ hour: Int) -> CalendarEventOccurrence {
+            let s = cal.date(byAdding: .hour, value: hour, to: tomorrow)!
+            return CalendarEventOccurrence(eventIdentifier: id, occurrenceDate: s, start: s, end: s.addingTimeInterval(3_600),
+                                           isAllDay: false, timeZoneID: "Asia/Seoul", availability: .busy, isCanceled: false)
+        }
+        let info = CalendarInfo(id: "demo", title: "시연", sourceTitle: "local")
+        for (api, tok, event) in [(aAPI, aTok, busy("a", 10)), (bAPI, bTok, busy("b", 14))] {
+            let sync = CalendarSync(api: api, source: FakeEventSource(auth: .notDetermined, cals: [info], events: [info.id: [event]]),
+                                    store: InMemoryCalendarStateStore(), userID: tok.userID, deviceID: tok.deviceID, timeZone: { seoul })
+            _ = try await sync.connect()
+            let s = try await sync.setSelection([info.id])
+            XCTAssertEqual(s.connection?.status, "ready")
+        }
+
+        // 활동 시간: 제안값(매일 09:00~22:00)을 그대로 저장
+        for api in [aAPI, bAPI] {
+            let vm = PreferencesViewModel(api: api, deviceTimeZone: "Asia/Seoul")
+            await vm.load()
+            XCTAssertTrue(vm.isSuggestion)
+            let saved = await vm.save()
+            XCTAssertTrue(saved, vm.message ?? "")
+        }
+
+        // 검색: 내일 하루, 60분
+        let vm = SearchViewModel(api: aAPI, partyID: partyID, timeZone: seoul)
+        vm.form.startDate = tomorrow
+        vm.form.endDate = tomorrow
+        await vm.search()
+        guard case .results(let sections, let until) = vm.state else { return XCTFail("결과여야 한다: \(vm.state)") }
+        XCTAssertGreaterThan(until, Date())
+        let slots = sections.flatMap(\.slots)
+        XCTAssertFalse(slots.isEmpty)
+        XCTAssertLessThanOrEqual(slots.count, 3, "하루 최대 3개")
+        let aBusy = cal.date(byAdding: .hour, value: 10, to: tomorrow)!, bBusy = cal.date(byAdding: .hour, value: 14, to: tomorrow)!
+        for slot in slots {
+            XCTAssertFalse(slot.start < aBusy.addingTimeInterval(3_600) && slot.end > aBusy, "A의 일정과 겹친다: \(slot.label)")
+            XCTAssertFalse(slot.start < bBusy.addingTimeInterval(3_600) && slot.end > bBusy, "B의 일정과 겹친다: \(slot.label)")
+            XCTAssertGreaterThanOrEqual(slot.start, cal.date(byAdding: .hour, value: 9, to: tomorrow)!, "활동 시간 밖: \(slot.label)")
+            XCTAssertTrue(slot.label.hasSuffix("GMT+9"), slot.label)
+        }
+        await aAPI.logout()
+        await bAPI.logout()
+    }
+}
