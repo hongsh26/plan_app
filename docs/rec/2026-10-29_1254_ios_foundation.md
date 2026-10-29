@@ -43,9 +43,9 @@
 - §7.3의 SwiftData·App Group → JSON 파일(위 결정)
 - §7.3 큐 필드 중 `entity_type`·`entity_id`·`expected_version` 대신 method·path·본문·If-Match를 저장한다. 의존 재검증을 붙일 때 더한다
 
-## 발견한 서버 공백
+## 발견한 서버 공백 (해소: `ac0d8a9`)
 
-- **로그인이 새 기기의 sync 변경을 발행하지 않는다**(`auth.signInTx`의 `INSERT INTO devices`). 같은 사용자의 기존 세션은 새 기기를 bootstrap이나 `GET /v1/devices`로만 안다. 순차 fixture의 B1이 B2 기기를 증분으로 받지 못해 드러났다. Swift fixture 비교는 그 세션이 bootstrap·페이지로 **한 번도 받지 못한** 기기의 누락만 허용한다. 받은 기기가 빠지거나, 남거나(폐기 기기 부활), version이 다르면 실패다. 기기 목록 화면을 만들 때 서버에서 발행하거나 화면이 GET을 쓰도록 정한다
+- **로그인이 새 기기의 sync 변경을 발행하지 않는다**(`auth.signInTx`의 `INSERT INTO devices`). 같은 사용자의 기존 세션은 새 기기를 bootstrap이나 `GET /v1/devices`로만 안다. 순차 fixture의 B1이 B2 기기를 증분으로 받지 못해 드러났다. Swift fixture 비교는 그 세션이 bootstrap·페이지로 **한 번도 받지 못한** 기기의 누락만 허용한다. 받은 기기가 빠지거나, 남거나(폐기 기기 부활), version이 다르면 실패다. **해소:** lead 결정으로 서버가 고쳤다. `signInTx`가 같은 트랜잭션에서 새 기기 투영을 발행하고, 로그아웃과 refresh 재사용 탐지의 기기 폐기도 revoked=true 투영을 보낸다(기기 투영 정의는 `auth/device_projection.go`로 옮겼다). 회귀 테스트 `TestDeviceLoginAndLogoutReachOtherSessions`. fixture를 다시 만들고 Swift의 기기 누락 허용을 지웠다(`aff3585`)
 
 ## 테스트
 
@@ -65,4 +65,3 @@
 - Sign in with Apple(nonce, `ASAuthorizationController`)
 - 큐: 의존 version 재검증, 독립 entity 병렬 전송, 앱 활성화·네트워크 복구 시 자동 flush
 - 알림 단계에서 캐시를 App Group으로, `notification_ref_key`를 공유 Keychain으로
-- 위 서버 공백(새 기기 sync 변경)

@@ -15,7 +15,7 @@
 ### 읽기 규칙 (설계 3 §6)
 
 - busy·unavailable·tentative는 그대로, availability를 지원하지 않는 캘린더(`notSupported`)는 busy, free·취소는 제외
-- **참석자 응답은 보지 않는다.** 지시는 "참석 거절 등 제외"였지만 설계 §6.2가 "참석자 응답은 Launch MVP 계산에 사용하지 않는다"고 정한다. 설계를 따랐고 lead에게 선택지와 추천을 보냈다(거절한 회의도 busy면 Busy로 남는다)
+- **참석자 응답은 보지 않는다.** 지시는 "참석 거절 등 제외"였지만 설계 §6.2가 "참석자 응답은 Launch MVP 계산에 사용하지 않는다"고 정한다. lead가 설계안(A)으로 확정했다. **거절한 일정도 Busy로 남는다(설계 §6.2, Post-MVP 검토)**
 - all-day: 사용자 시간대의 시작일 00:00 ~ 마지막 날 다음 00:00(EventKit의 23:59:59 끝을 처리). Calendar 날짜 연산이라 DST 날(25시간)도 맞다. floating 시각과 IANA가 아닌 시간대(`GMT+0900` 등, 서버가 page 전체를 400으로 거부)는 사용자 시간대
 - 반복 일정은 EventKit이 window 안에서 펼친 occurrence. 끝 ≤ 시작은 제외, 366일 넘는 일정은 window로 자름, window와 겹치지 않으면 제외, 초 미만은 버림
 - **선택이 비면 EventKit을 읽지 않는다.** `predicateForEvents`의 calendars가 nil·빈 배열이면 모든 캘린더를 읽기 때문이다. 기본 선택은 비어 있다(§5.1)
