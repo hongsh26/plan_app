@@ -2,7 +2,7 @@
 
 PlanTogether iOS 앱의 시각 언어, 컴포넌트, 접근성, SwiftUI 적용 방법을 정한다. 화면별 흐름과 와이어프레임은 `docs/screen_flows.md`, 외부 레퍼런스 분석은 `docs/design_references.md`에 있다.
 
-- 상태: 초안 확정(2026-10-29). 1단계는 문서만 바꾼다. 코드 적용은 2단계에서 §9 순서로 한다
+- 상태: 확정 (사용자 방향 승인, 2026-10-29). 1단계는 문서만 바꾼다. 코드 적용은 2단계에서 §9.3 계획대로 한다
 - 기준: 앱 아이콘 `docs/plan_app_icon.png`, 상세 설계 3~9의 개인정보·화면 계약
 - 이 문서는 새 기능을 만들지 않는다. 체크리스트 1~10 항목의 화면을 어떻게 보이게 할지만 정한다
 - 정적 시안: `docs/design_mockups/index.html`(Party 목록, 공통 가능 시간 결과, 제안 응답)
@@ -398,13 +398,30 @@ Dark에서는 그림자를 쓰지 않는다. `surface`와 `bg`의 밝기 차와 
 - 새 화면(제안·응답·확정)은 처음부터 이 시스템으로 만든다.
 - 시안 비교는 기존 선택 실행 `ScreenSnapshotTests`로 Light·Dark·AX3 스크린숏을 찍어 확인한다.
 
-### 9.3 적용 순서 (2단계)
+### 9.3 2단계 계획 (SwiftUI 적용)
 
-1. 토큰: Asset catalog 색(Light·Dark·High Contrast), `Theme`, 루트 tint. 화면 변화는 색뿐
-2. 공용 컴포넌트: 버튼 스타일, `StatusBanner`, `EmptyStateView`, `TimeRangeText`(VoiceOver 라벨 포함, 단위 테스트), `MonogramAvatar`
-3. Party 목록·상세·초대·공개 수준
-4. 공통 가능 시간 검색·결과
-5. 탭 구조 변경(`screen_flows.md` §1, 사용자 결정 뒤)
-6. 로그인·가입·인증·재설정: 이메일 로그인 브랜치(`feature/email-login`)가 `main`에 병합된 뒤. `RootView`와 로그인 화면은 그 작업의 소유다
-7. 제안 작성·응답·확정(설계 7 구현과 함께), 확정 약속 카드(설계 8)
-8. 알림 사전 설명·알림 설정(설계 9 구현과 함께)
+**시작 조건:** 이메일 로그인(`feature/email-login`, `RootView.swift`·`Auth/EmailAuth.swift`를 바꾼다)과 제안 생명주기(`feature/proposal-lifecycle`, 체크리스트 7)가 둘 다 `main`에 병합된 뒤 시작한다. 두 브랜치가 `RootView.swift`와 새 화면을 소유하므로 그 전에 시작하면 충돌한다. 2단계는 `main`에서 새 기능 브랜치(예: `feature/design-apply`)를 따서 아래 단위 순서로 한다. 단위 하나가 끝날 때마다 빌드·전체 테스트를 돌리고 커밋한다.
+
+**모든 단위에 공통인 수락 기준** (단위별 표의 "확인"에 더한다)
+
+- **빌드·회귀:** 앱이 빌드되고 기존 테스트(`ScreenModelTests.swift` 등 전체)가 그대로 통과한다. 화면 모델은 바꾸지 않는다(§9.2)
+- **Dynamic Type:** xSmall·기본·AX3·AX5에서 글자가 잘리거나 겹치지 않는다. 시간대 약어는 AX 크기에서 다음 줄로 내려가되 사라지지 않는다(§7.1)
+- **Dark mode·대비 증가:** Light·Dark·High Contrast에서 §2.3 표에 있는 쌍만 글자에 쓴다. Light에서 accent 네 색을 글자에 쓰지 않는다
+- **VoiceOver:** 바꾼 화면을 VoiceOver로 처음부터 끝까지 넘겨 본다. 슬롯·응답·Party 카드는 §7.2 라벨대로 한 요소로 읽힌다. 장식(Party 배지, 일러스트, 반짝임)은 읽히지 않는다
+- **누름 영역·동작:** 44×44pt 이상(§7.4). 동작 줄이기에서 반짝임·스프링이 없다(§7.5)
+- **개인정보:** §5.10 표를 어기지 않는다. 결과·준비 대기 화면에 사람 수·아바타·이름·원인이 없다
+- **스크린숏:** `ScreenSnapshotTests`(선택 실행)로 Light·Dark·AX3를 찍어 시안과 비교한다
+
+| 단위 | 하는 일 | 주로 바뀌는 파일 | 확인 |
+|---|---|---|---|
+| U1 토큰 | §2 색을 Color Set(Any·Dark·High Contrast)으로, `Theme`(Colors·Fonts·Space·Radius·Shadow·Motion), `PartyTint`, 루트 `.tint` | `src/PlanTogether/Assets.xcassets/Colors/*.colorset`(새), `src/PlanTogether/DesignSystem/Theme.swift`·`PartyTint.swift`(새), `Screens/RootView.swift`(tint 한 줄) | 화면 변화는 색뿐. `PartyTintTests`(같은 ID는 항상 같은 색, 네 색 모두 나옴). §2.3 쌍의 대비를 hex에서 다시 계산해 기준 이상인지 보는 `ThemeContrastTests` |
+| U2 공용 컴포넌트 | 버튼 스타일 4종, `CardBackground`, `StatusBanner`, `EmptyStateView`, `TimeRangeText`, `MonogramAvatar`, `ResponseBadge`, `SlotRow`, `PartyCard`, `MemberRow` | `src/PlanTogether/DesignSystem/Components/*.swift`(새) | `TimeRangeTextTests`: 약어가 항상 붙음, `(다음 날)`, DST 경계에서 VoiceOver 라벨이 양쪽 전체 이름을 읽음(§5.8·§7.2). `SlotRow`에 사람 수·아바타를 넣을 인자가 없다. Preview로 Light·Dark·AX5 확인 |
+| U3 Party | Party 목록(카드·준비 카드·빈 상태·배너), 상세(카드형·주 버튼), 멤버(S9), 초대 시트(S10), 공개 수준(S12), 새 Party·참여 시트 | `Screens/PartyScreens.swift`(`PartyListView`·`PartyDetailView`·`VisibilityView`·`CreatePartySheet`·`JoinPartySheet`), 필요하면 `Screens/Party/*.swift`로 나눈다 | Party 카드 VoiceOver 라벨 `주말 등산 모임, 멤버 4명, 방장, …`. "다음 할 일" 줄과 준비 카드에 다른 멤버 상태가 없다. 공개 수준 옆에 다른 멤버 정보가 없다 |
+| U4 검색·결과 | 조건 칩·조건 시트, 날짜 카드 + `SlotRow`, 준비 대기 배너(본인 CTA만), 결과 0개 빈 상태, 활동 시간 화면 테마 | `Screens/AvailabilityScreens.swift`(`SearchView`·`SearchContent`·`PreferencesView`) | 슬롯 VoiceOver 라벨이 날짜·시각·시간대 전체 이름을 읽는다. 모든 슬롯에 시간대 약어가 보인다(AX5 포함). 결과·대기 화면에 사람 수·아바타·원인이 없다(`ScreenModelTests`의 결과 계약 테스트 통과) |
+| U5 탭 구조 | 탭 3개 `Party · 약속 · 나`(§1 확정). 나 탭에 캘린더·활동 시간·설정을 모은다. 약속 목록(S19)은 sync 캐시만 읽는다 | `Screens/RootView.swift`, `Screens/MeView.swift`(새), `Screens/AppointmentsView.swift`(새), `Screens/CalendarSection.swift`(위치만) | 기존 기능이 모두 새 탭에서 열린다. 약속 탭 배지는 본인 미해결 항목 + 내 응답이 필요한 제안 수만 센다. 새 서버 API가 없다 |
+| U6 로그인 화면 디자인 | 이메일 로그인 브랜치가 만든 로그인·가입·인증 코드·재설정 화면에 토큰·컴포넌트를 입힌다. 흐름·문구 계약(`screen_flows.md` §3)은 바꾸지 않는다 | `Screens/RootView.swift`의 로그인 부분 또는 병합 뒤 분리된 로그인 화면 파일 | `EmailAuthTests` 통과. 오류 문구가 이메일 존재 여부를 드러내지 않는다. 입력 필드 테두리 3:1, 오류는 아이콘+글자 |
+| U7 제안·확정 | 제안 브랜치가 만든 작성·상세·응답 화면에 컴포넌트를 입히고, 확정 약속 상세(S18)·확정 약속 카드를 만든다 | 제안 브랜치가 만든 `Screens/` 아래 제안 화면 파일, `Screens/ConfirmedEventView.swift`(새, 설계 8 구현과 함께) | 응답 행 VoiceOver `민지, 수락`. 응답 배지가 색+아이콘+글자. 충돌 원인·다른 멤버 캘린더 상태가 없다(`새로운 일정 충돌이 확인됨`·`캘린더 확인 중`만). 확정은 서버 성공 전에 보이지 않는다 |
+| U8 알림 | 알림 사전 설명 시트(S20)·알림 설정(S21) | 설계 9 구현 브랜치의 화면 파일 | 설계 9 구현이 `main`에 들어온 뒤에만 한다. 그 전이면 2단계에서 뺀다 |
+
+- U1·U2는 화면을 거의 바꾸지 않으므로 끝나는 대로 `main`에 병합해도 된다. U3~U5는 화면마다 하나씩 커밋한다.
+- 파일 이름 중 "(새)"는 제안이다. 병합된 두 브랜치의 구조를 보고 맞춘다.
