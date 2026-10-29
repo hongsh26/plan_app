@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PlanTogether 화면 시안</title>
+<!--
+  정적 시안. docs/design_system.md 토큰과 docs/screen_flows.md S6·S15·S17을 그린다.
+  외부 글꼴·스크립트 없음. 브라우저에서 파일을 바로 연다.
+  시스템 글꼴(SF Pro / SF Pro Rounded)이 없는 환경에서는 비슷한 시스템 글꼴로 보인다.
+-->
+<style>
+:root{
+  --bg:#F5F6FB; --surface:#FFFFFF; --sunken:#ECEEF7; --separator:#DADDEB; --field-border:#8C91B0;
+  --text1:#14162B; --text2:#4A4E6B; --text3:#666B88;
+  --primary:#3A5BF0; --primary-ink:#2D47D1; --on-primary:#FFFFFF; --primary-tint:#E8EDFF;
+  --coral:#FF6F66; --sunny:#FFC23D; --mint:#3DDC97; --sky:#43A5FD; --on-accent:#14162B;
+  --coral-ink:#C1352E; --sunny-ink:#8A5300; --mint-ink:#0E7A4D; --sky-ink:#0B5DB5;
+  --success-tint:#E3F8EE; --warning-tint:#FFF4DB; --error:#C42B2B; --error-tint:#FDE8E8;
+  --shadow-card:0 2px 8px rgba(20,22,43,.06),0 1px 2px rgba(20,22,43,.04);
+  --shadow-raised:0 6px 16px rgba(58,91,240,.22);
+  --card-border:transparent;
+  --page:#E4E7F2;
+}
+:root[data-theme="dark"]{
+  --bg:#0D0F1E; --surface:#171A2E; --sunken:#20243B; --separator:#2E3350; --field-border:#7A80A3;
+  --text1:#F2F3FA; --text2:#B6BAD4; --text3:#9095B4;
+  --primary:#4462F5; --primary-ink:#93A6FF; --primary-tint:#1A2147;
+  --coral:#FF7A72; --sunny:#FFC94F; --mint:#45E0A0; --sky:#5AB1FF;
+  --coral-ink:#FF9C95; --sunny-ink:#FFD27A; --mint-ink:#5FE6AE; --sky-ink:#8CC8FF;
+  --success-tint:#11291F; --warning-tint:#2E2510; --error:#FF6B6B; --error-tint:#331617;
+  --shadow-card:none; --shadow-raised:none; --card-border:#2E3350;
+  --page:#05060D;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0D0F1E; --surface:#171A2E; --sunken:#20243B; --separator:#2E3350; --field-border:#7A80A3;
+    --text1:#F2F3FA; --text2:#B6BAD4; --text3:#9095B4;
+    --primary:#4462F5; --primary-ink:#93A6FF; --primary-tint:#1A2147;
+    --coral:#FF7A72; --sunny:#FFC94F; --mint:#45E0A0; --sky:#5AB1FF;
+    --coral-ink:#FF9C95; --sunny-ink:#FFD27A; --mint-ink:#5FE6AE; --sky-ink:#8CC8FF;
+    --success-tint:#11291F; --warning-tint:#2E2510; --error:#FF6B6B; --error-tint:#331617;
+    --shadow-card:none; --shadow-raised:none; --card-border:#2E3350;
+    --page:#05060D;
+  }
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--page); color:var(--text1);
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Apple SD Gothic Neo","Noto Sans KR",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased; padding:32px 16px 48px;
+}
+.rounded{font-family:ui-rounded,"SF Pro Rounded",-apple-system,"Apple SD Gothic Neo",system-ui,sans-serif}
+header.page{max-width:1240px;margin:0 auto 28px;display:flex;flex-wrap:wrap;gap:16px;align-items:end;justify-content:space-between}
+header.page h1{font-size:28px;font-weight:700;letter-spacing:-.01em}
+header.page p{color:var(--text2);font-size:15px;margin-top:6px;max-width:640px;line-height:1.5}
+.toggle{display:flex;background:var(--surface);border:1px solid var(--separator);border-radius:999px;padding:4px}
+.toggle button{border:0;background:transparent;color:var(--text2);font:inherit;font-size:14px;padding:8px 16px;border-radius:999px;cursor:pointer;min-height:36px}
+.toggle button[aria-pressed="true"]{background:var(--primary);color:var(--on-primary)}
+.stage{max-width:1240px;margin:0 auto;display:flex;flex-wrap:wrap;gap:32px;justify-content:center}
+figure{display:flex;flex-direction:column;align-items:center;gap:14px}
+figcaption{font-size:14px;color:var(--text2);text-align:center;max-width:360px;line-height:1.45}
+figcaption b{color:var(--text1)}
+
+/* 폰 프레임 */
+.phone{width:375px;max-width:100%;height:780px;background:var(--bg);border-radius:44px;overflow:hidden;position:relative;
+  box-shadow:0 0 0 10px #14162B,0 24px 60px rgba(20,22,43,.25);display:flex;flex-direction:column}
+.status{height:44px;display:flex;align-items:center;justify-content:space-between;padding:0 28px;font-size:15px;font-weight:600;flex:none}
+.screen{flex:1;overflow:hidden;padding:0 16px}
+.nav{display:flex;align-items:center;justify-content:space-between;height:44px;color:var(--primary-ink);font-size:17px}
+.nav .icon{width:44px;height:44px;display:grid;place-items:center;font-size:22px}
+.large-title{font-size:34px;font-weight:700;letter-spacing:-.02em;margin:2px 0 14px}
+.tabbar{flex:none;height:84px;border-top:1px solid var(--separator);background:var(--surface);display:flex;justify-content:space-around;padding-top:8px}
+.tab{display:flex;flex-direction:column;align-items:center;gap:3px;font-size:11px;color:var(--text3);position:relative;min-width:64px}
+.tab.on{color:var(--primary)}
+.tab svg{width:26px;height:26px}
+.badge-count{position:absolute;top:-2px;right:12px;background:var(--error);color:#fff;font-size:11px;font-weight:600;border-radius:999px;min-width:18px;height:18px;display:grid;place-items:center;padding:0 5px}
+:root[data-theme="dark"] .badge-count{color:#14162B}
+
+/* 카드 */
+.card{background:var(--surface);border-radius:16px;box-shadow:var(--shadow-card);border:1px solid var(--card-border);padding:16px;margin-bottom:16px}
+.ready h3{font-size:15px;font-weight:600;display:flex;justify-content:space-between;color:var(--text2)}
+.ready ul{list-style:none;margin-top:10px;display:grid;gap:8px;font-size:16px}
+.ready li{display:flex;align-items:center;gap:10px;min-height:28px}
+.dot-ok{width:22px;height:22px;border-radius:50%;background:var(--mint);display:grid;place-items:center;color:var(--on-accent);font-size:13px;font-weight:700}
+.dot-todo{width:22px;height:22px;border-radius:50%;border:2px solid var(--field-border)}
+.ready li .go{margin-left:auto;color:var(--text3)}
+.party{display:flex;gap:12px;align-items:center}
+.pbadge{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;font-weight:700;font-size:19px;color:var(--on-accent);flex:none}
+.party h2{font-size:20px;font-weight:600;letter-spacing:-.01em}
+.party p{font-size:15px;color:var(--text2);margin-top:2px}
+.next{border-top:1px solid var(--separator);margin-top:14px;padding-top:12px;font-size:15px;display:flex;align-items:center;gap:8px}
+.next .pip{width:8px;height:8px;border-radius:50%;background:var(--primary)}
+.next .chev{margin-left:auto;color:var(--text3)}
+.next .tz{color:var(--text3);font-size:12px;font-weight:500}
+
+/* 결과 */
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px;align-items:center}
+.chip{background:var(--surface);border:1px solid var(--separator);border-radius:999px;padding:7px 12px;font-size:15px;color:var(--text1);min-height:36px;display:inline-flex;align-items:center}
+.chip.edit{border:0;background:transparent;color:var(--primary-ink)}
+.date-h{font-size:22px;font-weight:700;margin:4px 2px 10px;display:flex;align-items:center;gap:8px;position:relative}
+.slots{padding:0;overflow:hidden}
+.slot{display:flex;align-items:baseline;gap:10px;padding:14px 16px;min-height:56px;border-bottom:1px solid var(--separator);position:relative}
+.slot:last-child{border-bottom:0}
+.slot .t{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.slot .tz{font-size:12px;color:var(--text3);font-weight:500;margin-left:auto}
+.slot .chev{color:var(--text3);font-size:18px}
+.slot.sel{background:color-mix(in srgb,var(--sky) 12%,var(--surface))}
+.slot.sel::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--sky)}
+.spark{position:absolute;right:6px;bottom:-4px;width:30px;height:24px}
+.valid{font-size:12px;color:var(--text3);margin:2px 4px 0}
+.zone-note{font-size:13px;color:var(--text2);margin:-6px 2px 14px}
+
+/* 제안 */
+.p-title{font-size:28px;font-weight:700;letter-spacing:-.02em;margin-bottom:6px}
+.p-time{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
+.p-time .tz{font-size:12px;color:var(--text3);font-weight:500;margin-left:6px}
+.p-meta{font-size:15px;color:var(--text2);margin-top:6px;display:flex;align-items:center;gap:6px}
+.due{display:inline-flex;align-items:center;gap:6px;background:var(--warning-tint);color:var(--sunny-ink);border-radius:8px;padding:5px 10px;font-size:13px;font-weight:600;margin:12px 0 16px}
+.my h3{font-size:15px;color:var(--text2);font-weight:600;margin-bottom:10px}
+.seg{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.btn{border:0;border-radius:12px;min-height:50px;font:inherit;font-size:17px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:6px}
+.btn.primary{background:var(--primary);color:var(--on-primary);box-shadow:var(--shadow-raised)}
+.btn.secondary{background:var(--primary-tint);color:var(--primary-ink)}
+.resp-h{display:flex;justify-content:space-between;align-items:baseline;margin:6px 2px 8px}
+.resp-h h3{font-size:17px;font-weight:600}
+.resp-h span{font-size:13px;color:var(--text3)}
+.member{display:flex;align-items:center;gap:12px;min-height:48px;border-bottom:1px solid var(--separator)}
+.member:last-child{border-bottom:0}
+.avatar{width:28px;height:28px;border-radius:50%;background:var(--primary-tint);color:var(--primary-ink);display:grid;place-items:center;font-size:14px;font-weight:700;flex:none}
+.avatar.me{box-shadow:0 0 0 2px var(--primary)}
+.member .name{font-size:16px}
+.member .name small{color:var(--text3);font-size:13px;margin-left:4px}
+.rb{margin-left:auto;display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:600;border-radius:999px;padding:4px 10px}
+.rb.ok{color:var(--mint-ink);background:var(--success-tint)}
+.rb.maybe{color:var(--sunny-ink);background:var(--warning-tint)}
+.rb.wait{color:var(--text3);background:var(--sunken)}
+.danger{color:var(--error);font-size:16px;padding:14px 2px;min-height:44px}
+.linkrow{color:var(--primary-ink);font-size:16px;padding:14px 2px 0;min-height:44px}
+
+.legend{max-width:1240px;margin:36px auto 0;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+.legend .card{margin:0}
+.legend h4{font-size:15px;margin-bottom:8px}
+.legend p,.legend li{font-size:14px;color:var(--text2);line-height:1.5}
+.legend ul{padding-left:18px}
+.swatches{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.sw{width:44px;height:44px;border-radius:12px;border:1px solid var(--separator)}
+@media (max-width:420px){ .phone{height:740px;border-radius:32px} body{padding:20px 16px 40px} }
+@media (prefers-reduced-motion: no-preference){
+  .spark line{stroke-dasharray:10;stroke-dashoffset:10;animation:pop .6s .4s ease-out forwards}
+  @keyframes pop{to{stroke-dashoffset:0}}
+}
+</style>
+</head>
+<body>
+<header class="page">
+  <div>
+    <h1 class="rounded">PlanTogether 화면 시안</h1>
+    <p>디자인 시스템 토큰으로 그린 정적 시안이다. Party 목록, 공통 가능 시간 결과, 제안 응답 세 화면. 결과 화면에는 사람 수·아바타·원인이 없고, 제안 화면에는 설계 7이 공개하는 참여자별 응답이 있다.</p>
+  </div>
+  <div class="toggle" role="group" aria-label="화면 모드">
+    <button type="button" data-set="light" aria-pressed="false">Light</button>
+    <button type="button" data-set="dark" aria-pressed="false">Dark</button>
+  </div>
+</header>
+
+<main class="stage">
+
+<!-- S6 Party 목록 -->
+<figure>
+  <div class="phone" role="img" aria-label="Party 목록 시안">
+    <div class="status"><span>9:41</span><span>●●● ▮</span></div>
+    <div class="screen">
+      <div class="nav"><span></span><span class="icon" aria-hidden="true">＋</span></div>
+      <h1 class="large-title rounded">내 Party</h1>
+
+      <section class="card ready">
+        <h3><span>준비</span><span class="rounded">1/2</span></h3>
+        <ul>
+          <li><span class="dot-ok">✓</span>캘린더 연결</li>
+          <li><span class="dot-todo"></span>활동 시간 정하기<span class="go">›</span></li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <div class="party">
+          <div class="pbadge rounded" style="background:var(--coral)">주</div>
+          <div><h2 class="rounded">주말 등산 모임</h2><p>멤버 4명 · 방장</p></div>
+        </div>
+        <div class="next"><span class="pip"></span>내 응답이 필요한 제안 1개<span class="chev">›</span></div>
+      </section>
+
+      <section class="card">
+        <div class="party">
+          <div class="pbadge rounded" style="background:var(--mint)">스</div>
+          <div><h2 class="rounded">알고리즘 스터디</h2><p>멤버 3명</p></div>
+        </div>
+        <div class="next">11월 2일 (일) 오후 2:00 <span class="tz">GMT+9</span><span class="chev">›</span></div>
+      </section>
+
+      <section class="card">
+        <div class="party">
+          <div class="pbadge rounded" style="background:var(--sunny)">가</div>
+          <div><h2 class="rounded">가족</h2><p>멤버 5명</p></div>
+        </div>
+      </section>
+    </div>
+    <nav class="tabbar" aria-hidden="true">
+      <div class="tab on"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="8" cy="8" r="3.2"/><circle cx="16" cy="8" r="3.2"/><path d="M2 19c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5zM12.5 19c.2-2.2-.6-4-2-5.2 1.6-.8 3.6-.8 5.5-.3 3 .8 4.5 2.8 4.5 5.5z"/></svg>Party</div>
+      <div class="tab"><span class="badge-count">1</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4M9 15.5l2 2 4-4"/></svg>약속</div>
+      <div class="tab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="10" r="3"/><path d="M6.5 18.5c1.2-2 3.2-3 5.5-3s4.3 1 5.5 3"/></svg>나</div>
+    </nav>
+  </div>
+  <figcaption><b>S6 Party 목록</b><br>준비 카드는 본인 상태만. Party 색은 Party ID에서 계산. "다음 할 일" 줄에 다른 멤버의 상태는 없다.</figcaption>
+</figure>
+
+<!-- S15 공통 가능 시간 결과 -->
+<figure>
+  <div class="phone" role="img" aria-label="공통 가능 시간 결과 시안">
+    <div class="status"><span>9:41</span><span>●●● ▮</span></div>
+    <div class="screen">
+      <div class="nav"><span>‹ 주말 등산 모임</span><span></span></div>
+      <h1 class="large-title rounded">모두 가능한 시간</h1>
+      <div class="chips">
+        <span class="chip">14일</span><span class="chip">60분</span><span class="chip">서울 GMT+9</span><span class="chip edit">편집</span>
+      </div>
+
+      <div class="date-h rounded">10월 30일 (목)<svg class="spark" viewBox="0 0 30 24" aria-hidden="true"><g stroke="var(--sunny)" stroke-width="3" stroke-linecap="round"><line x1="6" y1="14" x2="2" y2="10"/><line x1="15" y1="10" x2="15" y2="3"/><line x1="24" y1="14" x2="28" y2="10"/></g></svg></div>
+      <div class="card slots" style="position:relative">
+        <div class="slot sel"><span class="t rounded">오전 10:00 – 11:00</span><span class="tz">GMT+9</span><span class="chev">›</span></div>
+        <div class="slot"><span class="t rounded">오후 2:00 – 3:00</span><span class="tz">GMT+9</span><span class="chev">›</span></div>
+        <div class="slot"><span class="t rounded">오후 7:30 – 8:30</span><span class="tz">GMT+9</span><span class="chev">›</span></div>
+      </div>
+
+      <div class="date-h rounded">10월 31일 (금)</div>
+      <div class="card slots">
+        <div class="slot"><span class="t rounded">오후 6:00 – 7:00</span><span class="tz">GMT+9</span><span class="chev">›</span></div>
+      </div>
+
+      <div class="date-h rounded">11월 1일 (토)</div>
+      <div class="card slots">
+        <div class="slot"><span class="t rounded">오전 9:00 – 10:00</span><span class="tz">GMT+9</span><span class="chev">›</span></div>
+        <div class="slot"><span class="t rounded">오후 1:30 – 2:30</span><span class="tz">GMT+9</span><span class="chev">›</span></div>
+      </div>
+      <p class="valid">오후 3:40까지 유효한 결과입니다.</p>
+    </div>
+    <nav class="tabbar" aria-hidden="true">
+      <div class="tab on"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="8" cy="8" r="3.2"/><circle cx="16" cy="8" r="3.2"/><path d="M2 19c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5zM12.5 19c.2-2.2-.6-4-2-5.2 1.6-.8 3.6-.8 5.5-.3 3 .8 4.5 2.8 4.5 5.5z"/></svg>Party</div>
+      <div class="tab"><span class="badge-count">1</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4M9 15.5l2 2 4-4"/></svg>약속</div>
+      <div class="tab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="10" r="3"/><path d="M6.5 18.5c1.2-2 3.2-3 5.5-3s4.3 1 5.5 3"/></svg>나</div>
+    </nav>
+  </div>
+  <figcaption><b>S15 공통 가능 시간 결과</b><br>날짜별 최대 3개, 지역 시각 + 약식 시간대. 사람 수·아바타·원인 없음. 반짝임은 처음 한 번만(동작 줄이기면 없음). 첫 행은 눌린 상태.</figcaption>
+</figure>
+
+<!-- S17 제안 응답 -->
+<figure>
+  <div class="phone" role="img" aria-label="제안 응답 시안">
+    <div class="status"><span>9:41</span><span>●●● ▮</span></div>
+    <div class="screen">
+      <div class="nav"><span>‹ 주말 등산 모임</span><span></span></div>
+      <h1 class="p-title rounded">저녁 산책</h1>
+      <div class="p-time rounded">10월 31일 (금) 오후 7:00 – 8:00<span class="tz">GMT+9</span></div>
+      <div class="p-meta">📍 한강공원 뚝섬</div>
+      <div class="due" role="note">⏳ 응답 마감까지 1일 3시간</div>
+
+      <section class="card my">
+        <h3>내 응답</h3>
+        <div class="seg">
+          <button class="btn primary" type="button">✓ 수락</button>
+          <button class="btn secondary" type="button">미정</button>
+          <button class="btn secondary" type="button">거절</button>
+        </div>
+      </section>
+
+      <div class="resp-h"><h3>4명 중 2명 수락</h3><span>제안 응답은 멤버 모두에게 보여요</span></div>
+      <section class="card" style="padding:4px 16px">
+        <div class="member"><span class="avatar rounded">민</span><span class="name">민지</span><span class="rb ok">✓ 수락</span></div>
+        <div class="member"><span class="avatar rounded">지</span><span class="name">지호<small>제안자</small></span><span class="rb ok">✓ 수락</span></div>
+        <div class="member"><span class="avatar rounded">서</span><span class="name">서연</span><span class="rb maybe">? 미정</span></div>
+        <div class="member"><span class="avatar rounded me">나</span><span class="name">나</span><span class="rb wait">… 응답 전</span></div>
+      </section>
+      <div class="linkrow">다시 제안하기 ›</div>
+      <div class="danger">제안 취소</div>
+    </div>
+    <nav class="tabbar" aria-hidden="true">
+      <div class="tab on"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="8" cy="8" r="3.2"/><circle cx="16" cy="8" r="3.2"/><path d="M2 19c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5zM12.5 19c.2-2.2-.6-4-2-5.2 1.6-.8 3.6-.8 5.5-.3 3 .8 4.5 2.8 4.5 5.5z"/></svg>Party</div>
+      <div class="tab"><span class="badge-count">1</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4M9 15.5l2 2 4-4"/></svg>약속</div>
+      <div class="tab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="10" r="3"/><path d="M6.5 18.5c1.2-2 3.2-3 5.5-3s4.3 1 5.5 3"/></svg>나</div>
+    </nav>
+  </div>
+  <figcaption><b>S17 제안 응답 (open)</b><br>참여자별 응답과 수는 설계 7 §9.1이 공개하는 협업 데이터다. 캘린더·공개 수준·충돌 원인은 없다. 이 시안의 "제안 취소"는 생성자·방장일 때만 보인다.</figcaption>
+</figure>
+
+</main>
+
+<section class="legend">
+  <div class="card">
+    <h4>Accent (아이콘의 네 손)</h4>
+    <p>면·배지·일러스트에만. 위 글자는 짙은 남색.</p>
+    <div class="swatches"><span class="sw" style="background:var(--coral)"></span><span class="sw" style="background:var(--sunny)"></span><span class="sw" style="background:var(--mint)"></span><span class="sw" style="background:var(--sky)"></span><span class="sw" style="background:linear-gradient(135deg,#2DA0FD,#3A5BF0 50%,#6B4BF6)"></span></div>
+  </div>
+  <div class="card">
+    <h4>결과 화면 금지</h4>
+    <ul><li>4/5명 가능 같은 사람 수</li><li>멤버 아바타·이름</li><li>누가·왜 안 되는지</li></ul>
+  </div>
+  <div class="card">
+    <h4>제안 화면 허용</h4>
+    <ul><li>참여자별 응답과 수락 수</li><li>모노그램 아바타(모두 같은 색)</li><li>충돌 원인은 여전히 금지</li></ul>
+  </div>
+</section>
+
+<script>
+(function(){
+  var root=document.documentElement, btns=document.querySelectorAll('.toggle button');
+  function current(){ var t=root.getAttribute('data-theme'); if(t) return t; return matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'; }
+  function paint(){ var c=current(); btns.forEach(function(b){ b.setAttribute('aria-pressed', String(b.dataset.set===c)); }); }
+  var q=(location.search.match(/theme=(light|dark)/)||[])[1];
+  try{ var saved=q||localStorage.getItem('pt-theme'); if(saved) root.setAttribute('data-theme',saved); }catch(e){ if(q) root.setAttribute('data-theme',q); }
+  btns.forEach(function(b){ b.addEventListener('click',function(){ root.setAttribute('data-theme',b.dataset.set); try{localStorage.setItem('pt-theme',b.dataset.set);}catch(e){} paint(); }); });
+  paint();
+})();
+</script>
+</body>
+</html>
