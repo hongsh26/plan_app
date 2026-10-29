@@ -29,6 +29,7 @@ A="$(udid "$A_NAME")"; B="$(udid "$B_NAME")"
 
 xcodegen generate >/dev/null
 DERIVED="$(mktemp -d)"
+trap 'rm -rf "$DERIVED"' EXIT   # 설치 뒤에는 필요 없다
 xcodebuild -project PlanTogether.xcodeproj -scheme PlanTogether -configuration Debug \
   -destination "platform=iOS Simulator,id=$A" -derivedDataPath "$DERIVED" build -quiet
 APP="$DERIVED/Build/Products/Debug-iphonesimulator/PlanTogether.app"
